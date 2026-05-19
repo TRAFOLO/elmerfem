@@ -41,6 +41,145 @@
 ! *****************************************************************************/
  
 !------------------------------------------------------------------------------
+!> Slice 2: per-Component state for the transient-homogenization skin-effect
+!> ladder (Gyselinck / Sabariego). Stored in a small module so both
+!> CircuitsAndDynamics (assembles the circuit matrix) and CircuitsOutput
+!> (updates xi_S after the A-V solve converges) can share it.
+!>
+!> Hardcoded for n_ladder = 1 (single scalar xi_S per Component). For n > 1
+!> these arrays would become (max_n_ladder, n_components) and the BDF-1
+!> Schur reduction would need a full M_sigma factorization per Component
+!> per timestep — same pattern as the proximity-side ladder in WhitneyAVSolver.
+!------------------------------------------------------------------------------
+MODULE TransientHomogCircuitState
+  USE Types
+  USE DefUtils
+  USE CircuitUtils
+  IMPLICIT NONE
+  PUBLIC
+
+  ! Per-Component fit triplet (read once at init from each Component).
+  REAL(KIND=dp), ALLOCATABLE, SAVE :: y0_sigma(:), alpha_sigma(:), sigma_sigma(:)
+
+  ! Per-Component BDF-1 derived quantities, recomputed when dt changes.
+  REAL(KIND=dp), ALLOCATABLE, SAVE :: G_skin(:)        ! y0 + alpha * mk_inv
+  REAL(KIND=dp), ALLOCATABLE, SAVE :: v_hist_coeff(:)  ! alpha * mk_inv * (sigma/dt)
+
+  ! Per-Component auxiliary ladder state xi_S^n (scalar, n_ladder = 1).
+  REAL(KIND=dp), ALLOCATABLE, SAVE :: xi_S(:)
+
+  ! Per-Component flag: True iff Coil Type = stranded AND Homogenization Model
+  ! = True AND Transient Homogenization = True. Set once at SIF parse time.
+  LOGICAL, ALLOCATABLE, SAVE :: has_skin_ladder(:)
+
+  REAL(KIND=dp), SAVE :: cached_dt = -1.0_dp
+  LOGICAL, SAVE       :: state_allocated = .FALSE.
+
+CONTAINS
+
+  !----------------------------------------------------------------------------
+  ! One-time allocation + per-Component SIF triplet read. Called from
+  ! CircuitsAndDynamics inside its First block, after the Components are
+  ! populated by ReadComponents.
+  !----------------------------------------------------------------------------
+  SUBROUTINE InitSkinLadderState()
+    IMPLICIT NONE
+    INTEGER :: i, n_comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    LOGICAL :: found
+    CHARACTER(LEN=MAX_NAME_LEN) :: ctype
+    REAL(KIND=dp) :: SigmaMat(1, 1)
+
+    IF (state_allocated) RETURN
+
+    n_comp = CurrentModel % NumberOfComponents
+    IF (n_comp <= 0) RETURN
+
+    ALLOCATE(y0_sigma(n_comp), alpha_sigma(n_comp), sigma_sigma(n_comp), &
+             G_skin(n_comp), v_hist_coeff(n_comp), xi_S(n_comp), &
+             has_skin_ladder(n_comp))
+    y0_sigma        = 0.0_dp
+    alpha_sigma     = 0.0_dp
+    sigma_sigma     = 0.0_dp
+    G_skin          = 0.0_dp
+    v_hist_coeff    = 0.0_dp
+    xi_S            = 0.0_dp
+    has_skin_ladder = .FALSE.
+
+    DO i = 1, n_comp
+      CompParams => CurrentModel % Components(i) % Values
+      IF (.NOT. ASSOCIATED(CompParams)) CYCLE
+
+      ctype = ListGetString(CompParams, 'Coil Type', found)
+      IF (.NOT. found) CYCLE
+      IF (TRIM(ctype) /= 'stranded') CYCLE
+      IF (.NOT. (GetLogical(CompParams, 'Homogenization Model', found) .AND. found)) CYCLE
+      IF (.NOT. (GetLogical(CompParams, 'Transient Homogenization', found) .AND. found)) CYCLE
+
+      ! Hard-fail on missing keywords (matches the proximity-side behavior
+      ! in WhitneyAVSolver - silent DC fallbacks mask Python emitter bugs).
+      CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
+                                             y0_sigma(i), alpha_sigma(i), SigmaMat)
+      sigma_sigma(i)     = SigmaMat(1, 1)
+      has_skin_ladder(i) = .TRUE.
+    END DO
+
+    state_allocated = .TRUE.
+  END SUBROUTINE InitSkinLadderState
+
+  !----------------------------------------------------------------------------
+  ! BDF-1 Schur reduction of the n_ladder = 1 skin ladder:
+  !   M = 1 + sigma/dt
+  !   G_skin       = y0 + alpha / M
+  !   v_hist_coeff = alpha * (sigma/dt) / M
+  ! v_hist(t^n) = v_hist_coeff * xi_S^n is added to the Component voltage
+  ! equation RHS (sign sets sign of feed-through).
+  !----------------------------------------------------------------------------
+  SUBROUTINE RecomputeSkinLadderForDt(dt)
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: dt
+    INTEGER :: i
+    REAL(KIND=dp) :: M, mk_inv, sd
+
+    IF (.NOT. state_allocated) RETURN
+    IF (dt <= 0.0_dp) RETURN
+
+    DO i = 1, SIZE(G_skin)
+      IF (.NOT. has_skin_ladder(i)) CYCLE
+      sd     = sigma_sigma(i) / dt
+      M      = 1.0_dp + sd
+      mk_inv = 1.0_dp / M
+      G_skin(i)       = y0_sigma(i)    + alpha_sigma(i) * mk_inv
+      v_hist_coeff(i) = alpha_sigma(i) * mk_inv * sd
+    END DO
+  END SUBROUTINE RecomputeSkinLadderForDt
+
+  !----------------------------------------------------------------------------
+  ! BDF-1 advance of the ladder state, called from CircuitsOutput once
+  ! WhitneyAVSolver has converged so i_S^{n+1} is available.
+  !   xi_S^{n+1} = (i_S^{n+1} + (sigma/dt) * xi_S^n) / M
+  !----------------------------------------------------------------------------
+  SUBROUTINE AdvanceXiS(comp_id, i_S_new, dt)
+    IMPLICIT NONE
+    INTEGER,       INTENT(IN) :: comp_id
+    REAL(KIND=dp), INTENT(IN) :: i_S_new, dt
+    REAL(KIND=dp) :: M, sd
+
+    IF (.NOT. state_allocated) RETURN
+    IF (comp_id < 1 .OR. comp_id > SIZE(xi_S)) RETURN
+    IF (.NOT. has_skin_ladder(comp_id)) RETURN
+    IF (dt <= 0.0_dp) RETURN
+
+    sd          = sigma_sigma(comp_id) / dt
+    M           = 1.0_dp + sd
+    xi_S(comp_id) = (i_S_new + sd * xi_S(comp_id)) / M
+  END SUBROUTINE AdvanceXiS
+
+END MODULE TransientHomogCircuitState
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
 !> Initialization for the primary solver: CurrentSource
 !------------------------------------------------------------------------------
 SUBROUTINE CircuitsAndDynamics_init( Model,Solver,dt,TransientSimulation )
@@ -101,6 +240,7 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   USE CircuitsMod
   USE CircMatInitMod
   USE MGDynMaterialUtils
+  USE TransientHomogCircuitState
   IMPLICIT NONE
 !------------------------------------------------------------------------------
   TYPE(Solver_t) :: Solver       !< Linear & nonlinear equation solver options
@@ -219,7 +359,12 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
 
     CALL CheckComponentVariables()
 
-    
+    ! Slice 2: allocate skin-effect ladder state (one scalar per Component).
+    ! Reads (y0, alpha, sigma) for 'Sigma 33' from every Component that has
+    ! both Homogenization Model and Transient Homogenization set to True; flags
+    ! the rest as has_skin_ladder = False. Hard-fail on missing keywords.
+    CALL InitSkinLadderState()
+
     ! Create CRS matrix structures for the circuit equations:
     ! ------------------------------------------------------
     CALL Circuits_MatrixInit()
@@ -235,6 +380,15 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
       
   IF (Tstep /= GetTimestep()) THEN
     Tstep = GetTimestep()
+
+    ! Slice 2: recompute Schur-eliminated G_skin and history coefficient if dt
+    ! changed (covers adaptive timestepping; in a fixed-dt run this fires only
+    ! the first time it's called).
+    IF (state_allocated .AND. dt /= cached_dt) THEN
+      CALL RecomputeSkinLadderForDt(dt)
+      cached_dt = dt
+    END IF
+
     ! Circuit variable values from previous timestep:
     ! -----------------------------------------------
     Crt = 0._dp
@@ -533,6 +687,17 @@ CONTAINS
           END SELECT
         END IF
       END DO
+
+      ! Slice 2 (n=1, conductivity convention): no v_hist RHS term.
+      ! The (y0, alpha, sigma) triplet is fitted as a frequency-dependent
+      ! CONDUCTIVITY (S/m), matching Elmer's existing 'Sigma 33' keyword,
+      ! and enters the lumped resistance via localC = G_skin replacing the
+      ! constant DC sigma in Add_stranded. The xi_S history term in the plan
+      ! is for the IMPEDANCE-form ladder; in the conductivity form, n=1
+      ! collapses cleanly to a per-step scalar G_skin substitution and the
+      ! ladder memory is implicit in how G_skin depends on dt. For n>1 we'd
+      ! need either a proper impedance fit OR additional global circuit DOFs;
+      ! see plan section 7 unit/convention callout.
     END DO
 
     IF( Parallel ) THEN
@@ -700,18 +865,31 @@ CONTAINS
         END IF
       END SELECT
 
-      localC = SUM(Tcoef(1,1,1:nn) * Basis(1:nn))
-      
+      ! Slice 2: for Components flagged Transient Homogenization, replace the
+      ! material conductivity at this IP with the BDF-1 Schur-eliminated
+      ! G_skin (= y0 + alpha / (1 + sigma/dt)) computed once per timestep in
+      ! RecomputeSkinLadderForDt. This makes the lumped coil resistance R
+      ! frequency-dependent (via dt) instead of the static DC sigma.
+      IF (state_allocated) THEN
+        IF (has_skin_ladder(Comp % ComponentId)) THEN
+          localC = G_skin(Comp % ComponentId)
+        ELSE
+          localC = SUM(Tcoef(1,1,1:nn) * Basis(1:nn))
+        END IF
+      ELSE
+        localC = SUM(Tcoef(1,1,1:nn) * Basis(1:nn))
+      END IF
+
       IF (.NOT. Comp % UseCoilResistance) THEN
-        ! I * R, where 
+        ! I * R, where
         ! R = (1/sigma * js,js):
         ! ----------------------
         localR = Comp % N_j **2 * IP % s(t)*detJ*SUM(w*w)/localC*circ_eq_coeff / Comp % VoltageFactor
         Comp % Resistance = Comp % Resistance + localR
-      
+
         CALL AddToMatrixElement(CM, VvarId, IvarId, localR)
       END IF
-      
+
       DO j=1,ncdofs
         q=j
         IF (dim == 3) q=q+nn
@@ -2556,6 +2734,7 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
    USE DefUtils
    USE CircuitUtils
    USE CircuitsMod
+   USE TransientHomogCircuitState
    IMPLICIT NONE
 !------------------------------------------------------------------------------   
    TYPE(Model_t) :: Model
@@ -2770,9 +2949,13 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
            i2s(Comp % ComponentId)//')', Comp % Resistance, Level=8) 
 
          Current = 0._dp + im * 0._dp
-         Current = crt(Comp % ivar % ValueId) 
-         IF ( Circuits(p) % Harmonic ) Current = Current + im * crt(Comp % ivar % ImValueId) 
-              
+         Current = crt(Comp % ivar % ValueId)
+         IF ( Circuits(p) % Harmonic ) Current = Current + im * crt(Comp % ivar % ImValueId)
+
+         ! Slice 2 (n=1 conductivity-form): nothing to advance per-step.
+         ! xi_S would only be needed for n>1 ladder OR an impedance-form fit;
+         ! see TransientHomogCircuitState comments and plan section 7.
+
          CompParams => CurrentModel % Components (Comp % ComponentId) % Values
          IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal ('CircuitsOutput', &
            'Component parameters not found!')
