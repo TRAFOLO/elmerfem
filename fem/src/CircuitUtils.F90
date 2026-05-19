@@ -464,6 +464,66 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+! Read one transient-homogenization ladder triplet (y0, alpha, Sigma) attached
+! to a Component. The SIF keywords are
+!     <name> y0          = Real ...
+!     <name> alpha       = Real ...
+!     <name> Sigma(n,n)  = Real ...
+! where <name> is one of "Nu 11", "Nu 22", "Sigma 33". Hard-fails on any
+! missing keyword; that's deliberate — silent DC fallbacks mask Python emitter
+! bugs.
+!------------------------------------------------------------------------------
+  SUBROUTINE GetTransientHomogenizationLadder(CompParams, name, n_ladder, y0, alpha, SigmaMat)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    CHARACTER(*), INTENT(IN)   :: name
+    INTEGER, INTENT(IN)        :: n_ladder
+    REAL(KIND=dp), INTENT(OUT) :: y0, alpha
+    REAL(KIND=dp), INTENT(OUT) :: SigmaMat(n_ladder, n_ladder)
+
+    LOGICAL :: Found
+    INTEGER :: i, j, DummyNodeIdx(1)
+    REAL(KIND=dp), POINTER :: Hwrk(:,:,:)
+    CHARACTER(LEN=:), ALLOCATABLE :: key
+!------------------------------------------------------------------------------
+    IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal('GetTransientHomogenizationLadder', &
+        'Component parameters not associated when reading "' // TRIM(name) // '"')
+
+    key = TRIM(name) // ' y0'
+    y0 = GetConstReal(CompParams, key, Found)
+    IF (.NOT. Found) CALL Fatal('GetTransientHomogenizationLadder', &
+        'Missing keyword "' // key // '" on Component (required when Transient Homogenization = True)')
+
+    key = TRIM(name) // ' alpha'
+    alpha = GetConstReal(CompParams, key, Found)
+    IF (.NOT. Found) CALL Fatal('GetTransientHomogenizationLadder', &
+        'Missing keyword "' // key // '" on Component (required when Transient Homogenization = True)')
+
+    key = TRIM(name) // ' Sigma'
+    Hwrk => NULL()
+    DummyNodeIdx = 1
+    CALL ListGetRealArray(CompParams, key, Hwrk, 1, DummyNodeIdx, Found)
+    IF (.NOT. Found) CALL Fatal('GetTransientHomogenizationLadder', &
+        'Missing keyword "' // key // '(n,n)" on Component (required when Transient Homogenization = True)')
+
+    IF (SIZE(Hwrk, 1) /= n_ladder .OR. SIZE(Hwrk, 2) /= n_ladder) THEN
+      CALL Fatal('GetTransientHomogenizationLadder', &
+          '"' // key // '" matrix shape does not match Homogenization Ladder Order')
+    END IF
+
+    DO i = 1, n_ladder
+      DO j = 1, n_ladder
+        SigmaMat(i, j) = Hwrk(i, j, 1)
+      END DO
+    END DO
+
+    IF (ASSOCIATED(Hwrk)) DEALLOCATE(Hwrk)
+!------------------------------------------------------------------------------
+  END SUBROUTINE GetTransientHomogenizationLadder
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
   FUNCTION FindSolverWithKey(key) RESULT (Solver)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
