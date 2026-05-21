@@ -80,7 +80,9 @@
 
 #include "../config.h"
 
+#ifdef HAVE_UMFPACK
 #include "umfpack.h"
+#endif
 
 #if !defined(SuiteSparse_long)
 #define SuiteSparse_long long
