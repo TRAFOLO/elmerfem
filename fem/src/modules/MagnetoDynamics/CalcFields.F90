@@ -697,6 +697,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    CHARACTER(LEN=MAX_NAME_LEN) :: FluxLinkCurName
    TYPE(VariableHandle_t), SAVE :: Wvec_h
    TYPE(VariableHandle_t), SAVE :: FLCur_h
+   ! Flux-linkage normalization (Psi = N_turns * Int(A.J) / |Int(J.gradW)|):
+   LOGICAL :: NormalizeFluxLinkage
+   CHARACTER(LEN=MAX_NAME_LEN) :: FluxLinkPotName
+   TYPE(Variable_t), POINTER :: FLWvar => NULL()
+   REAL(KIND=dp), ALLOCATABLE :: ComponentFluxLinkageCur(:), WlocFL(:)
    INTEGER, POINTER, SAVE :: SetPerm(:) => NULL()
    LOGICAL :: LayerBC, CircuitDrivenBC
    REAL(KIND=dp) :: SurfPower
@@ -1016,6 +1021,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
    CalculateFluxLinkage = ListGetLogical( SolverParams,'Calculate Flux Linkage', Found )
    FluxLinkUseCur=.FALSE.
+   NormalizeFluxLinkage=.FALSE.
    IF (CalculateFluxLinkage) THEN
      IF (.NOT. ((ASSOCIATED(VP).OR.ASSOCIATED(EL_VP)).AND.(ASSOCIATED(CD).OR.ASSOCIATED(EL_CD)))) &
        CALL Warn('CalcFields','Calculate Flux Linkage requested but Vector Potential and/or Current Density missing!')
@@ -1026,6 +1032,26 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      IF ( FluxLinkUseCur ) THEN
        IF ( FLCurInitHandle ) CALL ListInitElementVariable( FLCur_h, FluxLinkCurName )
        FLCurInitHandle=.FALSE.
+     END IF
+
+     ! Normalize Int(A.J) by the (virtual or real) coil current to get the true
+     ! flux linkage Psi, giving a column of the flux-linkage matrix per run. The
+     ! current is recovered via the W-potential identity Int(J.gradW) = amp-turns,
+     ! which holds for any current scaling and for un-driven coils alike.
+     NormalizeFluxLinkage = ListGetLogical( SolverParams,'Normalize Flux Linkage', Found )
+     IF ( NormalizeFluxLinkage ) THEN
+       ALLOCATE( ComponentFluxLinkageCur( Model % NumberOfComponents ) )
+       ComponentFluxLinkageCur = 0.0_dp
+       FluxLinkPotName = GetString(SolverParams, 'Flux Linkage Potential Name', Found)
+       IF (.NOT. Found) FluxLinkPotName = 'W'
+       FLWvar => VariableGet( Mesh % Variables, FluxLinkPotName, ThisOnly=.TRUE. )
+       IF (.NOT. ASSOCIATED(FLWvar)) THEN
+         CALL Warn('CalcFields','Normalize Flux Linkage needs potential "'//TRIM(FluxLinkPotName)//&
+             '" - disabling normalization!')
+         NormalizeFluxLinkage = .FALSE.
+       ELSE
+         ALLOCATE( WlocFL( Model % MaxElementNodes ) )
+       END IF
      END IF
    END IF
 
@@ -1206,7 +1232,19 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        IF (Found) CoilBody = .TRUE.
        CircEqVoltageFactor = GetConstReal(CompParams, 'Circuit Equation Voltage Factor', Found)
        IF (.NOT. Found) CircEqVoltageFactor = 1._dp
-     END IF 
+     END IF
+
+     ! Nodal wire potential of this element, used to normalize the flux linkage.
+     IF ( NormalizeFluxLinkage .AND. ASSOCIATED(CompParams) ) THEN
+       BLOCK
+         INTEGER :: iw, pw
+         WlocFL(1:n) = 0.0_dp
+         DO iw=1,n
+           pw = FLWvar % Perm( Element % NodeIndexes(iw) )
+           IF (pw > 0) WlocFL(iw) = FLWvar % Values(pw)
+         END DO
+       END BLOCK
+     END IF
  
      !------------------------------------------------------------------------------
      !  Read conductivity values (might be a tensor)
@@ -2178,22 +2216,31 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                REAL :: virtual_current(3)
                REAL :: electrode_area
                COMPLEX(KIND=dp) :: curdens(3)
+               REAL(KIND=dp) :: jprobe(3), gradWFL(3)
                LOGICAL :: UseVirtualCurrent
                UseVirtualCurrent=.false.
                IF (FluxLinkUseCur) THEN
-                 virtual_current(1:3) = ListGetElementVectorSolution( FLCur_h, Basis, Element, dofs = dim ) 
+                 virtual_current(1:3) = ListGetElementVectorSolution( FLCur_h, Basis, Element, dofs = dim )
                  UseVirtualCurrent=(sum(abs(virtual_current))>0._dp)
                END IF
                use_virtual_current: IF (UseVirtualCurrent) THEN
-                 electrode_area = GetConstReal(CompParams, 'Electrode Area', Found)
-                 IF (.NOT.Found) THEN
-                   CALL warn('CalcFields','Calculate Flux Linkage set true with virtual current but &
-                       & Electrode Area not set - using a factor of 1!')
-                   electrode_area=1
+                 jprobe(1:3) = virtual_current(1:3)
+                 IF (NormalizeFluxLinkage) THEN
+                   ! The probe-current scaling cancels against Int(J.gradW), so no
+                   ! Electrode Area factor is needed (and need not be uniform).
+                   curdens(1:3) = virtual_current(1:3)
+                 ELSE
+                   electrode_area = GetConstReal(CompParams, 'Electrode Area', Found)
+                   IF (.NOT.Found) THEN
+                     CALL warn('CalcFields','Calculate Flux Linkage set true with virtual current but &
+                         & Electrode Area not set - using a factor of 1!')
+                     electrode_area=1
+                   END IF
+                   curdens(1:3) = virtual_current(1:3)/electrode_area
                  END IF
-                 curdens(1:3) = virtual_current(1:3)/electrode_area
                ELSE
                  curdens(1:3) = JatIP(1,1:3) + im*JatIP(2,1:3)
+                 jprobe(1:3) = JatIP(1,1:3)
                END IF use_virtual_current
                CompId = GetComponentId(Element)
                IF (Vdofs == 1) THEN
@@ -2203,10 +2250,23 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                  BLOCK
                    COMPLEX(KIND=dp) :: vecpot(3), fluxlink
                    vecpot(1:3) = VP_ip(1,1:3) + im*VP_ip(2,1:3)
-                   fluxlink = s*Basis(p) * sum(vecpot*conjg(curdens))
+                   ! Phasor flux linkage uses A.J (no conjugate) so Re/Im match
+                   ! V = j*omega*Psi + R*I; the legacy A.conj(J) energy form is
+                   ! kept when not normalizing for backwards compatibility.
+                   IF (NormalizeFluxLinkage) THEN
+                     fluxlink = s*Basis(p) * sum(vecpot*curdens)
+                   ELSE
+                     fluxlink = s*Basis(p) * sum(vecpot*conjg(curdens))
+                   END IF
                    ComponentFluxLinkage(1,CompId)=ComponentFluxLinkage(1,CompId)+REAL(fluxlink)
                    ComponentFluxLinkage(2,CompId)=ComponentFluxLinkage(2,CompId)+AIMAG(fluxlink)
                  END BLOCK
+               END IF
+               ! Accumulate amp-turns of the probe current: Int(J.gradW) = N*I.
+               IF (NormalizeFluxLinkage) THEN
+                 gradWFL(1:3) = MATMUL(WlocFL(1:n), dBasisdx(1:n,1:3))
+                 ComponentFluxLinkageCur(CompId) = ComponentFluxLinkageCur(CompId) + &
+                   s * Basis(p) * SUM(jprobe(1:3)*gradWFL(1:3))
                END IF
              END Block
            END IF 
@@ -2689,6 +2749,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          ComponentFluxLinkage(1,i) = ParallelReduction(ComponentFluxLinkage(1,i)) / NoSlices
          ComponentFluxLinkage(2,i) = ParallelReduction(ComponentFluxLinkage(2,i)) / NoSlices
        END DO
+       IF (NormalizeFluxLinkage) THEN
+         DO i=1,Model % NumberOfComponents
+           ComponentFluxLinkageCur(i) = ParallelReduction(ComponentFluxLinkageCur(i)) / NoSlices
+         END DO
+       END IF
      END IF
    END IF
 
@@ -2798,6 +2863,23 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    IF (CalculateFluxLinkage) THEN
      DO j=1,Model % NumberOfComponents
        CompParams => Model % Components(j) % Values
+       IF (NormalizeFluxLinkage) THEN
+         BLOCK
+           REAL(KIND=dp) :: Inorm, Nturns
+           LOGICAL :: lfound
+           ! Int(J.gradW) = N*I (amp-turns); Psi = N_turns * Int(A.J) / |N*I|.
+           Inorm = ABS( ComponentFluxLinkageCur(j) )
+           Nturns = GetConstReal( CompParams,'Number of Turns', lfound )
+           IF (.NOT. lfound) Nturns = 1.0_dp
+           CALL ListAddConstReal( CompParams,'res: Flux Linkage Current', ComponentFluxLinkageCur(j) )
+           IF (Inorm > AEPS) THEN
+             ComponentFluxLinkage(:,j) = Nturns * ComponentFluxLinkage(:,j) / Inorm
+           ELSE
+             CALL Warn('CalcFields','Vanishing probe current for component '//I2S(j)//&
+                 ' - flux linkage left un-normalized!')
+           END IF
+         END BLOCK
+       END IF
        IF( vdofs == 1 ) THEN
          CALL ListAddConstReal( CompParams,'res: Flux Linkage',ComponentFluxLinkage(1,j) )
        ELSE
@@ -2806,6 +2888,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        END IF
      END DO
      DEALLOCATE( ComponentFluxLinkage )
+     IF (ALLOCATED(ComponentFluxLinkageCur)) DEALLOCATE( ComponentFluxLinkageCur )
+     IF (ALLOCATED(WlocFL)) DEALLOCATE( WlocFL )
    END IF
 
    IF (GetLogical(SolverParams,'Show Angular Frequency',Found)) THEN
