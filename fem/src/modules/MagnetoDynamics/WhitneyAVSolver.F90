@@ -412,12 +412,40 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   TYPE(Matrix_t), POINTER :: PrecMat
   TYPE(Solver_t), POINTER :: PrecSolver
   INTEGER :: PrecI
-  
+
+  ! Transient winding homogenization (Gyselinck/Sabariego ladder).
+  ! Active when Component has Coil Type = stranded, Homogenization Model = True,
+  ! AND Transient Homogenization = True. Workspace is sized to the ladder order
+  ! once and reused across elements/timesteps.
+  LOGICAL :: StrandedTransientHomog
+  INTEGER :: HomogLadderOrder, HomogLadderOrder_alloc = 0
+  REAL(KIND=dp) :: y0_nu_11, alpha_nu_11, y0_nu_22, alpha_nu_22, &
+                   nu_eff_alpha, nu_eff_beta, nu_air
+  ! BDF coefficients (variable-dt aware). xi_dot ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1})/bdf_dt.
+  ! BDF-1: a1=1, a2=-1, a3=0, bdf_dt=dt
+  ! BDF-2: a1=(1+2k)/(1+k), a2=-(1+k), a3=k^2/(1+k), bdf_dt=dt with k=dt/dt_prev
+  REAL(KIND=dp) :: bdf_alpha_1, bdf_alpha_2, bdf_alpha_3, bdf_dt
+  REAL(KIND=dp) :: dt_prev = -1.0_dp
+  REAL(KIND=dp), ALLOCATABLE :: Sigma_nu_11(:,:), Sigma_nu_22(:,:), &
+                                Mk_a(:,:), Mk_b(:,:), &
+                                Mk_inv_e1_a(:), Mk_inv_e1_b(:), &
+                                r_alpha_ladder_n(:), r_beta_ladder_n(:), &
+                                r_alpha_ladder_n_1(:), r_beta_ladder_n_1(:), &
+                                xi_alpha_prev2(:), xi_beta_prev2(:)
+  INTEGER, ALLOCATABLE :: Mk_ipiv(:)
+  TYPE(Variable_t), POINTER :: xi_alpha_var => NULL(), xi_beta_var => NULL(), &
+                               prox_loss_var => NULL()
+
   CHARACTER(*), PARAMETER :: Caller = 'WhitneyAVSolver'
-  
+
   SAVE STIFF, LOAD, MASS, DAMP, FORCE, JFixFORCE, JFixVec, Tcoef, GapLength, AirGapMu, &
        Acoef, Cwrk, LamThick, LamCond, Wbase, RotM, AllocationsDone, &
-       Acoef_t, ThinLineCrossect, ThinLineCond, nSTIFF, nFORCE
+       Acoef_t, ThinLineCrossect, ThinLineCond, nSTIFF, nFORCE, &
+       HomogLadderOrder_alloc, Sigma_nu_11, Sigma_nu_22, &
+       Mk_a, Mk_b, Mk_inv_e1_a, Mk_inv_e1_b, Mk_ipiv, &
+       r_alpha_ladder_n, r_beta_ladder_n, r_alpha_ladder_n_1, r_beta_ladder_n_1, &
+       xi_alpha_var, xi_beta_var, xi_alpha_prev2, xi_beta_prev2, &
+       prox_loss_var, dt_prev
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN	
 
@@ -721,6 +749,13 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   END IF
   PrevDT = dt
 
+  ! Slice 1b: advance the transient-homogenization auxiliary state Xi to t^{n+1}
+  ! using the just-converged A^{n+1}. Runs only in transient mode and only if
+  ! the Xi exported variables exist (i.e. some Component had transient homog).
+  IF (Transient .AND. ASSOCIATED(xi_alpha_var) .AND. ASSOCIATED(xi_beta_var)) THEN
+    CALL UpdateTransientHomogXiState()
+  END IF
+
   IF(.NOT. UseTorqueTol) CALL CalculateLumpedParameters()
   
   CoordVar => VariableGet(Mesh % Variables,'Coordinates')
@@ -785,12 +820,37 @@ CONTAINS
   CALL DefaultInitialize()
   IF(ASSOCIATED(PrecMat)) PrecMat % Values = 0.0_dp
   Active = GetNOFActive()
-  
+
   IF( ListCheckPresentAnyMaterial(Model,'Reluctivity Function') ) THEN
     CALL ListInitElementKeyword( mu_h,'Material','Reluctivity Function',&
         EvaluateAtIp=.TRUE.,DummyCount=3)
   END IF
-  
+
+  ! Slice 1b: refuse SIFs with more than one Component that declares
+  ! Transient Homogenization. The module-level Sigma_nu_11 / Mk_inv_e1_a /
+  ! y0_nu / alpha_nu workspace is overwritten per-Component in the per-element
+  ! Schur block but reused globally in UpdateTransientHomogXiState, so a
+  ! second transient-homog Component would silently apply the wrong ladder
+  ! fit to the first Component's elements. Per-Component storage is future
+  ! work; refuse now rather than ship a silent miscompute.
+  IF (Transient .AND. ASSOCIATED(CurrentModel % Components)) THEN
+    BLOCK
+      INTEGER :: c_idx, n_homog
+      TYPE(ValueList_t), POINTER :: cVals
+      LOGICAL :: hHomog, hTrans, fH, fT
+      n_homog = 0
+      DO c_idx = 1, SIZE(CurrentModel % Components)
+        cVals => CurrentModel % Components(c_idx) % Values
+        IF (.NOT. ASSOCIATED(cVals)) CYCLE
+        hHomog = GetLogical(cVals, 'Homogenization Model',     fH)
+        hTrans = GetLogical(cVals, 'Transient Homogenization', fT)
+        IF (fH .AND. hHomog .AND. fT .AND. hTrans) n_homog = n_homog + 1
+      END DO
+      IF (n_homog > 1) CALL Fatal(Caller, &
+          'Multiple Components with Transient Homogenization = True are not yet supported')
+    END BLOCK
+  END IF
+
   PrevMaterial => NULL()
   DO t=1,active
      Element => GetActiveElement(t)
@@ -851,6 +911,7 @@ CONTAINS
      END IF
 
      CoilBody = .FALSE.
+     StrandedTransientHomog = .FALSE.
      CompParams => GetComponentParams( Element )
 
      CoilType = ''
@@ -862,6 +923,16 @@ CONTAINS
          SELECT CASE (CoilType)
          CASE ('stranded')
             CoilBody = .TRUE.
+            ! Detect transient winding homogenization (Gyselinck/Sabariego ladder).
+            ! Gate: requires BOTH Homogenization Model = True (legacy harmonic flag,
+            ! retained as the "this Component is homogenized at all" gate) AND
+            ! Transient Homogenization = True. Both must be set explicitly.
+            IF (GetLogical(CompParams, 'Homogenization Model', Found) .AND. Found) THEN
+              IF (GetLogical(CompParams, 'Transient Homogenization', Found) .AND. Found) THEN
+                StrandedTransientHomog = .TRUE.
+                CALL GetElementRotM(Element, RotM, n)
+              END IF
+            END IF
          CASE ('massive')
             CoilBody = .TRUE.
          CASE ('foil winding')
@@ -872,6 +943,132 @@ CONTAINS
          END SELECT
          ConstraintActive = GetLogical(CompParams, 'Activate Constraint', Found )
        END IF
+     END IF
+
+     IF (StrandedTransientHomog) THEN
+       HomogLadderOrder = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
+       IF (.NOT. Found) CALL Fatal(Caller, &
+           'Homogenization Ladder Order missing on Component (required when Transient Homogenization = True)')
+
+       ! Slice 1b currently supports n_ladder = 1 only. The Schur reduction and
+       ! the -elem Xi storage are dimensioned to HomogLadderOrder, but the IP-loop
+       ! interpolation in LocalMatrix uses r_*_ladder(1)*xi(1) (scalar) rather
+       ! than the full DOT_PRODUCT, and Xi is stored as one scalar per element.
+       ! Generalizing to n > 1 requires (a) extending the -elem Xi variable to
+       ! n components per element, (b) replacing the scalar interpolation with
+       ! DOT_PRODUCT(r_*_ladder, xi_ip_vector), and (c) a vector solve against
+       ! M_k in UpdateTransientHomogXiState (Mk_a/Mk_ipiv are already factored).
+       ! Refuse n > 1 explicitly until that work lands.
+       IF (HomogLadderOrder /= 1) CALL Fatal(Caller, &
+           'Transient Homogenization currently supports Homogenization Ladder Order = 1 only')
+
+       IF (HomogLadderOrder_alloc /= HomogLadderOrder) THEN
+         IF (ALLOCATED(Sigma_nu_11)) DEALLOCATE(Sigma_nu_11, Sigma_nu_22, &
+             Mk_a, Mk_b, Mk_inv_e1_a, Mk_inv_e1_b, Mk_ipiv, &
+             r_alpha_ladder_n, r_beta_ladder_n, &
+             r_alpha_ladder_n_1, r_beta_ladder_n_1)
+         ALLOCATE(Sigma_nu_11(HomogLadderOrder, HomogLadderOrder), &
+                  Sigma_nu_22(HomogLadderOrder, HomogLadderOrder), &
+                  Mk_a(HomogLadderOrder, HomogLadderOrder), &
+                  Mk_b(HomogLadderOrder, HomogLadderOrder), &
+                  Mk_inv_e1_a(HomogLadderOrder), &
+                  Mk_inv_e1_b(HomogLadderOrder), &
+                  Mk_ipiv(HomogLadderOrder), &
+                  r_alpha_ladder_n(HomogLadderOrder), &
+                  r_beta_ladder_n(HomogLadderOrder), &
+                  r_alpha_ladder_n_1(HomogLadderOrder), &
+                  r_beta_ladder_n_1(HomogLadderOrder))
+         HomogLadderOrder_alloc = HomogLadderOrder
+       END IF
+
+       CALL GetTransientHomogenizationLadder(CompParams, 'Nu 11', HomogLadderOrder, &
+                                             y0_nu_11, alpha_nu_11, Sigma_nu_11)
+       CALL GetTransientHomogenizationLadder(CompParams, 'Nu 22', HomogLadderOrder, &
+                                             y0_nu_22, alpha_nu_22, Sigma_nu_22)
+
+       ! BDF coefficients for ODE  sigma * xi_dot + xi = b * e_1.
+       ! Stencil: xi_dot(t^{n+1}) ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1}) / bdf_dt.
+       ! BDF-1: a1=1, a2=-1, a3=0
+       ! BDF-2: variable-dt-aware, k = dt / dt_prev
+       !        a1 = (1 + 2k) / (1 + k)
+       !        a2 = -(1 + k)
+       !        a3 = k^2 / (1 + k)
+       ! Fall back to BDF-1 when Solver Order < 2, on the first two timesteps
+       ! (no xi^{n-1} available), or when dt_prev hasn't been recorded yet.
+       BLOCK
+         REAL(KIND=dp) :: k_ratio
+         IF (Solver % Order < 2 .OR. GetTimeStep() <= 2 .OR. dt_prev <= 0.0_dp) THEN
+           bdf_alpha_1 =  1.0_dp
+           bdf_alpha_2 = -1.0_dp
+           bdf_alpha_3 =  0.0_dp
+         ELSE
+           k_ratio     = dt / dt_prev
+           bdf_alpha_1 = (1.0_dp + 2.0_dp * k_ratio) / (1.0_dp + k_ratio)
+           bdf_alpha_2 = -(1.0_dp + k_ratio)
+           bdf_alpha_3 = (k_ratio * k_ratio) / (1.0_dp + k_ratio)
+         END IF
+         bdf_dt = dt
+       END BLOCK
+
+       ! Schur-eliminated effective reluctivity (plan eq. 7-8) generalized
+       ! to BDF-2:
+       !   M_k = I + (a1/dt) * Sigma_k
+       !   nu_eff_k = y0_k + alpha_k * e1^T M_k^{-1} e1
+       Mk_a = (bdf_alpha_1 / bdf_dt) * Sigma_nu_11
+       Mk_b = (bdf_alpha_1 / bdf_dt) * Sigma_nu_22
+       DO i = 1, HomogLadderOrder
+         Mk_a(i, i) = Mk_a(i, i) + 1.0_dp
+         Mk_b(i, i) = Mk_b(i, i) + 1.0_dp
+       END DO
+       Mk_inv_e1_a = 0.0_dp ;  Mk_inv_e1_a(1) = 1.0_dp
+       Mk_inv_e1_b = 0.0_dp ;  Mk_inv_e1_b(1) = 1.0_dp
+       CALL DGESV(HomogLadderOrder, 1, Mk_a, HomogLadderOrder, Mk_ipiv, &
+                  Mk_inv_e1_a, HomogLadderOrder, istat)
+       IF (istat /= 0) CALL Fatal(Caller, &
+           'DGESV failed solving M_k * x = e_1 for Nu 11 ladder')
+       CALL DGESV(HomogLadderOrder, 1, Mk_b, HomogLadderOrder, Mk_ipiv, &
+                  Mk_inv_e1_b, HomogLadderOrder, istat)
+       IF (istat /= 0) CALL Fatal(Caller, &
+           'DGESV failed solving M_k * x = e_1 for Nu 22 ladder')
+
+       nu_eff_alpha = y0_nu_11 + alpha_nu_11 * Mk_inv_e1_a(1)
+       nu_eff_beta  = y0_nu_22 + alpha_nu_22 * Mk_inv_e1_b(1)
+       nu_air = 1.0_dp / (PI * 4.0e-7_dp)
+
+       ! Two history-term coefficients for the Schur form
+       !   h_hist^n = alpha_k * [ r_n . xi^n + r_{n-1} . xi^{n-1} ]
+       ! where
+       !   r_n     = (-a2/dt) * Sigma_k * M_k^{-1} * e_1
+       !   r_{n-1} = (-a3/dt) * Sigma_k * M_k^{-1} * e_1
+       ! For BDF-1 (a3=0): r_{n-1} is identically 0, so the second term
+       ! contributes nothing and the BDF-1 code path is unchanged.
+       r_alpha_ladder_n   = MATMUL(Sigma_nu_11, Mk_inv_e1_a) * (-bdf_alpha_2 / bdf_dt)
+       r_beta_ladder_n    = MATMUL(Sigma_nu_22, Mk_inv_e1_b) * (-bdf_alpha_2 / bdf_dt)
+       r_alpha_ladder_n_1 = MATMUL(Sigma_nu_11, Mk_inv_e1_a) * (-bdf_alpha_3 / bdf_dt)
+       r_beta_ladder_n_1  = MATMUL(Sigma_nu_22, Mk_inv_e1_b) * (-bdf_alpha_3 / bdf_dt)
+
+       ! Locate Xi exported variables (declared by the SIF as
+       ! `Exported Variable N = -elem Xi Alpha` / `Xi Beta`).
+       ! Storage is DG-0: one scalar per element, keyed by ElementIndex.
+       ! Multi-DOF (n_ladder > 1) per element is not yet supported here.
+       IF (.NOT. ASSOCIATED(xi_alpha_var)) &
+           xi_alpha_var => VariableGet(Solver % Mesh % Variables, 'Xi Alpha')
+       IF (.NOT. ASSOCIATED(xi_beta_var)) &
+           xi_beta_var => VariableGet(Solver % Mesh % Variables, 'Xi Beta')
+       IF (.NOT. ASSOCIATED(xi_alpha_var) .OR. .NOT. ASSOCIATED(xi_beta_var)) &
+           CALL Fatal(Caller, 'Transient Homogenization requires Xi Alpha and Xi Beta as Exported Variables on this solver')
+       IF (xi_alpha_var % DOFs /= 1 .OR. xi_beta_var % DOFs /= 1) &
+           CALL Fatal(Caller, 'Xi Alpha / Xi Beta must be -elem scalars (DOFs=1); multi-DOF elemental storage not implemented')
+       IF (HomogLadderOrder /= 1) &
+           CALL Fatal(Caller, 'Slice 1b elemental Xi storage currently hardcoded for Homogenization Ladder Order = 1')
+
+       ! Optional: locate "Proximity Loss" exported variable. If present, slice 1c
+       ! writes the instantaneous local Joule dissipation density per node into
+       ! it at the end of each timestep:
+       !   p_diss = -alpha_11*Sigma_11*(dxi_alpha/dt)^2 - alpha_22*Sigma_22*(dxi_beta/dt)^2
+       ! (for n=1 ladder; positive for the physical alpha<0, Sigma>0 fit).
+       IF (.NOT. ASSOCIATED(prox_loss_var)) &
+           prox_loss_var => VariableGet(Solver % Mesh % Variables, 'Proximity Loss')
      END IF
 
      LaminateStack = .FALSE.
@@ -2045,6 +2242,17 @@ END SUBROUTINE LocalConstraintMatrix
     REAL(KIND=dp), POINTER :: MuTensor(:,:)
     LOGICAL :: Stat, Found, HasVelocity, HasLorentzVelocity, HasAngularVelocity, LocalGauge
     INTEGER :: t, i, j, k, p, q, np, EdgeBasisDegree, mudim
+
+    ! Slice 1b: per-element ladder workspace. HomogLadderOrder is host-scope.
+    ! NOTE: slice 1b hardcodes n_ladder = 1 in the IP loop interpolation below;
+    ! generalization to n > 1 requires DOT_PRODUCT(r_*_ladder, xi_ip_vector).
+    ! xi_*_elem are SCALAR (one value per element, DG-0 storage).
+    ! For BDF-2 the RHS history needs xi^n AND xi^{n-1}; r_*_ladder_n_1 is 0 in BDF-1.
+    REAL(KIND=dp) :: xi_alpha_elem,     xi_beta_elem,     xi_alpha_ip,     xi_beta_ip
+    REAL(KIND=dp) :: xi_alpha_elem_n_1, xi_beta_elem_n_1, xi_alpha_ip_n_1, xi_beta_ip_n_1
+    REAL(KIND=dp) :: h_hist_alpha, h_hist_beta, h_hist_local(3), h_hist_global(3)
+    INTEGER :: xi_perm_idx
+
     TYPE(GaussIntegrationPoints_t) :: IP
 
     TYPE(Nodes_t), SAVE :: Nodes
@@ -2091,7 +2299,39 @@ END SUBROUTINE LocalConstraintMatrix
       CALL GetScalarLocalSolution(Aloc)
     END IF
     np = n*Solver % Def_Dofs(GetElementFamily(Element),Element % BodyId,1)
-      
+
+    ! Slice 1b: pre-load xi^n (current solver var) and xi^{n-1} (module prev2 array)
+    ! for the proximity history term. Elemental (DG-0) storage: one scalar per
+    ! element, keyed by ElementIndex. Only meaningful when StrandedTransientHomog
+    ! is True; otherwise these stay at zero and the M-vector below is unmodified.
+    ! For BDF-1, r_*_ladder_n_1 = 0 so the xi^{n-1} contribution drops out cleanly.
+    xi_alpha_elem     = 0.0_dp
+    xi_beta_elem      = 0.0_dp
+    xi_alpha_elem_n_1 = 0.0_dp
+    xi_beta_elem_n_1  = 0.0_dp
+    IF (StrandedTransientHomog) THEN
+      IF (ASSOCIATED(xi_alpha_var % Perm)) THEN
+        xi_perm_idx = xi_alpha_var % Perm(Element % ElementIndex)
+        IF (xi_perm_idx > 0) THEN
+          xi_alpha_elem = xi_alpha_var % Values(xi_perm_idx)
+          IF (ALLOCATED(xi_alpha_prev2)) xi_alpha_elem_n_1 = xi_alpha_prev2(xi_perm_idx)
+        END IF
+      ELSE
+        xi_alpha_elem = xi_alpha_var % Values(Element % ElementIndex)
+        IF (ALLOCATED(xi_alpha_prev2)) xi_alpha_elem_n_1 = xi_alpha_prev2(Element % ElementIndex)
+      END IF
+      IF (ASSOCIATED(xi_beta_var % Perm)) THEN
+        xi_perm_idx = xi_beta_var % Perm(Element % ElementIndex)
+        IF (xi_perm_idx > 0) THEN
+          xi_beta_elem = xi_beta_var % Values(xi_perm_idx)
+          IF (ALLOCATED(xi_beta_prev2)) xi_beta_elem_n_1 = xi_beta_prev2(xi_perm_idx)
+        END IF
+      ELSE
+        xi_beta_elem = xi_beta_var % Values(Element % ElementIndex)
+        IF (ALLOCATED(xi_beta_prev2)) xi_beta_elem_n_1 = xi_beta_prev2(Element % ElementIndex)
+      END IF
+    END IF
+
     !Numerical integration:
     !----------------------
     IP = GaussPointsAdapt(Element, Solver, EdgeBasis=.TRUE. )
@@ -2103,7 +2343,23 @@ END SUBROUTINE LocalConstraintMatrix
           IP % W(t), detJ, Basis, dBasisdx, EdgeBasis = WBasis, &
           RotBasis = RotWBasis, USolver = pSolver )
 
-       IF ( HasHBCurve ) THEN
+       IF ( StrandedTransientHomog ) THEN
+         ! Transient winding homogenization: build the rotated real anisotropic
+         ! reluctivity tensor at this integration point from the Schur-eliminated
+         ! scalars (nu_eff_alpha, nu_eff_beta) plus the wire-axis air reluctivity.
+         ! See plan §4.2 / eq. 7-8. nu_eff_* are constants per timestep, set in
+         ! the outer scope before LocalMatrix is called.
+         DO i = 1, 3
+           DO j = 1, 3
+             RotMLoc(i, j) = SUM(RotM(i, j, 1:n) * Basis(1:n))
+           END DO
+         END DO
+         A_t = 0.0_dp
+         A_t(1, 1) = nu_eff_alpha
+         A_t(2, 2) = nu_eff_beta
+         A_t(3, 3) = nu_air
+         A_t = MATMUL(MATMUL(RotMLoc, A_t), TRANSPOSE(RotMLoc))
+       ELSE IF ( HasHBCurve ) THEN
          B_ip = MATMUL( Aloc(np+1:nd), RotWBasis(1:nd-np,:) )
          babs = MAX( SQRT(SUM(B_ip**2)), 1.d-8 )
 
@@ -2196,6 +2452,30 @@ END SUBROUTINE LocalConstraintMatrix
 
        M = MATMUL( LOAD(4:6,1:n), Basis(1:n) )
        L = MATMUL( LOAD(1:3,1:n), Basis(1:n) )
+
+       ! Slice 1b: add history-term contribution h_hist to the magnetization
+       ! vector. xi_dot ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1})/dt, so after
+       ! Schur elimination the RHS picks up:
+       !   h_hist_k = alpha_k * ( r_n_k(1) * xi_k^n + r_n_1_k(1) * xi_k^{n-1} )
+       ! with r_n_k = Sigma_k * M_k^{-1} e_1 * (-a2/dt) and
+       !      r_n_1_k = Sigma_k * M_k^{-1} e_1 * (-a3/dt).
+       ! BDF-1 has a3 = 0, so r_n_1 = 0 and only xi^n contributes (backward-compatible).
+       ! The local-frame vector is rotated into the global frame and SUBTRACTED
+       ! from M, matching the M.curl(W) assembly sign.
+       IF (StrandedTransientHomog) THEN
+         ! DG-0: xi is constant within the element, so xi_ip == xi_elem.
+         xi_alpha_ip     = xi_alpha_elem
+         xi_beta_ip      = xi_beta_elem
+         xi_alpha_ip_n_1 = xi_alpha_elem_n_1
+         xi_beta_ip_n_1  = xi_beta_elem_n_1
+         h_hist_alpha = alpha_nu_11 * ( r_alpha_ladder_n(1)  * xi_alpha_ip      &
+                                      + r_alpha_ladder_n_1(1)* xi_alpha_ip_n_1  )
+         h_hist_beta  = alpha_nu_22 * ( r_beta_ladder_n(1)   * xi_beta_ip       &
+                                      + r_beta_ladder_n_1(1) * xi_beta_ip_n_1   )
+         h_hist_local = [ h_hist_alpha, h_hist_beta, 0.0_dp ]
+         h_hist_global = MATMUL(RotMLoc, h_hist_local)
+         M = M - h_hist_global
+       END IF
          
        LocalLamThick = SUM( Basis(1:n) * LamThick(1:n) )
        LocalLamCond = SUM( Basis(1:n) * LamCond(1:n) )
@@ -2359,7 +2639,7 @@ END SUBROUTINE LocalConstraintMatrix
          DO j = 1,nd-np
            q = j+np
 
-           IF (HasTensorReluctivity .OR. HasReluctivityFunction ) THEN
+           IF (HasTensorReluctivity .OR. HasReluctivityFunction .OR. StrandedTransientHomog) THEN
              STIFF(p,q) = STIFF(p,q) &
                  + SUM(RotWBasis(i,:) * MATMUL(A_t, RotWBasis(j,:)))*detJ*IP%s(t)
            ELSE
@@ -3301,6 +3581,210 @@ END SUBROUTINE LocalConstraintMatrix
     END DO
   END SUBROUTINE AddLocalBNorm
 !------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+! Slice 1b: end-of-timestep update of the auxiliary ladder state Xi.
+!
+! For each winding element with Stranded Transient Homogenization active,
+! evaluates the volume-averaged b_k^{n+1} = (1/V_e) integral over the element
+! of (alpha_hat_k . curl A^{n+1}), computes the elemental xi^{n+1} from the
+! variable-dt BDF-1/2 stencil
+!   M_k * xi^{n+1} = b_bar * e_1 - (a2/dt)*Sigma*xi^n - (a3/dt)*Sigma*xi^{n-1}
+! and writes one scalar per element to the -elem Xi variable. xi^{n-1} is kept
+! in the module-level xi_*_prev2 arrays, rotated element-by-element here.
+! Per-element dissipation density uses the same BDF stencil on dxi/dt squared,
+! one constant per cell.
+!
+! This is the DG-0 (per-element) replacement for the original nodal-projected
+! storage. It avoids the inter-element smoothing artifact that inflated the
+! (dxi/dt)^2 loss in cells where b varies sharply across cell boundaries.
+!
+! Hardcoded for HomogLadderOrder = 1. For n > 1, replace scalar updates with
+! a vector solve against M_k (already factored in Mk_a / Mk_ipiv from host)
+! AND extend the -elem storage to n components per element.
+!
+! Assumes the (Sigma, Mk_inv_e1) workspace in host scope reflects the *current*
+! transient-homog Component. Holds when there's only one such Component in the
+! model; for multi-Component support this routine should re-call
+! GetTransientHomogenizationLadder per Component.
+!------------------------------------------------------------------------------
+  SUBROUTINE UpdateTransientHomogXiState()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: el
+    TYPE(ValueList_t), POINTER :: cParams
+    TYPE(GaussIntegrationPoints_t) :: ipPts
+    TYPE(Nodes_t), SAVE :: elNodes
+    INTEGER :: el_idx, ip_t, n_el, nd_el, np_el
+    INTEGER :: nvals_a, nvals_b
+    LOGICAL :: stat_ip, found_loc
+    CHARACTER(LEN=MAX_NAME_LEN) :: coil_type_loc
+
+    REAL(KIND=dp), ALLOCATABLE, SAVE :: basis_loc(:), dbasis_loc(:,:), &
+                                        wb_loc(:,:), rwb_loc(:,:), &
+                                        a_loc(:), rotm_loc(:,:,:)
+    INTEGER, SAVE :: alloc_n = 0, alloc_nd = 0
+    REAL(KIND=dp) :: detJ_loc, rml(3,3), curlA_ip(3), b_alpha_ip, b_beta_ip
+    REAL(KIND=dp) :: xi_n_alpha_elem,   xi_n_beta_elem      ! xi^n   (current xi_alpha_var)
+    REAL(KIND=dp) :: xi_n_1_alpha_elem, xi_n_1_beta_elem    ! xi^{n-1} (current xi_alpha_prev2)
+    REAL(KIND=dp) :: xi_new_alpha_elem, xi_new_beta_elem    ! xi^{n+1}
+    REAL(KIND=dp) :: xi_dot_alpha,      xi_dot_beta         ! BDF stencil of dxi/dt at t^{n+1}
+    REAL(KIND=dp) :: b_alpha_bar, b_beta_bar
+    REAL(KIND=dp) :: sig_a, sig_b, mk_a_inv, mk_b_inv, wt
+    REAL(KIND=dp) :: elem_volume, p_loss_elem
+    INTEGER :: elem_perm_a, elem_perm_b, elem_perm_pl
+
+    nvals_a = SIZE(xi_alpha_var % Values)
+    nvals_b = SIZE(xi_beta_var % Values)
+
+    ! BDF-2 history storage. xi_alpha_prev2 holds xi^{n-1} on entry (computed in
+    ! the previous call); we rotate it to xi^n element-by-element below as we
+    ! overwrite xi_alpha_var with xi^{n+1}. Allocated lazily; zero-initialized
+    ! so the first two timesteps (when the BDF-1 fallback is in force) see
+    ! xi^{n-1} = 0 consistently.
+    IF (.NOT. ALLOCATED(xi_alpha_prev2) .OR. SIZE(xi_alpha_prev2) /= nvals_a) THEN
+      IF (ALLOCATED(xi_alpha_prev2)) DEALLOCATE(xi_alpha_prev2, xi_beta_prev2)
+      ALLOCATE(xi_alpha_prev2(nvals_a), xi_beta_prev2(nvals_b))
+      xi_alpha_prev2 = 0.0_dp
+      xi_beta_prev2  = 0.0_dp
+    END IF
+
+    sig_a    = Sigma_nu_11(1,1)
+    sig_b    = Sigma_nu_22(1,1)
+    mk_a_inv = Mk_inv_e1_a(1)
+    mk_b_inv = Mk_inv_e1_b(1)
+
+    DO el_idx = 1, GetNOFActive()
+      el => GetActiveElement(el_idx)
+      cParams => GetComponentParams(el)
+      IF (.NOT. ASSOCIATED(cParams)) CYCLE
+
+      coil_type_loc = GetString(cParams, 'Coil Type', found_loc)
+      IF (.NOT. found_loc) CYCLE
+      IF (coil_type_loc /= 'stranded') CYCLE
+      IF (.NOT. (GetLogical(cParams, 'Homogenization Model', found_loc) .AND. found_loc)) CYCLE
+      IF (.NOT. (GetLogical(cParams, 'Transient Homogenization', found_loc) .AND. found_loc)) CYCLE
+
+      ! Locate this element's slot in each elemental variable. Bail out if any
+      ! is missing (shouldn't happen for a properly-declared -elem variable
+      ! covering the active body).
+      elem_perm_a = xi_alpha_var % Perm(el % ElementIndex)
+      elem_perm_b = xi_beta_var  % Perm(el % ElementIndex)
+      IF (elem_perm_a <= 0 .OR. elem_perm_b <= 0) CYCLE
+
+      n_el  = GetElementNOFNodes(el)
+      nd_el = GetElementNOFDOFs(el)
+
+      ! (Re)allocate per-element scratch as needed.
+      IF (n_el > alloc_n .OR. nd_el > alloc_nd) THEN
+        IF (ALLOCATED(basis_loc)) DEALLOCATE(basis_loc, dbasis_loc, wb_loc, rwb_loc, &
+                                             a_loc, rotm_loc)
+        ALLOCATE(basis_loc(n_el), dbasis_loc(n_el,3), &
+                 wb_loc(nd_el,3), rwb_loc(nd_el,3), &
+                 a_loc(nd_el), rotm_loc(3,3,n_el))
+        alloc_n  = n_el
+        alloc_nd = nd_el
+      END IF
+
+      np_el = n_el * Solver % Def_Dofs(GetElementFamily(el), el % BodyId, 1)
+
+      CALL GetElementNodes(elNodes, UElement=el)
+      CALL GetScalarLocalSolution(a_loc, UElement=el)
+      CALL GetElementRotM(el, rotm_loc, n_el)
+
+      ! Read xi^n (current xi_alpha_var) and xi^{n-1} (xi_alpha_prev2) for this
+      ! element. One scalar per direction. xi_alpha_prev2 is zero on the first
+      ! two timesteps (consistent with the BDF-1 fallback in the Schur block).
+      xi_n_alpha_elem   = xi_alpha_var % Values(elem_perm_a)
+      xi_n_beta_elem    = xi_beta_var  % Values(elem_perm_b)
+      xi_n_1_alpha_elem = xi_alpha_prev2(elem_perm_a)
+      xi_n_1_beta_elem  = xi_beta_prev2(elem_perm_b)
+
+      ! Volume-average b_alpha and b_beta over the element's IPs:
+      !   b_bar_k = integral over element of b_k dV / V_e
+      b_alpha_bar = 0.0_dp
+      b_beta_bar  = 0.0_dp
+      elem_volume = 0.0_dp
+
+      ipPts = GaussPointsAdapt(el, Solver, EdgeBasis=.TRUE.)
+      DO ip_t = 1, ipPts % n
+        stat_ip = ElementInfo(el, elNodes, ipPts % U(ip_t), ipPts % V(ip_t), &
+                              ipPts % W(ip_t), detJ_loc, &
+                              basis_loc(1:n_el), dbasis_loc(1:n_el,:), &
+                              EdgeBasis = wb_loc(1:nd_el,:), &
+                              RotBasis = rwb_loc(1:nd_el,:), USolver = pSolver)
+
+        DO i = 1, 3
+          DO j = 1, 3
+            rml(i,j) = SUM(rotm_loc(i,j,1:n_el) * basis_loc(1:n_el))
+          END DO
+        END DO
+
+        ! Elmer convention: edge dofs are a_loc(np+1:nd), corresponding
+        ! curl-basis rows are RotWBasis(1:nd-np,:). Same indexing as assembly.
+        curlA_ip = MATMUL(a_loc(np_el+1:nd_el), rwb_loc(1:nd_el-np_el,:))
+        b_alpha_ip = SUM(curlA_ip * rml(:,1))
+        b_beta_ip  = SUM(curlA_ip * rml(:,2))
+
+        wt = detJ_loc * ipPts % s(ip_t)
+        b_alpha_bar = b_alpha_bar + b_alpha_ip * wt
+        b_beta_bar  = b_beta_bar  + b_beta_ip  * wt
+        elem_volume = elem_volume + wt
+      END DO
+
+      IF (elem_volume <= 0.0_dp) CYCLE
+      b_alpha_bar = b_alpha_bar / elem_volume
+      b_beta_bar  = b_beta_bar  / elem_volume
+
+      ! Elemental BDF step on the ladder state (one scalar per direction).
+      ! Variable-dt BDF-1/2 stencil: xi_dot ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1})/dt
+      !   M_k * xi^{n+1} = b_bar^{n+1} * e_1
+      !                    - (a2/dt) * Sigma_k * xi^n - (a3/dt) * Sigma_k * xi^{n-1}
+      ! M_k = a1/dt * Sigma_k + I (built in the Schur block), so mk_inv is
+      ! already a1-aware. For BDF-1 (a2=-1, a3=0) this collapses to the
+      ! prior formula  xi^{n+1} = mk_inv * (b + sig/dt * xi^n).
+      xi_new_alpha_elem = mk_a_inv * ( b_alpha_bar &
+            - (bdf_alpha_2 / bdf_dt) * sig_a * xi_n_alpha_elem  &
+            - (bdf_alpha_3 / bdf_dt) * sig_a * xi_n_1_alpha_elem )
+      xi_new_beta_elem  = mk_b_inv * ( b_beta_bar  &
+            - (bdf_alpha_2 / bdf_dt) * sig_b * xi_n_beta_elem   &
+            - (bdf_alpha_3 / bdf_dt) * sig_b * xi_n_1_beta_elem  )
+
+      ! Element-by-element history rotation: xi_alpha_prev2 was xi^{n-1} on
+      ! entry; here it becomes xi^n for the next call (which will then read it
+      ! as the new "xi^{n-1}"). Write to prev2 BEFORE we overwrite xi_alpha_var.
+      xi_alpha_prev2(elem_perm_a) = xi_n_alpha_elem
+      xi_beta_prev2 (elem_perm_b) = xi_n_beta_elem
+
+      ! Write xi^{n+1} into the live variable storage.
+      xi_alpha_var % Values(elem_perm_a) = xi_new_alpha_elem
+      xi_beta_var  % Values(elem_perm_b) = xi_new_beta_elem
+
+      ! Per-element instantaneous dissipation density (slice 1c). Use the
+      ! BDF stencil for xi_dot at t^{n+1}; for BDF-1 this is (xi^{n+1}-xi^n)/dt.
+      IF (ASSOCIATED(prox_loss_var) .AND. bdf_dt > 0.0_dp) THEN
+        elem_perm_pl = prox_loss_var % Perm(el % ElementIndex)
+        IF (elem_perm_pl > 0) THEN
+          xi_dot_alpha = ( bdf_alpha_1 * xi_new_alpha_elem &
+                         + bdf_alpha_2 * xi_n_alpha_elem   &
+                         + bdf_alpha_3 * xi_n_1_alpha_elem ) / bdf_dt
+          xi_dot_beta  = ( bdf_alpha_1 * xi_new_beta_elem  &
+                         + bdf_alpha_2 * xi_n_beta_elem    &
+                         + bdf_alpha_3 * xi_n_1_beta_elem  ) / bdf_dt
+          p_loss_elem = -alpha_nu_11 * sig_a * xi_dot_alpha**2 &
+                        -alpha_nu_22 * sig_b * xi_dot_beta **2
+          prox_loss_var % Values(elem_perm_pl) = p_loss_elem
+        END IF
+      END IF
+    END DO
+
+    ! Record the dt we just used so the next call's Schur block can compute
+    ! k = dt_new / dt_prev for the variable-dt BDF-2 coefficients.
+    dt_prev = dt
+!------------------------------------------------------------------------------
+  END SUBROUTINE UpdateTransientHomogXiState
+!------------------------------------------------------------------------------
+
 !------------------------------------------------------------------------------
  END SUBROUTINE WhitneyAVSolver
 !------------------------------------------------------------------------------
