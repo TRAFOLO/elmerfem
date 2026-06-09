@@ -245,13 +245,11 @@ Boundary Condition 4
    Target Boundaries = $ wp1_gamma1
    W = Real 0
    A {e} = Real 0
-   A {e} = Real 0
 End
 Boundary Condition 5
    Name = current in foil winding
    Target Boundaries = $ wp1_gamma0
    W = Real 1
-   A {e} = Real 0
    A {e} = Real 0
 End
 Boundary Condition 6
