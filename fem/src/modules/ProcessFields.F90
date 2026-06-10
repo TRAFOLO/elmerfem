@@ -200,8 +200,13 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
   ! 'Proximity Loss': one W/m3 value per element. Broadcast it onto the
   ! element's DG nodes so the visualized, integrated and averaged loads (and
   ! through LoadWkgAvg the thermal heat source) include the proximity part.
+  ! The TYPE guard is essential: in harmonic runs the DG export of CalcFields
+  ! also registers a NODAL-averaged variable with this exact name, whose Perm
+  ! must not be indexed by element - the harmonic case is already covered by
+  ! the 'proximity loss e' fold above.
   VarPLelem => VariableGet( Mesh % Variables, 'proximity loss', ThisOnly = .TRUE. )
   IF( ASSOCIATED( VarPLelem ) ) THEN
+   IF( VarPLelem % TYPE == Variable_on_elements ) THEN
     DO i = 1, GetNOFActive()
       Element => Mesh % Elements(i)
       jPL = VarPLelem % Perm(Element % ElementIndex)
@@ -210,6 +215,7 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
           VarLoadWkg % Values(VarLoadWkg % Perm(Element % DGIndexes)) + &
           VarPLelem % Values(jPL) / VarDens(VarLoadWkg % Perm(Element % DGIndexes))
     END DO
+   END IF
   END IF
 
   IF (Transient) THEN
