@@ -826,30 +826,9 @@ CONTAINS
         EvaluateAtIp=.TRUE.,DummyCount=3)
   END IF
 
-  ! Slice 1b: refuse SIFs with more than one Component that declares
-  ! Transient Homogenization. The module-level Sigma_nu_11 / Mk_inv_e1_a /
-  ! y0_nu / alpha_nu workspace is overwritten per-Component in the per-element
-  ! Schur block but reused globally in UpdateTransientHomogXiState, so a
-  ! second transient-homog Component would silently apply the wrong ladder
-  ! fit to the first Component's elements. Per-Component storage is future
-  ! work; refuse now rather than ship a silent miscompute.
-  IF (Transient .AND. ASSOCIATED(CurrentModel % Components)) THEN
-    BLOCK
-      INTEGER :: c_idx, n_homog
-      TYPE(ValueList_t), POINTER :: cVals
-      LOGICAL :: hHomog, hTrans, fH, fT
-      n_homog = 0
-      DO c_idx = 1, SIZE(CurrentModel % Components)
-        cVals => CurrentModel % Components(c_idx) % Values
-        IF (.NOT. ASSOCIATED(cVals)) CYCLE
-        hHomog = GetLogical(cVals, 'Homogenization Model',     fH)
-        hTrans = GetLogical(cVals, 'Transient Homogenization', fT)
-        IF (fH .AND. hHomog .AND. fT .AND. hTrans) n_homog = n_homog + 1
-      END DO
-      IF (n_homog > 1) CALL Fatal(Caller, &
-          'Multiple Components with Transient Homogenization = True are not yet supported')
-    END BLOCK
-  END IF
+  ! Slice 1b: multiple Components with Transient Homogenization are supported.
+  ! The assembly loop below and UpdateTransientHomogXiState both read the
+  ! ladder triplets from each element's own Component.
 
   PrevMaterial => NULL()
   DO t=1,active
@@ -3603,10 +3582,10 @@ END SUBROUTINE LocalConstraintMatrix
 ! a vector solve against M_k (already factored in Mk_a / Mk_ipiv from host)
 ! AND extend the -elem storage to n components per element.
 !
-! Assumes the (Sigma, Mk_inv_e1) workspace in host scope reflects the *current*
-! transient-homog Component. Holds when there's only one such Component in the
-! model; for multi-Component support this routine should re-call
-! GetTransientHomogenizationLadder per Component.
+! Multi-Component safe: the ladder triplets are re-read from the element's own
+! Component here (mirroring the per-element reads in the assembly loop), and
+! the n = 1 Schur quantities are recomputed as scalars per element. The BDF
+! stencil coefficients are global (same dt for every Component).
 !------------------------------------------------------------------------------
   SUBROUTINE UpdateTransientHomogXiState()
 !------------------------------------------------------------------------------
@@ -3631,6 +3610,8 @@ END SUBROUTINE LocalConstraintMatrix
     REAL(KIND=dp) :: xi_dot_alpha,      xi_dot_beta         ! BDF stencil of dxi/dt at t^{n+1}
     REAL(KIND=dp) :: b_alpha_bar, b_beta_bar
     REAL(KIND=dp) :: sig_a, sig_b, mk_a_inv, mk_b_inv, wt
+    REAL(KIND=dp) :: y0_a_el, alpha_a_el, y0_b_el, alpha_b_el   ! this element's Component triplets
+    REAL(KIND=dp) :: SigmaMat_el(1,1)
     REAL(KIND=dp) :: elem_volume, p_loss_elem
     INTEGER :: elem_perm_a, elem_perm_b, elem_perm_pl
 
@@ -3649,11 +3630,6 @@ END SUBROUTINE LocalConstraintMatrix
       xi_beta_prev2  = 0.0_dp
     END IF
 
-    sig_a    = Sigma_nu_11(1,1)
-    sig_b    = Sigma_nu_22(1,1)
-    mk_a_inv = Mk_inv_e1_a(1)
-    mk_b_inv = Mk_inv_e1_b(1)
-
     DO el_idx = 1, GetNOFActive()
       el => GetActiveElement(el_idx)
       cParams => GetComponentParams(el)
@@ -3671,6 +3647,17 @@ END SUBROUTINE LocalConstraintMatrix
       elem_perm_a = xi_alpha_var % Perm(el % ElementIndex)
       elem_perm_b = xi_beta_var  % Perm(el % ElementIndex)
       IF (elem_perm_a <= 0 .OR. elem_perm_b <= 0) CYCLE
+
+      ! Per-Component ladder triplets (n = 1): read from THIS element's
+      ! Component so several transient-homog Components each advance with
+      ! their own fit. n = 1 keeps the Schur algebra scalar:
+      !   M_k = 1 + (a1/dt) * sigma,  mk_inv = 1 / M_k
+      CALL GetTransientHomogenizationLadder(cParams, 'Nu 11', 1, y0_a_el, alpha_a_el, SigmaMat_el)
+      sig_a = SigmaMat_el(1,1)
+      CALL GetTransientHomogenizationLadder(cParams, 'Nu 22', 1, y0_b_el, alpha_b_el, SigmaMat_el)
+      sig_b = SigmaMat_el(1,1)
+      mk_a_inv = 1.0_dp / (1.0_dp + (bdf_alpha_1 / bdf_dt) * sig_a)
+      mk_b_inv = 1.0_dp / (1.0_dp + (bdf_alpha_1 / bdf_dt) * sig_b)
 
       n_el  = GetElementNOFNodes(el)
       nd_el = GetElementNOFDOFs(el)
@@ -3771,8 +3758,8 @@ END SUBROUTINE LocalConstraintMatrix
           xi_dot_beta  = ( bdf_alpha_1 * xi_new_beta_elem  &
                          + bdf_alpha_2 * xi_n_beta_elem    &
                          + bdf_alpha_3 * xi_n_1_beta_elem  ) / bdf_dt
-          p_loss_elem = -alpha_nu_11 * sig_a * xi_dot_alpha**2 &
-                        -alpha_nu_22 * sig_b * xi_dot_beta **2
+          p_loss_elem = -alpha_a_el * sig_a * xi_dot_alpha**2 &
+                        -alpha_b_el * sig_b * xi_dot_beta **2
           prox_loss_var % Values(elem_perm_pl) = p_loss_elem
         END IF
       END IF
