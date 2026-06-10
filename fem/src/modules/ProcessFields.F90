@@ -117,7 +117,7 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
 ! Local variables
 !------------------------------------------------------------------------------
   TYPE(Mesh_t), POINTER :: Mesh
-  INTEGER :: Visit = 0, nF, i, n, dim, NSIZE
+  INTEGER :: Visit = 0, nF, i, n, dim, NSIZE, jPL
   LOGICAL :: Found, HAmFound = .FALSE.
   REAL(KIND=dp) :: FreqPower, FieldPower, LossCoeff, LossCoeff2, k1, k2
   REAL(KIND=dp) :: Told = 0.0d0, Tstart = 0.0d0
@@ -127,7 +127,7 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
 
   TYPE(Variable_t),POINTER :: VarJH, VarBT, TmpVar, VarLoadWkg, VarLoadWm3, &
                               VarDeltaB, VarLoadWkgAvg, VarLoadWm3Avg, VarLossLin, &
-                              VarLossQuad, VarHAm, VarPL, &
+                              VarLossQuad, VarHAm, VarPL, VarPLelem, &
                               Var_iGSE_Base1, Var_iGSE_Base2, &
                               Var_iGSE_Base1Avg, Var_iGSE_Base2Avg, &
                               VarBmaxComp, VarBminComp
@@ -194,6 +194,22 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
   VarPL => VariableGet( Mesh % Variables, 'proximity loss e', ThisOnly = .TRUE. )
   IF( ASSOCIATED( VarPL ) ) THEN
     VarLoadWkg % Values = VarLoadWkg % Values + VarPL % Values / VarDens
+  END IF
+
+  ! Transient winding homogenization writes an elemental (-elem) field named
+  ! 'Proximity Loss': one W/m3 value per element. Broadcast it onto the
+  ! element's DG nodes so the visualized, integrated and averaged loads (and
+  ! through LoadWkgAvg the thermal heat source) include the proximity part.
+  VarPLelem => VariableGet( Mesh % Variables, 'proximity loss', ThisOnly = .TRUE. )
+  IF( ASSOCIATED( VarPLelem ) ) THEN
+    DO i = 1, GetNOFActive()
+      Element => Mesh % Elements(i)
+      jPL = VarPLelem % Perm(Element % ElementIndex)
+      IF (jPL <= 0) CYCLE
+      VarLoadWkg % Values(VarLoadWkg % Perm(Element % DGIndexes)) = &
+          VarLoadWkg % Values(VarLoadWkg % Perm(Element % DGIndexes)) + &
+          VarPLelem % Values(jPL) / VarDens(VarLoadWkg % Perm(Element % DGIndexes))
+    END DO
   END IF
 
   IF (Transient) THEN
