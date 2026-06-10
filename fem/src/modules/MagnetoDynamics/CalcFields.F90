@@ -1289,6 +1289,25 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                END DO
              END IF
            END BLOCK
+         ELSE IF (HomogenizationModel .AND. Transient) THEN
+           IF (GetLogical(CompParams, 'Transient Homogenization', Found) .AND. Found) THEN
+             ! Slice 3 (conduction part): the winding Joule density must use the
+             ! ladder's effective conductivity G_skin = y0 + alpha/(1 + sigma/dt)
+             ! - the same BDF-1 Schur form CircuitsAndDynamics uses for the
+             ! lumped resistance - instead of the raw material conductivity.
+             ! Otherwise the local loss field underestimates the conduction
+             ! loss by sigma_material/sigma_eff while the circuit is right.
+             BLOCK
+               REAL(KIND=dp) :: s_y0, s_alpha, s_SigmaMat(1,1), g_skin
+               CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
+                                                     s_y0, s_alpha, s_SigmaMat)
+               g_skin = s_y0 + s_alpha / (1.0_dp + s_SigmaMat(1,1) / dt)
+               Tcoef = 0._dp
+               Tcoef(1,1,1:n) = g_skin
+               Tcoef(2,2,1:n) = g_skin
+               Tcoef(3,3,1:n) = g_skin
+             END BLOCK
+           END IF
          END IF
          !nofturns = GetConstReal(CompParams, 'Number of Turns', Found)
          !IF (.NOT. Found) CALL Fatal(Caller,'Stranded Coil: Number of Turns not found!')
