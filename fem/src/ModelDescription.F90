@@ -2626,7 +2626,9 @@ CONTAINS
       END IF
 
       ! Execute lua parts 
-      lstat = lua_dostring(LuaState, 'loadstring(readsif("'//trim(ModelName)//'"))()' // c_null_char)
+      ! Long-bracket string: Windows paths contain backslashes that a quoted
+      ! Lua string would mangle as escape sequences (e.g. '\224' -> char 224).
+      lstat = lua_dostring(LuaState, 'loadstring(readsif([==['//trim(ModelName)//']==]))()' // c_null_char)
       lstat = lua_dostring(LuaState,  trim(txcmd)// c_null_char)
       LuaState % tx => lua_getusertable(LuaState, 'tx'//c_null_char)
       !$OMP END CRITICAL

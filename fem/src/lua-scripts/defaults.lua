@@ -55,10 +55,16 @@ log10 = math.log10
 -- Returns the extracted string
 
 function readsif(fname)
-  local f = assert(io.open(fname), 'r')
+  -- Tolerate an unopenable file: LUA block extraction is best-effort, inline
+  -- 'Real LUA' expressions are evaluated elsewhere and must not be aborted here.
+  local f = io.open(fname, 'r')
+  if f == nil then
+    print('WARNING: readsif: cannot open "' .. tostring(fname) .. '", skipping LUA block scan')
+    return ""
+  end
 
   local luadata = ""
-  local luablock = false 
+  local luablock = false
   local line = f:read()
   local linenum, beginline
 
@@ -72,13 +78,13 @@ function readsif(fname)
 
   linenum = 1
   beginline = linenum
-  repeat
+  while line ~= nil do
     if not(luablock) then
       local i, j = string.find(line, "!---LUA BEGIN")
       if i == 1 then
         luablock = true
         beginline = linenum
-      end 
+      end
     else
       local i, j = string.find(line, "!---LUA END")
       if i == 1 then -- found end of block
@@ -89,7 +95,7 @@ function readsif(fname)
     end
     line = f:read()
     linenum = linenum + 1
-  until line == nil
+  end
   if luablock then
     error("unmatched '!---LUA BEGIN' at line ".. beginline)
   end 
