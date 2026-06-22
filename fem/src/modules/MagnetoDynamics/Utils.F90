@@ -1271,6 +1271,7 @@ CONTAINS
          CALL MPI_RECV( r_e,n,MPI_INTEGER,i,113,Solver % Matrix % Comm, status,ierr )
          DO j=1,n
            k = SearchNode( Solver % Matrix % ParallelInfo, r_e(j), Order=Solver % Variable % Perm )
+           IF( k <= 0 ) CALL Fatal('RecvDoneNodesAndEdges','Received edge node not found in parallel info')
            k = iperm(k) - Mesh % NumberOfNodes
            IF ( k>0 .AND. k<=SIZE(TreeEdges) ) THEN
              TreeEdges(k) = .TRUE.
@@ -1306,7 +1307,7 @@ CONTAINS
 
      IF(Parenv % myPE < ParEnv % PEs-1) THEN
 
-      ALLOCATE(s_e(Mesh % NumberOfEdges, ParEnv % PEs) )
+      ALLOCATE(s_e(MAX(Mesh % NumberOfEdges, Mesh % NumberOfNodes), ParEnv % PEs) )
 
       ii = 0
       DO i=1,Mesh % NumberOfedges
@@ -1664,6 +1665,7 @@ CONTAINS
     TYPE(ListMatrix_t), POINTER :: Alist(:)
     INTEGER :: i,j,k,l,n,Start,nCount,fixedge
     LOGICAL, ALLOCATABLE :: Done(:)
+    LOGICAL :: FirstTime
     INTEGER, ALLOCATABLE :: NodeList(:)
     TYPE(Element_t), POINTER :: Edge, Boundary, Element
 !------------------------------------------------------------------------------
@@ -1755,6 +1757,7 @@ CONTAINS
 
     ! generate the tree for all (perhaps disconnected) parts:
     ! -------------------------------------------------------
+    FirstTime = .TRUE.
     DO WHILE(.NOT.ALL(Done(NodeList)))
       DO i=1,nCount
         Start = NodeList(i)
@@ -1777,7 +1780,6 @@ CONTAINS
 !------------------------------------------------------------------------------
     TYPE(ListMatrixEntry_t), POINTER :: Aentry, Ltmp, Btmp
     INTEGER :: i,j,k,l,n,m,ll,IF,bcycle
-    LOGICAL :: FirstTime= .TRUE.
     TYPE(Element_t), POINTER :: Edge,Edge1,Boundary
     LOGICAL, ALLOCATABLE :: DoneL(:)
     INTEGER, ALLOCATABLE :: Fifo(:), Previous(:), FiFo1(:)
@@ -1788,7 +1790,7 @@ CONTAINS
    ALLOCATE(Previous(Mesh % NumberOfNodes)); Previous=0;
 
    bcycle = 0
-   DO bcycle=0,FluxCount
+   DO bcycle=0,FluxCount-1
      IF(.NOT.ASSOCIATED(BasicCycles(bcycle+1) % Head)) EXIT
    END DO
 
