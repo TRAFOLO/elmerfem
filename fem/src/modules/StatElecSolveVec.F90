@@ -711,7 +711,17 @@ CONTAINS
           LayerV = ListGetElementReal( LayerV_h, Basis, Element, Found )
           LayerRho = ListGetElementReal( LayerRho_h, Basis, Element, Found )
 
-          Alpha = LayerEps / LayerH          
+          ! FIX: this solver's bulk & far-field terms carry an explicit Eps0 factor (see Alpha
+          ! above at line 699, and the bulk assembly's "STIFF = Eps0 * STIFF"), but the thin-layer
+          ! Robin term omitted it. With a relative LayerEps, the raw Alpha = LayerEps/LayerH was
+          ! ~1/Eps0 (~1.1e11x) too LARGE relative to the Eps0-scaled bulk, so the Robin term
+          ! dominated and pinned Phi to LayerV - the layer behaved as a rigid Dirichlet (identical
+          ! to a bare conductor; changing eps/thickness had no effect). Multiplying by Eps0 restores
+          ! a finite, physical layer admittance and reproduces legacy StatElecSolve exactly (legacy
+          ! is self-consistent because ITS bulk also omits Eps0). Before: Alpha = LayerEps / LayerH.
+          ! PAIRED CHANGE: the app pre-scaled Layer Relative Permittivity by Eps0 to work around
+          ! this bug (Choke coilbuilder.py); that workaround MUST be removed or Eps0 double-counts.
+          Alpha = Eps0 * LayerEps / LayerH
           Beta = Beta + Alpha * LayerV + 0.5_dp * LayerRho * LayerH / Eps0
         END IF
       END IF
