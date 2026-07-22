@@ -22,6 +22,14 @@ name: release
 #     Release for it, then builds and uploads to the prod S3 bucket.
 # GitHub Environments (dev/prod) hold S3_BUCKET/S3_PREFIX/AWS_REGION as
 # environment variables and AWS_ROLE_ARN as a secret (see repo settings).
+#
+# Cross-repo auth: every checkout (this repo and the private
+# TRAFOLO/elmer-dist-build) uses a short-lived GitHub App installation token
+# (actions/create-github-app-token), same pattern as
+# TRAFOLO/trafolo-local-licensing-server's workflows -- not a long-lived PAT.
+# Requires org/repo variable GH_APP_INSTALLATION_ID and secret
+# GH_APP_PRIVATE_KEY (already used elsewhere in the org), with the App's
+# installation granted read access to TRAFOLO/elmer-dist-build.
 
 on:
   workflow_dispatch:
@@ -56,9 +64,18 @@ jobs:
       environment: ${{ steps.compute.outputs.environment }}
       bundle_name: ${{ steps.compute.outputs.bundle_name }}
     steps:
+      - name: Get GH App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_INSTALLATION_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - id: compute
         shell: bash
@@ -100,9 +117,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Get GH App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_INSTALLATION_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Create and push tag
         shell: bash
@@ -134,10 +160,19 @@ jobs:
     environment: ${{ needs.version.outputs.environment }}
     timeout-minutes: 120
     steps:
+      - name: Get GH App token
+        uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.GH_APP_INSTALLATION_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+
       - name: Checkout elmerfem (this repo, the source being built)
         uses: actions/checkout@v4
         with:
           path: elmerfem
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Checkout elmer-dist-build (private build playbook)
         uses: actions/checkout@v4
@@ -145,9 +180,9 @@ jobs:
           repository: TRAFOLO/elmer-dist-build
           path: elmer-dist-build
           # Private cross-repo checkout: the default GITHUB_TOKEN only covers
-          # the repo the workflow runs in. Needs a PAT or GH App token with
-          # read access to TRAFOLO/elmer-dist-build, stored as a repo secret.
-          token: ${{ secrets.ELMER_DIST_BUILD_READ_TOKEN }}
+          # the repo the workflow runs in. Uses the GH App installation token
+          # from the step above instead.
+          token: ${{ steps.app-token.outputs.token }}
 
       - name: Install MSYS2 UCRT64 toolchain
         uses: msys2/setup-msys2@v2
