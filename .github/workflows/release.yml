@@ -10,21 +10,37 @@ name: release
 # is a different thing entirely from the "prod" S3 environment below. This
 # workflow only ever uploads to S3; it never touches a local production drop.
 #
-# Environment selection:
-#   - workflow_dispatch -> "dev" only (S3_BUCKET/S3_PREFIX from the dev
-#     environment). There is deliberately no way to pick "prod" by hand.
-#   - push of a vX.Y.Z tag -> "prod", using the tag as the exact version.
+# Trigger: workflow_dispatch only (manual). There is no tag-push trigger --
+# tags are a *result* of running this workflow for prod, not an input to it.
+#
+# Environment selection (manual input "environment"):
+#   - "dev"  -> builds and uploads to the dev S3 bucket only. Version is
+#     derived automatically (last tag + run number + short SHA); no tag or
+#     GitHub Release is created.
+#   - "prod" -> requires the "version" input (e.g. "1.4.0"). The workflow
+#     creates annotated tag vX.Y.Z on the current commit, publishes a GitHub
+#     Release for it, then builds and uploads to the prod S3 bucket.
 # GitHub Environments (dev/prod) hold S3_BUCKET/S3_PREFIX/AWS_REGION as
 # environment variables and AWS_ROLE_ARN as a secret (see repo settings).
 
 on:
-  push:
-    tags:
-      - "v[0-9]+.[0-9]+.[0-9]+"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      version:
+        description: "Release version for prod, e.g. 1.4.0 (ignored for dev)"
+        required: false
+        type: string
 
 permissions:
-  contents: read
+  contents: write # tag + GitHub Release creation (prod only)
   id-token: write # required by aws-actions/configure-aws-credentials (OIDC)
 
 concurrency:
@@ -36,6 +52,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
       environment: ${{ steps.compute.outputs.environment }}
       bundle_name: ${{ steps.compute.outputs.bundle_name }}
     steps:
@@ -45,23 +62,74 @@ jobs:
 
       - id: compute
         shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          RAW_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          if [ "${{ github.ref_type }}" = "tag" ]; then
-            version="${GITHUB_REF_NAME#v}"
-            environment="prod"
+          if [ "${ENVIRONMENT}" = "prod" ]; then
+            if [ -z "${RAW_VERSION}" ]; then
+              echo "::error::'version' input is required when environment=prod (e.g. 1.4.0)"
+              exit 1
+            fi
+            version="${RAW_VERSION#v}"
+            if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::version must look like X.Y.Z, got: ${RAW_VERSION}"
+              exit 1
+            fi
+            tag="v${version}"
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "::error::tag ${tag} already exists"
+              exit 1
+            fi
           else
             base_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
             base="${base_tag#v}"
             version="${base}-dev.${{ github.run_number }}+${GITHUB_SHA::7}"
-            environment="dev"
+            tag=""
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "environment=${environment}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
           echo "bundle_name=trafolo_elmer-${version}" >> "$GITHUB_OUTPUT"
 
-  build-and-upload:
+  tag-and-release:
     needs: version
+    if: needs.version.outputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" --title "${TAG}" --generate-notes
+
+  build-and-upload:
+    needs: [version, tag-and-release]
+    if: |
+      always() &&
+      needs.version.result == 'success' &&
+      (needs.tag-and-release.result == 'success' || needs.tag-and-release.result == 'skipped')
     runs-on: windows-latest
     environment: ${{ needs.version.outputs.environment }}
     timeout-minutes: 120
