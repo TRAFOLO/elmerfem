@@ -1,0 +1,217 @@
+name: release
+
+# Builds the TRAFOLO Elmer bundle via the build_all.sh pipeline maintained in
+# TRAFOLO/elmer-dist-build (build -> deploy -> prune -> audit -> gates ->
+# package; see that repo's README.md / CLAUDE.md / DEVELOPER_BUILD.md for the
+# full policy) and uploads the resulting zip to S3.
+#
+# PROD is NEVER set for build_all.sh/package_bundle.sh here -- that flag
+# replaces the *local* production bundle on whatever machine runs this, which
+# is a different thing entirely from the "prod" S3 environment below. This
+# workflow only ever uploads to S3; it never touches a local production drop.
+#
+# Trigger: workflow_dispatch only (manual). There is no tag-push trigger --
+# tags are a *result* of running this workflow for prod, not an input to it.
+#
+# Environment selection (manual input "environment"):
+#   - "dev"  -> builds and uploads to the dev S3 bucket only. Version is
+#     derived automatically (last tag + run number + short SHA); no tag or
+#     GitHub Release is created.
+#   - "prod" -> requires the "version" input (e.g. "1.4.0"). The workflow
+#     creates annotated tag vX.Y.Z on the current commit, publishes a GitHub
+#     Release for it, then builds and uploads to the prod S3 bucket.
+# GitHub Environments (dev/prod) hold S3_BUCKET/S3_PREFIX/AWS_REGION as
+# environment variables and AWS_ROLE_ARN as a secret (see repo settings).
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment"
+        required: true
+        type: choice
+        options:
+          - dev
+          - prod
+        default: dev
+      version:
+        description: "Release version for prod, e.g. 1.4.0 (ignored for dev)"
+        required: false
+        type: string
+
+permissions:
+  contents: write # tag + GitHub Release creation (prod only)
+  id-token: write # required by aws-actions/configure-aws-credentials (OIDC)
+
+concurrency:
+  group: elmer-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+      environment: ${{ steps.compute.outputs.environment }}
+      bundle_name: ${{ steps.compute.outputs.bundle_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: compute
+        shell: bash
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          RAW_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "${ENVIRONMENT}" = "prod" ]; then
+            if [ -z "${RAW_VERSION}" ]; then
+              echo "::error::'version' input is required when environment=prod (e.g. 1.4.0)"
+              exit 1
+            fi
+            version="${RAW_VERSION#v}"
+            if ! [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              echo "::error::version must look like X.Y.Z, got: ${RAW_VERSION}"
+              exit 1
+            fi
+            tag="v${version}"
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "::error::tag ${tag} already exists"
+              exit 1
+            fi
+          else
+            base_tag="$(git describe --tags --abbrev=0 2>/dev/null || echo v0.0.0)"
+            base="${base_tag#v}"
+            version="${base}-dev.${{ github.run_number }}+${GITHUB_SHA::7}"
+            tag=""
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "environment=${ENVIRONMENT}" >> "$GITHUB_OUTPUT"
+          echo "bundle_name=trafolo_elmer-${version}" >> "$GITHUB_OUTPUT"
+
+  tag-and-release:
+    needs: version
+    if: needs.version.outputs.environment == 'prod'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Create and push tag
+        shell: bash
+        env:
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "${TAG}"
+
+      - name: Create GitHub release
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh release create "${TAG}" --title "${TAG}" --generate-notes
+
+  build-and-upload:
+    needs: [version, tag-and-release]
+    if: |
+      always() &&
+      needs.version.result == 'success' &&
+      (needs.tag-and-release.result == 'success' || needs.tag-and-release.result == 'skipped')
+    runs-on: windows-latest
+    environment: ${{ needs.version.outputs.environment }}
+    timeout-minutes: 120
+    steps:
+      - name: Checkout elmerfem (this repo, the source being built)
+        uses: actions/checkout@v4
+        with:
+          path: elmerfem
+
+      - name: Checkout elmer-dist-build (private build playbook)
+        uses: actions/checkout@v4
+        with:
+          repository: TRAFOLO/elmer-dist-build
+          path: elmer-dist-build
+          # Private cross-repo checkout: the default GITHUB_TOKEN only covers
+          # the repo the workflow runs in. Needs a PAT or GH App token with
+          # read access to TRAFOLO/elmer-dist-build, stored as a repo secret.
+          token: ${{ secrets.ELMER_DIST_BUILD_READ_TOKEN }}
+
+      - name: Install MSYS2 UCRT64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git
+          pacboy: >-
+            cc:p fc:p cmake:p ninja:p openblas:p msmpi:p
+
+      - name: Install MS-MPI runtime
+        uses: mpi4py/setup-mpi@v1
+        with:
+          mpi: msmpi
+
+      - name: Exclude workspace from Windows Defender scanning
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+
+      # build_all.sh's own env-var docs warn that vars can be lost across its
+      # internal cmd->msys2 re-exec -- irrelevant here since `shell: msys2 {0}`
+      # already runs this step natively inside the UCRT64 login shell, so
+      # build_all.sh sees MSYSTEM=UCRT64 and skips that re-exec entirely.
+      - name: Run build_all.sh (build -> deploy -> prune -> audit -> gates -> package)
+        shell: msys2 {0}
+        env:
+          ELMER_SRC: ${{ github.workspace }}/elmerfem
+          ELMER_BUILD: ${{ github.workspace }}/elmer-build
+          ELMER_INSTALL: ${{ github.workspace }}/elmer-install
+          ELMER_GATES: ${{ github.workspace }}/elmer-gates
+          ELMER_VAL: ${{ github.workspace }}/elmer-dist-build/validation
+          CODE_DIR: ${{ github.workspace }}
+          BUNDLE_NAME: ${{ needs.version.outputs.bundle_name }}
+        run: |
+          cd elmer-dist-build
+          # Positional args, not env: FROM STOP_AFTER PROD DRYRUN. PROD is
+          # hardcoded 0 -- this must never flip the local production bundle.
+          bash build_all.sh build package 0 0
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          audience: sts.amazonaws.com
+          aws-region: ${{ vars.AWS_REGION }}
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions-elmer-release
+
+      - name: Upload bundle to S3 (${{ needs.version.outputs.environment }})
+        shell: bash
+        run: |
+          set -euo pipefail
+          zip_name="${{ needs.version.outputs.bundle_name }}.zip"
+          aws s3 cp "${zip_name}" "s3://${{ vars.S3_BUCKET }}/${{ vars.S3_PREFIX }}/${zip_name}"
+          echo "Uploaded to s3://${{ vars.S3_BUCKET }}/${{ vars.S3_PREFIX }}/${zip_name}"
+
+      - name: Upload build/gate logs (always, for debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: elmer-build-logs-${{ needs.version.outputs.version }}
+          path: |
+            elmer-build/*.log
+            elmer-install/*.log
+            elmer-install/SOURCE.txt
+            elmer-gates/**
+          if-no-files-found: warn
+          retention-days: 14

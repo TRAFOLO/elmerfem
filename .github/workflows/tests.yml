@@ -1,0 +1,96 @@
+name: tests
+
+# Builds this repo's own source (not the TRAFOLO/elmer-dist-build packaging
+# pipeline used by release.yml) with the same Windows/MSYS2 UCRT64 amd64
+# toolchain as the shipped product, and runs the ctest suite. Matches
+# README-TRAFOLO.md: UMFPACK-only, no ElmerIce/GUI/VTK/OpenCASCADE, since
+# TRAFOLO doesn't ship those -- this is a single Windows amd64 config, no
+# Linux/macOS/ARM legs and no bundled/external matrix.
+
+on:
+  pull_request:
+
+concurrency:
+  group: elmer-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-ucrt64:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install MSYS2 UCRT64 toolchain
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: git
+          pacboy: >-
+            cc:p fc:p cmake:p ninja:p openblas:p msmpi:p
+
+      - name: Install MS-MPI runtime
+        uses: mpi4py/setup-mpi@v1
+        with:
+          mpi: msmpi
+
+      - name: Exclude workspace from Windows Defender scanning
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}"
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          mkdir build
+          cd build
+          cmake \
+            -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/install" \
+            -DBLA_VENDOR=OpenBLAS \
+            -DWITH_MPI=ON \
+            -DMPI_TEST_MAXPROC=$(nproc) \
+            -DMPIEXEC_EXECUTABLE="$(cygpath -m "${MSMPI_BIN}")/mpiexec.exe" \
+            -DWITH_OpenMP=OFF \
+            -DWITH_Zoltan=OFF \
+            -DWITH_Mumps=OFF \
+            -DWITH_ElmerIce=OFF \
+            -DWITH_ELMERGUI=OFF \
+            ..
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Install
+        run: cmake --install build
+
+      - name: Run ctest
+        id: run-ctest
+        timeout-minutes: 60
+        env:
+          CTEST_OUTPUT_ON_FAILURE: 1
+        run: |
+          cd build
+          ctest . -LE slow --timeout 300
+
+      - name: Re-run failed tests with logs
+        if: always() && steps.run-ctest.outcome == 'failure'
+        timeout-minutes: 20
+        env:
+          CTEST_OUTPUT_ON_FAILURE: 1
+        run: |
+          cd build
+          ctest --rerun-failed --output-on-failure --timeout 180 || true
+          echo "::group::Testing/Temporary/LastTest.log"
+          [ ! -f Testing/Temporary/LastTest.log ] || cat Testing/Temporary/LastTest.log
+          echo "::endgroup::"
