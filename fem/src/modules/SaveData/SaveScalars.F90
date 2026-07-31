@@ -1271,6 +1271,18 @@ SUBROUTINE SaveScalars( Model,Solver,dt,TransientSimulation )
   !------------------------------------------------------------------------------
   IF( NoValues == 0 ) THEN
     CALL Warn(Caller,'Found no values to save')
+    ! This partition has nothing to save, but the exit path of this routine is
+    ! collective: the ParallelReduction() near the end is executed by every
+    ! partition that does have values. Returning bare here leaves those blocked
+    ! in the reduction forever whenever the value set is partition dependent -
+    ! e.g. a solver whose target body this partition received no elements of,
+    ! so it published no 'res:' scalars here while the others did. Run the same
+    ! teardown as the normal exit before leaving.
+    DEALLOCATE( ElementNodes % x, ElementNodes % y, ElementNodes % z )
+    n = 1
+    n = ParallelReduction(n)
+    PrevRunInd = RunInd
+    IF( PrevComm > 0 ) ParEnv % ActiveComm = PrevComm
     RETURN
   ELSE
     CALL Info(Caller,'Found '//I2S(NoValues)//' values to save in total',Level=6)
