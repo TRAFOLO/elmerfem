@@ -12,10 +12,10 @@
 #
 
 IF(NOT CMAKE_BUILD_TYPE)
-  SET(CMAKE_BUILD_TYPE "RelWithDebInfo" CACHE STRING "Build type (Release, Debug, RelWithDebugInfo, MinSizeRel)")
+  SET(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type (Release, Debug, RelWithDebugInfo, MinSizeRel)")
 ENDIF()
 
-CMAKE_MINIMUM_REQUIRED(VERSION 3.10)
+CMAKE_MINIMUM_REQUIRED(VERSION 3.12)
 
 if(POLICY CMP0074)
     cmake_policy(SET CMP0074 NEW)
@@ -116,6 +116,8 @@ SET(INCLUDE_ELMER_MODULES "" CACHE STRING "Semicolon separated list of solver mo
 # Let user select if the contiguous attribute is used or not
 SET(USE_CONTIGUOUS FALSE CACHE BOOL "Use contiguous attribute")
 
+OPTION(EXTERNAL_METIS "Link to external Metis library" OFF)
+
 MARK_AS_ADVANCED(WITH_ELMERPOST)
 
 # if("${CMAKE_VERSION}" VERSION_GREATER 2.8.12)
@@ -208,6 +210,9 @@ IF(WITH_OpenMP)
   SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${OpenMP_C_FLAGS}")
   SET(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} ${OpenMP_Fortran_FLAGS}")
   SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
+  IF(OpenMP_Fortran_INCLUDE_DIR)
+    INCLUDE_DIRECTORIES("${OpenMP_Fortran_INCLUDE_DIR}")
+  ENDIF()
 
   # Set variables for supported OpenMP version
   IF(OpenMP_Fortran_VERSION VERSION_GREATER_EQUAL 4.0)
@@ -565,11 +570,12 @@ FIND_PACKAGE(LAPACK REQUIRED)
 SET(CMAKE_REQUIRED_LIBRARIES
   ${CMAKE_REQUIRED_LIBRARIES} ${BLAS_LIBRARIES} ${LAPACK_LIBRARIES})
 
+# Mumps: supports both parallel (MPI+ScaLAPACK) and sequential builds
+IF(WITH_Mumps)
+  FIND_PACKAGE(Mumps REQUIRED)
+ENDIF()
+
 IF(MPI_FOUND)
-  # Mumps
-  IF(WITH_Mumps)
-    FIND_PACKAGE(Mumps REQUIRED)
-  ENDIF()
   # Hypre
   IF(WITH_Hypre)
     FIND_PACKAGE(Hypre REQUIRED OPTIONAL_COMPONENTS Euclid parcsr_ls ParaSails IJ_mv FEI core QUIET)
@@ -841,12 +847,6 @@ IF(WITH_MPI)
   MESSAGE(STATUS "  MPI C libraries:   " "${MPI_C_LIBRARIES}")
   MESSAGE(STATUS "  MPI C flags:       " "${MPI_C_LINK_FLAGS}")
   MESSAGE(STATUS "------------------------------------------------")
-  IF(WITH_Mumps)
-    MESSAGE(STATUS "  Mumps:             " "${Mumps_FOUND}")
-    MESSAGE(STATUS "  Mumps include:     " "${Mumps_INCLUDE_DIR}")
-    MESSAGE(STATUS "  Mumps libraries:   " "${Mumps_LIBRARIES}")
-    MESSAGE(STATUS "------------------------------------------------")
-  ENDIF(WITH_Mumps)
   IF(WITH_Hypre)
     MESSAGE(STATUS "  Hypre:             " "${Hypre_FOUND}")
     MESSAGE(STATUS "  Hypre include:     " "${Hypre_INCLUDE_DIR}")
@@ -854,6 +854,13 @@ IF(WITH_MPI)
     MESSAGE(STATUS "------------------------------------------------")
   ENDIF(WITH_Hypre)
 ENDIF(WITH_MPI)
+
+IF(WITH_Mumps)
+  MESSAGE(STATUS "  Mumps:             " "${Mumps_FOUND}")
+  MESSAGE(STATUS "  Mumps include:     " "${Mumps_INCLUDE_DIR}")
+  MESSAGE(STATUS "  Mumps libraries:   " "${Mumps_LIBRARIES}")
+  MESSAGE(STATUS "------------------------------------------------")
+ENDIF(WITH_Mumps)
 
 IF(WITH_Trilinos)
   MESSAGE(STATUS "  Trilinos:           " "${Trilinos_FOUND}")

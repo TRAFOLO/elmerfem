@@ -47,7 +47,7 @@
        USE SParIterComm
        USE Interpolation
        USE CoordinateSystems
-       USE MeshUtils, ONLY: ReleaseMesh
+       USE MeshBasics, ONLY: ReleaseMesh
 !-------------------------------------------------------------------------------
        TYPE(Mesh_t), TARGET  :: OldMesh, NewMesh
        TYPE(Variable_t), POINTER, OPTIONAL :: OldVariables, NewVariables
@@ -518,7 +518,7 @@
 
       n = COUNT(.NOT. FoundNodes )           
       IF(n>0) CALL Info('InterpolateMeshToMesh',&
-	'Number of unfound nodes in all partitions: '//I2S(n),Level=6)
+       'Number of unfound nodes in all partitions: '//I2S(n),Level=6)
       
       IF(PRESENT(UnfoundNodes)) UnfoundNodes = .NOT. FoundNodes
       DEALLOCATE( FoundNodes ) 
@@ -646,7 +646,7 @@ END SUBROUTINE InterpolateMeshToMesh
        INTEGER, POINTER :: Indexes(:)
        REAL(KIND=dp), DIMENSION(3) :: LocalCoordinates
        TYPE(Variable_t), POINTER :: OldSol, NewSol, Var
-       REAL(KIND=dp), POINTER :: OldValue(:), NewValue(:), ElementValues(:)
+       REAL(KIND=dp), POINTER :: ElementValues(:)
        TYPE(Quadrant_t), POINTER :: LeafQuadrant
        TYPE(Element_t),POINTER :: Element, Parent
        
@@ -670,14 +670,14 @@ END SUBROUTINE InterpolateMeshToMesh
        INTEGER, ALLOCATABLE, TARGET :: RInd(:), Unitperm(:)
        LOGICAL :: Found, EpsAbsGiven,EpsRelGiven, MaskExists, CylProject, ProjectorAllocated
        INTEGER :: eps_tries, nrow, PassiveCoordinate
-       REAL(KIND=dp) :: eps1 = 0.1, eps2, eps_global, eps_local, eps_basis,eps_numeric
+       REAL(KIND=dp) :: eps1 = 0.1_dp, eps2, eps_global, eps_local, eps_basis,eps_numeric
        REAL(KIND=dp), POINTER CONTIG :: Values(:) 
        REAL(KIND=dp), POINTER :: LocalU(:), LocalV(:), LocalW(:)
 
-       TYPE(Nodes_t), SAVE :: Nodes
+       TYPE(Nodes_t) :: Nodes
        INTEGER, ALLOCATABLE :: OneDGIndex(:)
-              
-       !$OMP THREADPRIVATE(eps1,Nodes)
+
+       !$OMP THREADPRIVATE(eps1)
 
 !------------------------------------------------------------------------------
 
@@ -1062,7 +1062,7 @@ END SUBROUTINE InterpolateMeshToMesh
                     END IF
                   END IF
                 ELSE
-                  IF ( NewPerm(i)/=0 ) NewValue(NewPerm(i))=0.0_dp
+                  IF ( NewPerm(i)/=0 ) NewSol % Values(NewPerm(i)) = 0.0_dp
                 END IF
 
 !------------------------------------------------------------------------------
@@ -1264,7 +1264,7 @@ END SUBROUTINE InterpolateMeshToMesh
 !         ------------------------------------------ 
           Projector % TMatrix => NULL()
           IF(.NOT.EdgeBasis) THEN
-            IF ( Found ) THEN
+            IF ( FoundCnt > 0 ) THEN
               n = OldMesh % NumberOfNodes
               ! Needed for some matrices
               n = MAX( n, MAXVAL( Projector % Matrix % Cols ) )
@@ -1306,17 +1306,17 @@ END SUBROUTINE InterpolateMeshToMesh
 CONTAINS
 
   FUNCTION LegitInterpVar(Var) RESULT ( IsLegit )
-    TYPE(Variable_t), POINTER :: Var
+    TYPE(Variable_t) :: Var
     LOGICAL :: IsLegit
-        
-    IsLegit = ( Var % TYPE == Variable_on_nodes_on_elements .OR. Var % Type == Variable_on_nodes ) 
+
+    IsLegit = ( Var % TYPE == Variable_on_nodes_on_elements .OR. Var % Type == Variable_on_nodes )
     IF( Var % Dofs > 1 ) IsLegit = .FALSE.
     !IF( Var % Secondary ) IsLegit = .FALSE.
     IF(LEN(Var % Name) >= 10) THEN
       IF( Var % Name(1:10) == 'coordinate' ) IsLegit = .FALSE.
     END IF
     IF(.NOT. ASSOCIATED(Var % Perm) .AND. SIZE(Var % Values) == 1 ) IsLegit = .FALSE.
-    
+
   END FUNCTION LegitInterpVar
 
   
@@ -1443,9 +1443,9 @@ CONTAINS
     USE MortarUtils, ONLY : PreRotationalProjector, PostRotationalProjector
     IMPLICIT NONE
 
-    TYPE(Mesh_t), POINTER :: BMesh1, BMesh2
+    TYPE(Mesh_t) :: BMesh1, BMesh2
     REAL(KIND=dp) :: PeriodicScale
-    INTEGER, POINTER :: InvPerm1(:), InvPerm2(:)
+    INTEGER :: InvPerm1(:), InvPerm2(:)
     LOGICAL :: UseQuadrantTree, Repeating, AntiRepeating
     TYPE(Matrix_t), POINTER :: Projector
     LOGICAL :: NodalJump
@@ -1797,27 +1797,72 @@ CONTAINS
     USE Integration
     USE ElementDescription
     IMPLICIT NONE
-    
-    TYPE(Mesh_t), POINTER :: Mesh
-    TYPE(Element_t), POINTER :: Element
+
+    TYPE(Mesh_t) :: Mesh
+    TYPE(Element_t), TARGET :: Element
     INTEGER :: nip, ndg
     REAL(KIND=dp) :: fip(:), fdg(:)
     !------------------------------------------------------------------------------
     REAL(KIND=dp) :: Weight, DetJ
-    REAL(KIND=dp), ALLOCATABLE :: Basis(:), MASS(:,:), LOAD(:)
-    INTEGER :: i,t,p,q,n
+    INTEGER :: i,t,p,q,n,tid,nthr
     TYPE(GaussIntegrationPoints_t) :: IP
-    TYPE(Nodes_t) :: Nodes
-    LOGICAL :: Stat, CSymmetry, AllocationsDone = .FALSE.
+    LOGICAL :: Stat
     CHARACTER(*), PARAMETER :: Caller = 'Ip2DgFieldInElement'
-    TYPE(Element_t), POINTER :: PrevElement => NULL()
 
-    SAVE Nodes, Basis, MASS, LOAD, CSymmetry, PrevElement, AllocationsDone
+    ! Per-thread scratch state — NOT THREADPRIVATE (Windows/GCC emutls bug,
+    ! see no-threadprivate branch). Used to be a single SAVE'd workspace
+    ! (Nodes/Basis/MASS/LOAD/PrevElement) shared by all callers; harmless
+    ! while this routine was only ever reached serially, but as soon as a
+    ! caller (e.g. a "-ip" exported variable used in a boundary condition)
+    ! runs from a parallel element loop, threads race on the same Basis/MASS
+    ! allocation and on each other's element data.
+    TYPE :: Ip2DgState_t
+      TYPE(Nodes_t) :: Nodes
+      REAL(KIND=dp), ALLOCATABLE :: Basis(:), MASS(:,:), LOAD(:)
+      LOGICAL :: CSymmetry = .FALSE.
+      LOGICAL :: AllocationsDone = .FALSE.
+      TYPE(Element_t), POINTER :: PrevElement => NULL()
+    END TYPE Ip2DgState_t
+    TYPE(Ip2DgState_t), ALLOCATABLE, TARGET, SAVE :: States(:)
     !------------------------------------------------------------------------------
+
+    tid = 1
+    !$ tid = omp_get_thread_num() + 1
+
+    ! Unlike bulk assembly, boundary assembly has no serial "warm-up" element
+    ! that resolves shared setup before the parallel loop starts, so every
+    ! thread can reach this function's very first call at once. The unguarded
+    ! "IF (.NOT. ALLOCATED(States))" fast-path read this used to have (before
+    ! ever entering the critical section) is a classic double-checked-locking
+    ! race: one thread can observe States as allocated, from another thread's
+    ! write, before that allocation's contents are actually visible to it —
+    ! especially under -O3 reordering. Always taking the critical section here
+    ! is the safe fix; the cost is negligible next to the ElementInfo/LuSolve
+    ! work this routine already does per call.
+    !$OMP CRITICAL (Ip2DgFieldInElementInit)
+    IF( .NOT. ALLOCATED( States ) ) THEN
+      nthr = 1
+      !$ nthr = omp_get_max_threads()
+      ALLOCATE( States(nthr) )
+    END IF
+    !$OMP END CRITICAL (Ip2DgFieldInElementInit)
+
+    ! Basis/MASS/LOAD are whole-allocatable components that get allocated
+    ! below (first touch per thread) — an ASSOCIATE name never inherits the
+    ! ALLOCATABLE attribute from its selector, and gfortran does not
+    ! reliably track the allocation status through such a name when the
+    ! allocation happens later via a different alias to the same variable,
+    ! so they're referenced as States(tid) % ... directly throughout instead
+    ! of through ASSOCIATE. Nodes/CSymmetry/AllocationsDone are fine to
+    ! ASSOCIATE: Nodes is a plain (non-allocatable) derived-type variable,
+    ! and CSymmetry/AllocationsDone are plain scalars.
+    ASSOCIATE( Nodes => States(tid) % Nodes, &
+        CSymmetry => States(tid) % CSymmetry, &
+        AllocationsDone => States(tid) % AllocationsDone )
 
     IF( .NOT. AllocationsDone ) THEN
       n = Mesh % MaxElementNodes
-      ALLOCATE( Basis(n), LOAD(n), MASS(n,n) )
+      ALLOCATE( States(tid) % Basis(n), States(tid) % LOAD(n), States(tid) % MASS(n,n) )
       CSymmetry = CurrentCoordinateSystem() == AxisSymmetric .OR. &
           CurrentCoordinateSystem() == CylindricSymmetric
       ALLOCATE( Nodes % x(n), Nodes % y(n), Nodes % z(n) )
@@ -1829,44 +1874,47 @@ CONTAINS
       fdg(1:ndg) = 0.0_dp
       RETURN
     END IF
-    
-    n = Element % TYPE % NumberOfNodes 
+
+    n = Element % TYPE % NumberOfNodes
     IF( n /= ndg ) CALL Fatal(Caller,'Mismatch in sizes!')
 
     ! We could probably do more to utilize the previous visit to save resources...
-    IF(.NOT. ASSOCIATED( Element, PrevElement ) ) THEN
+    IF(.NOT. ASSOCIATED( States(tid) % PrevElement, Element ) ) THEN
       Nodes % x(1:n) = Mesh % Nodes % x(Element % NodeIndexes)
       Nodes % y(1:n) = Mesh % Nodes % y(Element % NodeIndexes)
       Nodes % z(1:n) = Mesh % Nodes % z(Element % NodeIndexes)
-      PrevElement => Element
+      States(tid) % PrevElement => Element
     END IF
 
-    MASS  = 0._dp
-    LOAD = 0._dp
+    States(tid) % MASS = 0._dp
+    States(tid) % LOAD = 0._dp
 
     ! Numerical integration:
     !-----------------------
     IP = GaussPoints( Element, nip )
 
     DO t=1,IP % n
-      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), detJ, Basis )
+      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), detJ, States(tid) % Basis )
       Weight = IP % s(t) * DetJ
 
       IF( CSymmetry ) THEN
-        Weight = Weight * SUM( Basis(1:n) * Nodes % x(1:n) )
+        Weight = Weight * SUM( States(tid) % Basis(1:n) * Nodes % x(1:n) )
       END IF
 
       DO p=1,n
-        LOAD(p) = LOAD(p) + Weight * Basis(p) * fip(t)
+        States(tid) % LOAD(p) = States(tid) % LOAD(p) + Weight * States(tid) % Basis(p) * fip(t)
         DO q=1,n
-          MASS(p,q) = MASS(p,q) + Weight * Basis(q) * Basis(p)
+          States(tid) % MASS(p,q) = States(tid) % MASS(p,q) + &
+              Weight * States(tid) % Basis(q) * States(tid) % Basis(p)
         END DO
       END DO
     END DO
 
-    CALL LuSolve(n,MASS,LOAD) 
+    CALL LuSolve(n, States(tid) % MASS, States(tid) % LOAD)
 
-    fdg(1:n) = LOAD(1:n)
+    fdg(1:n) = States(tid) % LOAD(1:n)
+
+    END ASSOCIATE
 !------------------------------------------------------------------------------
   END SUBROUTINE Ip2DgFieldInElement
 !------------------------------------------------------------------------------
@@ -1879,11 +1927,11 @@ CONTAINS
 !------------------------------------------------------------------------------
   SUBROUTINE HierarchicPToLagrange(PElement, Degree, PSol, LSol, DOFs, PSolver)
 !------------------------------------------------------------------------------
-    USE MeshUtils, ONLY: AllocateElement
+    USE MeshBasics, ONLY: AllocateElement
     USE ElementDescription
     IMPLICIT NONE
 
-    TYPE(Element_t), POINTER, INTENT(IN) :: PElement         !< An element structure capable for p-approximation
+    TYPE(Element_t), TARGET, INTENT(IN) :: PElement          !< An element structure capable for p-approximation
     INTEGER, INTENT(IN) :: Degree                            !< The desired order of the Lagrange interpolant
     REAL(KIND=dp), INTENT(IN) :: PSol(:,:)                   !< The DOFs of p-solution
     REAL(KIND=dp), INTENT(INOUT) :: LSol(:,:)                !< The DOFs for the Lagrange interpolation

@@ -1124,6 +1124,7 @@ CONTAINS
       IF ( LondonEquations ) THEN
         LondonLambda_ip = SUM( Basis(1:nn) * LondonLambda(1:nn) )
 
+        val = 0.0_dp
         IF(dim==2) val = IP % s(t)*detJ/LondonLambda_ip*grads_coeff**2*circ_eq_coeff
         val = val * Comp % VoltageFactor
         ! Phi (beta grad phi_0, grad phi')
@@ -1140,9 +1141,11 @@ CONTAINS
           ! Phi * ( beta * grad phi, a')
           ! where phi is the node flux scalar potential
           ! -------------------------------------------
+          val = 0.0_dp
           IF(dim==2) val = IP % s(t)*detJ/LondonLambda_ip*basis(j)*grads_coeff*circ_eq_coeff
           CALL AddToMatrixElement(CM, vvarId, PS(Indexes(q)), val)
 
+          val = 0.0_dp
           IF(dim==2) val = IP % s(t)*detJ/LondonLambda_ip*basis(j)*grads_coeff
           val = val * Comp % VoltageFactor
           CALL AddToMatrixElement(CM, PS(indexes(q)), vvarId, val)
@@ -1198,7 +1201,7 @@ CONTAINS
     USE MGDynMaterialUtils
     IMPLICIT NONE
     INTEGER :: nn, nd
-    TYPE(Element_t), POINTER :: Element
+    TYPE(Element_t), TARGET :: Element
     REAL(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val, dt
     TYPE(Component_t) :: Comp
 
@@ -1383,7 +1386,7 @@ CONTAINS
   SUBROUTINE GetConductivity(Element, Tcoef, nn)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    TYPE(Element_t), POINTER :: Element
+    TYPE(Element_t), TARGET :: Element
     TYPE(Valuelist_t), POINTER :: Material
     REAL(KIND=dp) :: Tcoef(3,3,nn)
     REAL(KIND=dp), POINTER, SAVE :: Cwrk(:,:,:)
@@ -2334,6 +2337,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF ( LondonEquations ) THEN
         LondonLambda_ip = SUM( Basis(1:nn) * LondonLambda(1:nn) )
 
+        val = 0.0_dp
         IF(dim==2) val = IP % s(t)*detJ/LondonLambda_ip*grads_coeff**2*circ_eq_coeff
         val = val * Comp % VoltageFactor
         ! Phi (beta grad phi_0, grad phi')
@@ -2346,14 +2350,16 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       DO j=1,ncdofs
         q=j
         IF (dim == 3) q=q+nn
- 
+
         IF ( LondonEquations ) THEN
           ! Phi * ( beta * grad phi, a')
           ! where phi is the node flux scalar potential
           ! -------------------------------------------
+          val = 0.0_dp
           IF(dim==2) val = IP % s(t)*detJ/LondonLambda_ip*basis(j)*grads_coeff*circ_eq_coeff
           CALL AddToCmplxMatrixElement(CM, vvarId, ReIndex(PS(Indexes(q))), val, 0._dp)
 
+          val = 0.0_dp
           IF(dim==2) val = IP % s(t)*detJ/LondonLambda_ip*basis(j)*grads_coeff
           val = val * Comp % VoltageFactor
           CALL AddToCmplxMatrixElement(CM, ReIndex(PS(indexes(q))), vvarId, val, 0._dp)
@@ -2674,7 +2680,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
   SUBROUTINE GetConductivity(Element, Tcoef, nn)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    TYPE(Element_t), POINTER :: Element
+    TYPE(Element_t), TARGET :: Element
     TYPE(Valuelist_t), POINTER :: Material
     COMPLEX(KIND=dp) :: Tcoef(3,3,nn)
     REAL(KIND=dp), POINTER, SAVE :: Cwrk(:,:,:), Cwrk_im(:,:,:) 

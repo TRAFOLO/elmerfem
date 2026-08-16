@@ -57,15 +57,15 @@ CONTAINS
 !------------------------------------------------------------------------------
       IMPLICIT NONE
 
-      TYPE(Solver_t), POINTER :: Solver
+      TYPE(Solver_t) :: Solver
       TYPE(Matrix_t), POINTER :: A
       TYPE(Mesh_t) :: Mesh
       INTEGER :: Level, DOFs
       REAL(KIND=dp), TARGET CONTIG :: x(:),b(:),r(:)
       REAL(KIND=dp) :: RNorm, rphi=5.0_dp
       LOGICAL, OPTIONAL :: PreSmooth, LowestSmooth
-      INTEGER, POINTER, OPTIONAL :: CF(:)
-      LOGICAL, POINTER, OPTIONAL :: SkipMask(:)
+      INTEGER, OPTIONAL :: CF(:)
+      LOGICAL, OPTIONAL :: SkipMask(:)
 !------------------------------------------------------------------------------
       CHARACTER(:), ALLOCATABLE :: IterMethod
       LOGICAL :: Parallel, Found, Lowest, Pre
@@ -76,7 +76,7 @@ CONTAINS
       REAL(KIND=dp) :: Omega, Bnorm, TOL
       REAL(KIND=dp), POINTER :: TmpArray(:,:)
       REAL(KIND=dp), ALLOCATABLE :: Q(:), Z(:), Ri(:), T(:), &
-             T1(:), T2(:), S(:), V(:), Pr(:), dx(:),diag(:)
+             T1(:), T2(:), S(:), V(:), Pr(:), dx(:),diag(:),invdiag(:)
 !------------------------------------------------------------------------------
       TYPE( IfLColsT), POINTER :: IfL, IfO
       INTEGER :: row
@@ -96,19 +96,32 @@ CONTAINS
         Mr => r
 
         n = A % NumberOfRows
-        ALLOCATE(Diag(n))
+        ALLOCATE(Diag(n), InvDiag(n))
         Diag = A % Values(A % Diag)
       ELSE
         CALL ParallelUpdateSolve( A,x,r )
         M => ParallelMatrix( A, Mx, Mb, Mr )
 
         n = M % NumberOfRows
-        ALLOCATE(Diag(n))
+        ALLOCATE(Diag(n), InvDiag(n))
         Diag = M % Values(M % Diag)
       END IF
-      
-      InvLevel = MAX(1,1 + Solver % MultiGridTotal - Level)
+      WHERE (Diag /= 0.0_dp)
+        InvDiag = 1.0_dp / Diag
+      ELSEWHERE
+        InvDiag = 0.0_dp
+      END WHERE
 
+      ! If we have a MG algo then the Smoother count order is reversed.
+      ! The other use case is, for example, "Prec Solvers" where the
+      ! smoother count order is maintained. 
+      IF( Solver % MultiGridTotal > 0 ) THEN
+        InvLevel = MAX(1,1 + Solver % MultiGridTotal - Level)
+      ELSE
+        InvLevel = Level
+      END IF
+
+        
       Lowest = .FALSE.
       IF( PRESENT( LowestSmooth ) ) Lowest = LowestSmooth
 
@@ -354,6 +367,13 @@ CONTAINS
 
 
 !------------------------------------------------------------------------------
+!> The bilinear form x^T y, deliberately WITHOUT conjugation. Its only user is
+!> the CCG smoother, and the systems assembled here are complex symmetric
+!> (A = A^T) rather than Hermitian: under the Hermitian product A is not
+!> self-adjoint and the conjugate-direction recurrence of CG has no basis.
+!> Note that Fortran DOT_PRODUCT on COMPLEX conjugates its first argument, so
+!> it is not what is wanted here.
+!------------------------------------------------------------------------------
     FUNCTION MGCdot( n, x, y ) RESULT(s)
 !------------------------------------------------------------------------------
        IMPLICIT NONE
@@ -362,9 +382,9 @@ CONTAINS
        COMPLEX(KIND=dp) CONTIG :: x(:),y(:)
 !------------------------------------------------------------------------------
        IF ( .NOT. Parallel ) THEN
-         s = DOT_PRODUCT( x(1:n), y(1:n) )
+         s = SUM( x(1:n) * y(1:n) )
        ELSE
-         s = ParallelCDot( n, x, y )
+         s = ParallelCDotU( n, x, y )
        END IF
 !------------------------------------------------------------------------------
     END FUNCTION MGCdot
@@ -426,7 +446,8 @@ CONTAINS
       SUBROUTINE Jacobi( n, A, M, x, b, r, Rounds)
 !-------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t), POINTER :: A
+        TYPE(Matrix_t) :: M
         INTEGER :: Rounds
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
 !------------------------------------------------------------------------------
@@ -436,9 +457,7 @@ CONTAINS
           CALL MGmv(A, x, r)
           DO j=1,n
             r(j) = b(j) - r(j)
-            IF( Diag(j) > EPSILON( Diag(j) ) ) THEN
-              x(j) = x(j) + r(j) / Diag(j)
-            END IF
+            x(j) = x(j) + r(j) * InvDiag(j)
           END DO
         END DO
 !------------------------------------------------------------------------------
@@ -450,7 +469,8 @@ CONTAINS
       SUBROUTINE SmoothedJacobi( n, A, M, x, b, r, w, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t), POINTER :: A
+        TYPE(Matrix_t) :: M
         INTEGER :: Rounds
         REAL(KIND=dp) :: w
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
@@ -461,7 +481,7 @@ CONTAINS
           CALL MGmv( A, x, r )
           DO j=1,n
             r(j) = b(j) - r(j)
-            x(j) = x(j) + w * r(j) / Diag(j)
+            x(j) = x(j) + w * r(j) * InvDiag(j)
           END DO
         END DO
 !------------------------------------------------------------------------------
@@ -473,20 +493,21 @@ CONTAINS
       SUBROUTINE MaskedJacobi( n, A, M, x, b, r, w, Mask, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t), POINTER :: A
+        TYPE(Matrix_t) :: M
         INTEGER :: Rounds
         REAL(KIND=dp) :: w
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
-        LOGICAL, POINTER :: Mask(:)
+        LOGICAL :: Mask(:)
 !------------------------------------------------------------------------------
         INTEGER :: i,j,n
 !------------------------------------------------------------------------------
         DO i=1,Rounds
           CALL MGmv( A, x, r )
           DO j=1,n
-            IF( Mask(i) ) CYCLE
+            IF( Mask(j) ) CYCLE
             r(j) = b(j) - r(j)
-            x(j) = x(j) + w * r(j) / Diag(j)
+            x(j) = x(j) + w * r(j) * InvDiag(j)
           END DO
         END DO
 !------------------------------------------------------------------------------
@@ -498,7 +519,8 @@ CONTAINS
       SUBROUTINE ComplexJacobi( n, A, M, rx, rb, rr, w, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER, INTENT(IN) :: A, M
+        TYPE(Matrix_t), POINTER, INTENT(IN) :: A
+        TYPE(Matrix_t), INTENT(IN) :: M
         INTEGER, INTENT(IN) :: n, Rounds
         REAL(KIND=dp) CONTIG, INTENT(INOUT) :: rx(:)
         REAL(KIND=dp) CONTIG, INTENT(IN) :: rb(:)
@@ -549,7 +571,7 @@ CONTAINS
       SUBROUTINE GS( n, A, M, x, b, r, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: Rounds
         REAL(KIND=dp) CONTIG  :: x(:),b(:),r(:)
 !------------------------------------------------------------------------------
@@ -570,7 +592,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + r(i)
           END DO
         END DO
@@ -585,7 +607,7 @@ CONTAINS
       SUBROUTINE Richards( n, A, M, x, b, r, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: Rounds
         REAL(KIND=dp) CONTIG  :: x(:),b(:),r(:)
 !------------------------------------------------------------------------------
@@ -623,7 +645,7 @@ CONTAINS
       SUBROUTINE BGS( n, A, M, x, b, r, DOFs, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: DOFs, Rounds
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
 !------------------------------------------------------------------------------
@@ -647,8 +669,8 @@ CONTAINS
               END DO
             END DO
             DO dof=1,DOFs
-              id = (i-1)*DOFs + dof             
-              r(id) = (b(id)-s(dof)) / Diag(j)
+              id = (i-1)*DOFs + dof
+              r(id) = (b(id)-s(dof)) * InvDiag(id)
               x(id) = x(id) + r(id)
             END DO
           END DO
@@ -663,7 +685,7 @@ CONTAINS
       SUBROUTINE SmoothedGS( n, A, M, x, b, r, w, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: Rounds
         REAL(KIND=dp) :: w
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
@@ -685,7 +707,7 @@ CONTAINS
               s = s + x(Cols(j)) * Values(j)
             END DO
             
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + w * r(i)
           END DO
         END DO
@@ -698,7 +720,7 @@ CONTAINS
       SUBROUTINE SGS( n, A, M, x, b, r, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: Rounds
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
         INTEGER :: i,j,k,n
@@ -716,7 +738,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + r(i)
           END DO
           
@@ -725,7 +747,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + r(i)
           END DO
         END DO
@@ -741,7 +763,7 @@ CONTAINS
 !------------------------------------------------------------------------------
         IMPLICIT NONE
 
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: n,Rounds
         REAL(KIND=dp) CONTIG :: rx(:),rb(:),rr(:)
 
@@ -818,7 +840,7 @@ CONTAINS
       SUBROUTINE InternalSGS( n, A, M, x, b, r, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: Rounds
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
         INTEGER :: i,j,k,n
@@ -869,7 +891,7 @@ CONTAINS
       SUBROUTINE MaskedSGS( n, A, M, x, b, r, w, Mask, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         REAL(KIND=dp) :: w
         INTEGER :: Rounds
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
@@ -877,8 +899,8 @@ CONTAINS
         REAL(KIND=dp) :: s,dia
         INTEGER, POINTER CONTIG :: Cols(:),Rows(:)
         REAL(KIND=dp), POINTER CONTIG :: Values(:)
-        LOGICAL, POINTER :: Mask(:)
-        
+        LOGICAL :: Mask(:)
+
         Rows   => A % Rows
         Cols   => A % Cols 
         Values => A % Values
@@ -924,7 +946,7 @@ CONTAINS
       SUBROUTINE BSGS( n, A, M, x, b, r, DOFs, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: DOFs, Rounds
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
         INTEGER :: i,j,k,n,id,dof
@@ -947,7 +969,7 @@ CONTAINS
             END DO
             DO dof = 1,DOFs
               id = (i-1)*DOFs + dof
-              r(id) = (b(id)-s(dof)) / Diag(id)
+              r(id) = (b(id)-s(dof)) * InvDiag(id)
               x(id) = x(id) + r(id)
             END DO
           END DO
@@ -962,7 +984,7 @@ CONTAINS
             END DO
             DO dof = 1,DOFs
               id = (i-1)*DOFs + dof
-              r(id) = (b(id)-s(dof)) / Diag(id)
+              r(id) = (b(id)-s(dof)) * InvDiag(id)
               x(id) = x(id) + r(id)
             END DO
           END DO
@@ -975,7 +997,7 @@ CONTAINS
       SUBROUTINE SmoothedSGS( n, A, M, x, b, r, w, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: Rounds
         REAL(KIND=dp) :: w
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
@@ -994,7 +1016,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + w * r(i)
           END DO
           
@@ -1003,7 +1025,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + w * r(i)
           END DO
         END DO
@@ -1015,7 +1037,8 @@ CONTAINS
       SUBROUTINE ComplexSGS( n, A, M, rx, rb, rr, w, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER, INTENT(IN) :: A, M
+        TYPE(Matrix_t), POINTER, INTENT(IN) :: A
+        TYPE(Matrix_t), INTENT(IN) :: M
         INTEGER, INTENT(IN) :: Rounds
         REAL(KIND=dp), INTENT(IN) :: w
         REAL(KIND=dp) CONTIG, INTENT(INOUT) :: rx(:)
@@ -1081,9 +1104,9 @@ CONTAINS
       SUBROUTINE PostSGS( n, A, M, x, b, r, f, Rounds )
 !------------------------------------------------------------------------------
         IMPLICIT NONE
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t) :: A, M
         INTEGER :: Rounds
-        INTEGER, POINTER :: f(:)
+        INTEGER :: f(:)
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
         INTEGER :: i,j,k,n
         REAL(KIND=dp) :: s
@@ -1102,7 +1125,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + r(i)
           END DO
           DO i=1,n
@@ -1111,7 +1134,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + r(i)
           END DO
           
@@ -1121,7 +1144,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + r(i)
           END DO
           DO i=n,1,-1
@@ -1130,7 +1153,7 @@ CONTAINS
             DO j=Rows(i),Rows(i+1)-1
               s = s + x(Cols(j)) * Values(j)
             END DO
-            r(i) = (b(i)-s) / Diag(i)
+            r(i) = (b(i)-s) * InvDiag(i)
             x(i) = x(i) + r(i)
           END DO
           
@@ -1150,12 +1173,13 @@ CONTAINS
       SUBROUTINE Direct1dSmoother( n, A, M, x, b, r, f, Rounds )
 !------------------------------------------------------------------------------
         USE DirectSolve, ONLY : DirectSolver
-        USE MeshUtils, ONLY : DetectExtrudedStructure
+        USE MeshTransform, ONLY : DetectExtrudedStructure
         IMPLICIT NONE
 !------------------------------------------------------------------------------
-        TYPE(Matrix_t), POINTER :: A, M
+        TYPE(Matrix_t), POINTER :: A
+        TYPE(Matrix_t) :: M
         INTEGER :: Rounds
-        INTEGER, POINTER :: f(:)
+        INTEGER :: f(:)
         REAL(KIND=dp) CONTIG :: x(:),b(:),r(:)
         INTEGER :: i,j,k,kb,n
         REAL(KIND=dp) :: s,rowsum,frac
@@ -1602,7 +1626,6 @@ DO it=1,200
 
          CALL MGMv( A,x,r )
          r(1:n) = b(1:n) - r(1:n)
-         PRINT*,'AAAAAAAAAA: ', it, Rounds, st_norm*0.5_dp, SQRT(SUM(r**2))
 
          IF ( it > Rounds ) THEN
            IF ( SQRT(SUM(r**2)) < 0.5_dp*st_norm ) EXIT

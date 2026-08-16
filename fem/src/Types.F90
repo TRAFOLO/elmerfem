@@ -90,13 +90,13 @@ MODULE Types
                         
 
   INTEGER, PARAMETER :: SOLVER_MODE_DEFAULT = 0, &    ! normal pde
-	                      SOLVER_MODE_AUXILIARY = 1, &  ! no fem machinery (SaveData)
-	                      SOLVER_MODE_ASSEMBLY = 2, &   ! coupled solver with single block
-	                      SOLVER_MODE_COUPLED = 3, &    ! coupled solver with multiple blocks
-	                      SOLVER_MODE_BLOCK = 4, &      ! block solver
-	                      SOLVER_MODE_GLOBAL = 5, &     ! lumped variables (no mesh)
-	                      SOLVER_MODE_MATRIXFREE = 6, & ! normal field, no matrix
-                              SOLVER_MODE_STEPS = 7         ! as the legacy but split to different steps
+                        SOLVER_MODE_AUXILIARY = 1, &  ! no fem machinery (SaveData)
+                        SOLVER_MODE_ASSEMBLY = 2, &   ! coupled solver with single block
+                        SOLVER_MODE_COUPLED = 3, &    ! coupled solver with multiple blocks
+                        SOLVER_MODE_BLOCK = 4, &      ! block solver
+                        SOLVER_MODE_GLOBAL = 5, &     ! lumped variables (no mesh)
+                        SOLVER_MODE_MATRIXFREE = 6, & ! normal field, no matrix
+                        SOLVER_MODE_STEPS = 7         ! as the legacy but split to different steps
 
   INTEGER, PARAMETER :: PROJECTOR_TYPE_DEFAULT = 0, &  ! unspecified constraint matrix
                         PROJECTOR_TYPE_NODAL = 1, &    ! nodal projector
@@ -286,7 +286,7 @@ MODULE Types
     INTEGER(KIND=C_INTPTR_T) :: AMGX=0, AMGXMV=0
     INTEGER(KIND=AddrInt) :: SpMV=0
 
-    INTEGER(KIND=AddrInt) :: MatVecSubr = 0
+    TYPE(C_FUNPTR) :: MatVecSubr = C_NULL_FUNPTR
 
     INTEGER, POINTER CONTIG :: ILURows(:)=>NULL(),ILUCols(:)=>NULL(),ILUDiag(:)=>NULL()
 
@@ -361,6 +361,10 @@ MODULE Types
   END TYPE IfLColsT
 
 
+  TYPE RealBuf_t
+    REAL(KIND=dp), ALLOCATABLE :: rbuf(:)
+  END TYPE RealBuf_t
+
   TYPE SplittedMatrixT
      TYPE (BasicMatrix_t), DIMENSION(:), POINTER :: IfMatrix=>NULL()
      TYPE (Matrix_t), POINTER :: InsideMatrix=>NULL()
@@ -375,6 +379,13 @@ MODULE Types
      TYPE (ResBufferT), DIMENSION(:), POINTER :: ResBuf=>NULL()
      REAL(KIND=dp), POINTER CONTIG :: &
            Work(:,:)=>NULL(),TmpXVec(:)=>NULL(),TmpRVec(:)=>NULL()
+     ! Persistent MPI communication buffers for SParMatrixVector (allocated once at setup)
+     INTEGER, ALLOCATABLE :: MVNeigh(:)
+     INTEGER, ALLOCATABLE :: MVSendSize(:)
+     INTEGER, ALLOCATABLE :: MVRecvSize(:)
+     TYPE(RealBuf_t), ALLOCATABLE :: MVSendBuf(:)
+     TYPE(RealBuf_t), ALLOCATABLE :: MVRecvBuf(:)
+     INTEGER, ALLOCATABLE :: MVRequests(:)
   END TYPE SplittedMatrixT
 
 
@@ -382,6 +393,11 @@ MODULE Types
      TYPE (SplittedMatrixT), POINTER :: SplittedMatrix=>NULL()
      TYPE (Matrix_t), POINTER :: Matrix=>NULL()
      INTEGER :: DOFs, RelaxIters
+     ! The active partitions and the neighbours are a property of the matrix,
+     ! not of the solver: one solver may own several matrices of differing
+     ! parallel structure. This is the owner of the > Active < and
+     ! > IsNeighbour < arrays, > Solver % ParEnv < only mirrors it.
+     TYPE(ParEnv_t) :: ParEnv
      TYPE (ParallelInfo_t), POINTER :: ParallelInfo=>NULL()
   END TYPE SParIterSolverGlobalD_t
 
@@ -400,8 +416,10 @@ MODULE Types
 
 
    !
-   ! Element type description 
+   ! Element type description
    !
+   INTEGER, PARAMETER :: ELEM_BASIS_CACHE_SIZE = 64
+
    TYPE ElementType_t
      TYPE(ElementType_t),POINTER :: NextElementType ! this is a list of types
 
@@ -422,6 +440,17 @@ MODULE Types
      REAL(KIND=dp), DIMENSION(:), ALLOCATABLE :: NodeU, NodeV, NodeW
      REAL(KIND=dp), DIMENSION(:), ALLOCATABLE :: P_NodeU, P_NodeV, P_NodeW
      REAL(KIND=dp), DIMENSION(:), ALLOCATABLE :: N_NodeU, N_NodeV, N_NodeW
+     ! Reference basis function cache — keyed by (u,v,w). This structure is
+     ! SHARED by every element of this type across all OpenMP threads, so the
+     ! cache is given a per-thread column (last index) to keep both lookup and
+     ! fill lock-free and race-free during threaded assembly (see ElemInfo's
+     ! ElementInfo). BasisCacheCount(tid)=0 means that thread's cache is empty.
+     INTEGER, ALLOCATABLE :: BasisCacheCount(:)          ! (nthreads)
+     REAL(KIND=dp), ALLOCATABLE :: BasisCacheU(:,:)      ! (ELEM_BASIS_CACHE_SIZE, nthreads)
+     REAL(KIND=dp), ALLOCATABLE :: BasisCacheV(:,:)
+     REAL(KIND=dp), ALLOCATABLE :: BasisCacheW(:,:)
+     REAL(KIND=dp), ALLOCATABLE :: BasisCache(:,:,:)     ! (ELEM_BASIS_CACHE_SIZE, n_nodes, nthreads)
+     REAL(KIND=dp), ALLOCATABLE :: dBasisCache(:,:,:,:)  ! (ELEM_BASIS_CACHE_SIZE, n_nodes, 3, nthreads)
    END TYPE ElementType_t
 
 !------------------------------------------------------------------------------
@@ -438,7 +467,7 @@ MODULE Types
      LOGICAL :: LValue
      INTEGER, POINTER :: IValues(:) => NULL()
 
-     INTEGER(KIND=AddrInt) :: PROCEDURE
+     TYPE(C_FUNPTR) :: PROCEDURE = C_NULL_FUNPTR
 
      REAL(KIND=dp) :: Coeff = 1.0_dp    
      CHARACTER(:), ALLOCATABLE :: CValue
@@ -929,7 +958,7 @@ MODULE Types
 
       INTEGER :: TimeOrder=0,DoneTime=0,Order=0,NOFEigenValues=0
       INTEGER :: TimesVisited = 0
-      INTEGER(KIND=AddrInt) :: PROCEDURE=0, LinBeforeProc=0, LinAfterProc=0
+      TYPE(C_FUNPTR) :: PROCEDURE = C_NULL_FUNPTR, LinBeforeProc = C_NULL_FUNPTR, LinAfterProc = C_NULL_FUNPTR
 
       REAL(KIND=dp) :: Alpha,Beta,dt
 
@@ -957,7 +986,7 @@ MODULE Types
       TYPE(Matrix_t), POINTER :: ConstraintMatrix => NULL()
       TYPE(MortarBC_t), POINTER :: MortarBCs(:) => NULL()
       LOGICAL :: MortarBCsChanged = .FALSE., ConstraintMatrixVisited = .FALSE.
-      INTEGER(KIND=AddrInt) :: BoundaryElementProcedure=0, BulkElementProcedure=0
+      TYPE(C_FUNPTR) :: BoundaryElementProcedure = C_NULL_FUNPTR, BulkElementProcedure = C_NULL_FUNPTR
 
       TYPE(Graph_t), POINTER :: ColourIndexList => NULL()
       TYPE(Graph_t), POINTER :: BoundaryColourIndexList => NULL()
