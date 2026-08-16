@@ -14,6 +14,12 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
 - `StatElecSolveVec` — thin-layer Robin coefficient fix (missing `Eps0`).
 - Transient winding homogenization (CalcFields effective conductivity).
 - Windows SIF path handling fix in the Lua layer.
+- `CircuitsAndDynamics` — nonlinear (solution-dependent) lumped circuit elements in
+  transient runs: the exported `crt i`/`crt v` variables are refreshed from the latest
+  coupled iterate on every execution instead of once per timestep, so component keywords
+  such as `Resistance = Variable "crt i 2"` converge as a Picard fixed point within each
+  timestep (needs `Export Circuit Variables = True` and `Steady State Max Iterations > 1`;
+  optional damping via `Circuit Variable Relaxation Factor`).
 
 ## Building
 

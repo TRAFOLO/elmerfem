@@ -257,7 +257,13 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   TYPE(Matrix_t), POINTER :: CM
   INTEGER, POINTER :: n_Circuits => Null()
   TYPE(Circuit_t), POINTER :: Circuits(:)  
-  REAL(KIND=dp), ALLOCATABLE :: Crt(:)     
+  REAL(KIND=dp), ALLOCATABLE :: Crt(:)
+  ! TRAFOLO: latest (current-iteration) circuit dofs and the vector actually
+  ! exported last time, both kept separate from Crt. Crt must keep
+  ! PREVIOUS-TIMESTEP values because AddBasicCircuitEquations uses it for the
+  ! BDF1 history term.
+  REAL(KIND=dp), ALLOCATABLE :: CrtIter(:), CrtExp(:)
+  REAL(KIND=dp) :: CrtRelax
   TYPE(Variable_t), POINTER :: LagrangeVar
   INTEGER :: Tstep=-1
   LOGICAL :: Parallel
@@ -267,7 +273,7 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   CHARACTER(LEN=MAX_NAME_LEN) :: sname
   CHARACTER(*), PARAMETER :: Caller = 'CircuitsAndDynamics'
 
-  SAVE First, Tstep, Parallel, Crt, MultName
+  SAVE First, Tstep, Parallel, Crt, CrtIter, CrtExp, CrtRelax, MultName
   
 !------------------------------------------------------------------------------
   
@@ -369,6 +375,17 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     ! ------------------------------------------------------
     CALL Circuits_MatrixInit()
     ALLOCATE(Crt(Model % Circuit_tot_n))
+    ! TRAFOLO: buffers for the latest coupled iterate and for the vector last
+    ! exported (needed for the optional relaxation), see the refresh below.
+    ALLOCATE(CrtIter(Model % Circuit_tot_n), CrtExp(Model % Circuit_tot_n))
+    CrtExp = 0._dp
+    CrtRelax = ListGetConstReal( Solver % Values,'Circuit Variable Relaxation Factor', Found )
+    IF(.NOT. Found ) THEN
+      CrtRelax = 1.0_dp
+    ELSE
+      WRITE( Message,'(A,ES12.3)') 'Relaxing exported circuit variables with factor: ',CrtRelax
+      CALL Info(Caller,Message,Level=6)
+    END IF
 
     MultName = LagrangeMultiplierName(ASolver)
   END IF
@@ -425,7 +442,37 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
       Crt = LagrangeVar % PrevValues(1:Model%Circuit_tot_n,1)
     END IF
     
-    CALL Circuits_ToMeshVariable(Solver,crt) 
+    CALL Circuits_ToMeshVariable(Solver,crt)
+    ! TRAFOLO: the relaxation history starts from the previous-timestep values.
+    IF( ALLOCATED(CrtExp) ) CrtExp = Crt
+  END IF
+
+  ! TRAFOLO: refresh the exported circuit variables ("crt i"/"crt v") from the
+  ! LATEST coupled iterate on every execution, so that solution-dependent
+  ! component parameters (e.g. a nonlinear Resistance = Variable "crt i 2")
+  ! see current-iteration values. Together with Steady State Max Iterations > 1
+  ! this makes the nonlinearity a Picard fixed point inside each timestep, and
+  ! 'Circuit Variable Relaxation Factor' w < 1 damps it when the fixed-point
+  ! map is not a contraction (exported = w*new + (1-w)*previously exported).
+  ! Before: the exported variables were written only once per timestep, from
+  ! PrevValues (the block just above), so any solution dependence lagged a full
+  ! timestep and never updated during the coupled iterations.
+  ! Limitations: Picard only (no Newton); convergence of the coupled loop is
+  ! monitored by the attached field solver, so a circuit with no FEM-coupled
+  ! component has no monitor; the refresh is a no-op unless the solver has
+  ! Export Circuit Variables = True (Circuits_ToMeshVariable early-returns).
+  ! Backward compatible: at coupled iteration 1 of a timestep the Lagrange
+  ! values still equal PrevValues (rotated just above), so with the default
+  ! w = 1 and Steady State Max Iterations = 1 the values written here are
+  ! identical to the ones written by the call above.
+  LagrangeVar => VariableGet( Solver % Mesh % Variables, MultName )
+  IF( ASSOCIATED(LagrangeVar) ) THEN
+    IF( SIZE(LagrangeVar % Values) >= Model % Circuit_tot_n ) THEN
+      CrtIter = LagrangeVar % Values(1:Model % Circuit_tot_n)
+      IF( CrtRelax /= 1.0_dp ) CrtIter = CrtRelax * CrtIter + (1.0_dp - CrtRelax) * CrtExp
+      CrtExp = CrtIter
+      CALL Circuits_ToMeshVariable(Solver,CrtIter)
+    END IF
   END IF
 
   max_element_dofs = Model % Mesh % MaxElementDOFs
