@@ -143,7 +143,12 @@ static int exec_compiler(const char *fc, const char *who)
 
 #if defined (_WIN32)
     /* Spawn new process and wait for its exit code on Windows. */
-    int status = _spawnvp(P_WAIT, fc, args);
+    /* TRAFOLO: cast argv to match UCRT's _spawnvp(int, const char*,
+       const char* const*). Before: passing the plain char** 'args' stopped
+       compiling on GCC >= 14, where -Wincompatible-pointer-types is an error
+       (breaks the MSYS2 UCRT64 build). Upstream-inherited defect, cast-only
+       fix; should also be submitted upstream. Applies to both call sites. */
+    int status = _spawnvp(P_WAIT, fc, (const char * const *)args);
     if (status == -1) {
         int first_errno = errno;
 
@@ -158,7 +163,7 @@ static int exec_compiler(const char *fc, const char *who)
 
             free(args[0]);
             args[0] = strdup(base);
-            status = _spawnvp(P_WAIT, base, args);
+            status = _spawnvp(P_WAIT, base, (const char * const *)args);
             if (status == -1)
                 fprintf(stderr,
                         "%s: could not exec build-time compiler '%s' (%s), "
