@@ -147,7 +147,33 @@ MACRO(RUN_ELMER_TEST)
 
   # Query number of physical CPU cores of the host
   cmake_host_system_information(RESULT PHYS_CPU QUERY NUMBER_OF_PHYSICAL_CORES)
+
+  # Set OpenMP thread stack size to match the Linux default (~8 MB from ulimit -s)
+  # if not already specified. GOMP on Windows defaults to a much smaller per-thread
+  # stack, which can cause silent stack overflows or SEGFAULTs in assembly routines.
+  IF(NOT DEFINED ENV{OMP_STACKSIZE})
+    SET(ENV{OMP_STACKSIZE} "8M")
+  ENDIF()
+
   IF(WITH_MPI)
+    # Under MPI+OpenMP oversubscription (MPI tasks * OpenMP threads > cores,
+    # common on CI runners), GCC's default active/spin-wait policy makes idle
+    # OpenMP threads busy-loop at barriers instead of yielding, starving the
+    # MPI progress needed for the frequent Allreduce calls in the parallel
+    # solvers. This turns oversubscription into a multi-minute stall instead
+    # of a graceful slowdown. PASSIVE makes idle threads yield immediately.
+    #
+    # This applies to the single-task tests too. It was briefly narrowed to
+    # MPIEXEC_NTASKS > 1 on the reasoning that one task cannot oversubscribe,
+    # since OMP_NUM_THREADS is set to PHYS_CPU/MPIEXEC_NTASKS just below. That
+    # reasoning ignores ctest -j: N serial tests running concurrently, each
+    # with OMP_NUM_THREADS = PHYS_CPU, oversubscribe by a factor of N. The
+    # serial tests got markedly slower with the narrowing in place, so it is
+    # reverted.
+    IF(NOT DEFINED ENV{OMP_WAIT_POLICY})
+      SET(ENV{OMP_WAIT_POLICY} "PASSIVE")
+    ENDIF()
+
     IF(NOT DEFINED ENV{OMP_NUM_THREADS})
       # Limit number of OpenMP threads to a sensible value
       # Divide by ${MPIEXEC_NTASKS} and truncate to the nearest lower integer

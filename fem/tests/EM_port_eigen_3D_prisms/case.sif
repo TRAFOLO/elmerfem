@@ -4,8 +4,6 @@
 ! for the 3-D model are then created by using the propagation parameter and the
 ! corresponding eigenfunction determined by the 2-D solution.
 !
-! NOTE: This is WIP and this approach is not yet ready for serious use
-
 ! The original author: M.M. 
 !
 
@@ -22,7 +20,7 @@ Simulation
   Coordinate System = "Cartesian 3D"
   Simulation Type = Steady State
   Steady State Max Iterations = 1
-  Max Output Level = 7
+  Max Output Level = 12
 End
 
 Constants
@@ -132,12 +130,11 @@ Solver 2
 ! Needed for auxiliary space preconditioning
   Exported Variable 1 = -dofs 2 e res
   Exported Variable 2 = -dofs 2 e update
-  Prec Solvers(1) = Integer 7
-  Additive Prec Solvers(1) = Integer 6
+  Prec Solvers(2) = Integer 6 7 !7 6
+
   Preconditioning Residual = String "e res"
   Preconditioning Update = String "e update"
-  Additive Preconditioning = Logical True
-  Additive Pre-Smoothing = Logical False
+  Additive Smoother = Logical False
 
   MG Smoother = csgs
 !  MG Pre Smoothing Iterations = 7

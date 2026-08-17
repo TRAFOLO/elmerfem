@@ -70,6 +70,8 @@ END INTERFACE
 
     REAL(KIND=dp), PRIVATE :: AdvanceTime1, AdvanceTime2
 
+    PRIVATE :: i2s_ndigits
+
 CONTAINS
 
 !------------------------------------------------------------------------------
@@ -152,64 +154,45 @@ CONTAINS
 !------------------------------------------------------------------------------
 !> Converts integer to string. Handy when writing output with integer data.
 !------------------------------------------------------------------------------
+  ! Number of characters I2S needs to represent IVAL (including a '-' sign).
+  ! PURE so it can appear in the length spec of I2S's automatic-length result.
+  PURE FUNCTION i2s_ndigits(ival) RESULT(n)
+!------------------------------------------------------------------------------
+    INTEGER, INTENT(in) :: ival
+    INTEGER :: n, v
+!------------------------------------------------------------------------------
+    n = 1
+    IF (ival < 0) n = 2          ! sign takes one extra character
+    v = ABS(ival)
+    DO WHILE (v >= 10)
+      n = n + 1
+      v = v / 10
+    END DO
+  END FUNCTION i2s_ndigits
+
   PURE FUNCTION i2s(ival) RESULT(s)
 !------------------------------------------------------------------------------
     INTEGER, INTENT(in) :: ival
-    CHARACTER(:), ALLOCATABLE :: s
+    ! NB: the result is an automatic-length CHARACTER, deliberately NOT
+    ! CHARACTER(:),ALLOCATABLE. gfortran (>=15.2) miscompiles a concatenation
+    ! whose operand is a deferred-length ALLOCATABLE function result when it is
+    ! evaluated inside an OpenMP region: the temporary is intermittently given
+    ! the wrong length, causing a heap-buffer-overflow (root cause of the
+    ! radiation2d_spectral / HeatSolveVec intermittent CI crashes). A
+    ! non-allocatable result avoids that path entirely, is standard F90 (more
+    ! portable), and is cheaper (no per-call heap allocation).
+    CHARACTER(LEN=i2s_ndigits(ival)) :: s
 !------------------------------------------------------------------------------
-    INTEGER :: i,j,n,t,v,len
-    INTEGER(8) :: m
+    INTEGER :: i, v
     CHARACTER, PARAMETER :: DIGITS(0:9)=['0','1','2','3','4','5','6','7','8','9']
 !------------------------------------------------------------------------------
-
-     IF(ival>=0) THEN
-       v = ival
-       IF (v<10) THEN
-         s = DIGITS(v)
-       ELSE IF (ival<100) THEN
-         i = v/10
-         s = DIGITS(i)//DIGITS(v-10*i)
-       ELSE
-         n=3
-         m=100
-         DO WHILE(10*m<=v)
-           n=n+1
-           m=m*10
-         END DO
-
-         ALLOCATE(CHARACTER(n)::s)
-         DO i=1,n
-           t = v / m
-           s(i:i) = DIGITS(t)
-           v = v - t*m
-           m = m / 10
-         END DO
-       END IF
-     ELSE
-       v = -ival
-       IF (v<10) THEN
-         s = '-'//DIGITS(v)
-       ELSE IF (v<100) THEN
-         i = v/10
-         s = '-'//DIGITS(i)//DIGITS(v-10*i)
-       ELSE
-         n=3
-         m=100
-         DO WHILE(10*m<=v)
-           n=n+1
-           m=m*10
-         END DO
-
-         ALLOCATE(CHARACTER(n+1)::s)
-         s(1:1) = '-'
-         DO i=2,n+1
-           t = v / m
-           s(i:i) = DIGITS(t)
-           v = v - t*m
-           m = m / 10
-         END DO
-       END IF
-     END IF
+    v = ABS(ival)
+    IF (ival < 0) s(1:1) = '-'
+    ! Fill least-significant digit first, right to left.
+    DO i = LEN(s), MERGE(2,1,ival<0), -1
+      s(i:i) = DIGITS(MOD(v,10))
+      v = v / 10
+    END DO
 !------------------------------------------------------------------------------
   END FUNCTION i2s
 !------------------------------------------------------------------------------
@@ -339,7 +322,11 @@ CONTAINS
     LOGICAL :: L
     CHARACTER(*), INTENT(IN) :: file
 !------------------------------------------------------------------------------
-    L = INDEX(file,':')>0 .OR. file(1:1)=='/' .OR. file(1:1)==Backslash
+    IF ( LEN(file) == 0 ) THEN
+      L = .FALSE.
+    ELSE
+      L = INDEX(file,':')>0 .OR. file(1:1)=='/' .OR. file(1:1)==Backslash
+    END IF
 !------------------------------------------------------------------------------
   END FUNCTION FileNameQualified
 !------------------------------------------------------------------------------
@@ -887,7 +874,7 @@ CONTAINS
 !>  lowercase.The logical line can continue the several physical lines by adding
 !>  the backslash (\) mark at the end of a physical line. 
 !------------------------------------------------------------------------------
-   RECURSIVE FUNCTION ReadAndTrim( Unit,str,echo,literal,noeval ) RESULT(l)
+   FUNCTION ReadAndTrim( Unit,str,echo,literal,noeval ) RESULT(l)
 !------------------------------------------------------------------------------
      INTEGER :: Unit                       !< Fortran unit number to read from
      CHARACTER(LEN=:), ALLOCATABLE :: str  !< The string read from the file
@@ -896,22 +883,24 @@ CONTAINS
      LOGICAL, OPTIONAL :: noeval
      LOGICAL :: l                          !< Success of the read operation
 !------------------------------------------------------------------------------     
-     INTEGER, PARAMETER :: MAXLEN = 163840
+     INTEGER, PARAMETER :: IncludeUnitBase = 28, MAXLEN = 163840, ilen = 12
      
      CHARACTER(LEN=:), ALLOCATABLE :: temp
-     CHARACTER(LEN=12) :: tmpstr
-     CHARACTER(LEN=MAXLEN) :: readstr = ' ', copystr = ' ', matcstr=' ' , IncludePath=' '
+     CHARACTER(LEN=ilen) :: tmpstr
+     CHARACTER(LEN=MAX_PATH_LEN) :: IncludePath = ' '
+     CHARACTER(LEN=MAXLEN) :: readstr = ' ', copystr, matcstr
 
      LOGICAL :: InsideQuotes, OpenSection=.FALSE., DoEval
-     INTEGER :: i,j,k,m,ValueStarts=0,inlen,ninlen,outlen,IncludeUnit=28,IncludeUnitBase=28
+     INTEGER :: i,j,k,m,ios,ValueStarts=0,inlen,ninlen,outlen,IncludeUnit=IncludeUnitBase
 
      CHARACTER(LEN=MAX_NAME_LEN) :: Prefix = '  '
 
      INTEGER, PARAMETER :: A=ICHAR('A'),Z=ICHAR('Z'),U2L=ICHAR('a')-ICHAR('A'),Tab=9
-     CHARACTER(LEN=MAXLEN) :: tmatcstr, tcmdstr
      INTEGER :: tninlen
+     CHARACTER(LEN=MAXLEN) :: tmatcstr, tcmdstr
 
-     SAVE ReadStr, ValueStarts, Prefix, OpenSection
+     SAVE ReadStr, ValueStarts, Prefix, OpenSection, IncludeUnit, IncludePath
+!------------------------------------------------------------------------------     
 
      IF ( PRESENT(literal) ) literal=.FALSE.
      l = .TRUE.
@@ -933,34 +922,36 @@ CONTAINS
      END IF
 
      IF ( ValueStarts == 0 ) THEN
-        tmpstr = ' '
+        tmpstr = ''
         DO WHILE( .TRUE. )
           IF ( IncludeUnit < IncludeUnitBase ) THEN
-            READ( IncludeUnit,'(A)',END=1,ERR=1 ) readstr
-            GO TO 2
-1           CLOSE(IncludeUnit)
-            IncludeUnit = IncludeUnit+1
-            READ( IncludeUnit,'(A)',END=10,ERR=10 ) readstr
-2           CONTINUE
+            READ( IncludeUnit,'(A)',IOSTAT=ios ) readstr
+            IF ( ios /= 0 ) THEN
+              CLOSE(IncludeUnit)
+              IncludeUnit = IncludeUnit+1
+              READ( IncludeUnit,'(A)',IOSTAT=ios ) readstr
+              IF ( ios /= 0 ) GO TO 10
+            END IF
           ELSE
-            READ( Unit,'(A)',END=10,ERR=10 ) readstr
+            READ( Unit,'(A)',IOSTAT=ios ) readstr
+            IF ( ios /= 0 ) GO TO 10
           END IF
 
           readstr = ADJUSTL(readstr)
 
-          DO k=1,12
+          DO k=1,ilen
             j = ICHAR(readstr(k:k))
             IF ( j >= A .AND. j<= Z ) THEN
-              Tmpstr(k:k) = CHAR(j+U2L)
+              tmpstr(k:k) = CHAR(j+U2L)
             ELSE
               tmpstr(k:k) = readstr(k:k)
             END IF
           END DO
 
-          IF ( SEQL(Tmpstr, 'include path') ) THEN
+          IF ( SEQL(tmpstr, 'include path') ) THEN
             k = LEN_TRIM(readstr)
-            IncludePath(1:k-13) = readstr(14:k)
-            Tmpstr = ''
+            includePath(1:k-ilen-1) = readstr(ilen+2:k)
+            tmpstr = ''
           ELSE
             EXIT
           END IF
@@ -993,12 +984,13 @@ CONTAINS
           
           CALL OpenIncludeFile( IncludeUnit, TRIM(readstr(9:)), IncludePath )
           
-          READ( IncludeUnit,'(A)',END=3,ERR=3 ) readstr
-          GO TO 4
-3         CLOSE(IncludeUnit)
-          IncludeUnit = IncludeUnit+1
-          READ( Unit,'(A)',END=10,ERR=10 ) readstr
-4         CONTINUE
+          READ( IncludeUnit,'(A)',IOSTAT=ios ) readstr
+          IF ( ios /= 0 ) THEN
+            CLOSE(IncludeUnit)
+            IncludeUnit = IncludeUnit+1
+            READ( Unit,'(A)',IOSTAT=ios ) readstr
+            IF ( ios /= 0 ) GO TO 10
+          END IF
         END IF
         ninlen = LEN_TRIM(readstr)
      ELSE
@@ -1142,14 +1134,14 @@ CONTAINS
 
      IF ( i <= inlen ) THEN
        Prefix = ' '
-       IF ( ReadStr(i:i) == '=' ) THEN
+       IF ( readstr(i:i) == '=' ) THEN
          ValueStarts = i + 1
-       ELSE IF ( ReadStr(i:i) == ';' ) THEN
+       ELSE IF ( readstr(i:i) == ';' ) THEN
          ValueStarts = i + 1
-       ELSE IF ( ReadStr(i:i) == '(' ) THEN
+       ELSE IF ( readstr(i:i) == '(' ) THEN
          ValueStarts = i + 1
          Prefix = 'Size'
-       ELSE IF ( ReadStr(i:i+1) == '::' ) THEN
+       ELSE IF ( readstr(i:i+1) == '::' ) THEN
          ValueStarts = i + 2
          Prefix = '::'
        ELSE IF ( ICHAR(readstr(i:i)) < 32 ) THEN
@@ -1221,6 +1213,24 @@ CONTAINS
        character(kind=c_char, len=:), pointer :: lua_result
        integer :: result_len
        logical :: closed_region, first_bang
+
+        BLOCK
+          INTERFACE
+            SUBROUTINE setlocale(category,locale) BIND(c,name="setlocale")
+              USE iso_c_binding
+              integer(c_int), value :: category
+              character(kind=c_char), dimension(*) :: locale
+            END SUBROUTINE  setlocale
+          END INTERFACE
+          ! Force period-decimal for Fortran's list-directed READ of the
+          ! substituted value, matching mtc_eval's setlocale(LC_ALL,"C").
+          ! The former "en_US.UTF-8" is a UTF-8 codepage locale whose composite
+          ! locale string trips an intermittent UCRT invalid-parameter fast-fail
+          ! (0xC0000409) inside libgfortran's locale save/restore during the
+          ! subsequent sif READ. "C" is canonical, always valid, and '.'-decimal.
+          CALL setlocale(0,"C"//CHAR(0))
+        END BLOCK
+
        closed_region = .false.
        first_bang = .true.
        m = i
@@ -1310,6 +1320,13 @@ CONTAINS
 !------------------------------------------------------------------------------
     CHARACTER(:), ALLOCATABLE :: str
 !------------------------------------------------------------------------------
+
+    ! If the dofs has just one component, no use trying to find components.
+    IF(Var % dofs == 1 ) THEN
+      str = TRIM(Var % Name)
+      RETURN
+    END IF
+
     IF ( Var % Name(1:Var % NameLen) == 'flow solution' ) THEN
       str='flow solution'
       IF ( .NOT. PRESENT(Component) ) RETURN
@@ -2009,7 +2026,7 @@ END FUNCTION ComponentNameVar
 #if defined(ELMER_HAVE_MPI_MODULE)
       USE mpi
 #endif
-      TYPE(Matrix_t), POINTER, INTENT(in) :: Matrix
+      TYPE(Matrix_t), INTENT(INOUT) :: Matrix
 #if defined(ELMER_HAVE_MPIF_HEADER)
       INCLUDE "mpif.h"
 #endif
@@ -2759,12 +2776,11 @@ CONTAINS
     CHARACTER(LEN=1024) :: Str 
     INTEGER, PARAMETER :: VtuUnit = 58
     
-    WRITE( VtuUnit ) TRIM(Str)        
+    WRITE( VtuUnit ) TRIM(Str)
     IF( CalcSum ) THEN
       Scount = Scount + 1
       Ssum = Ssum + len_trim( Str ) 
     END IF
-    
     
   END SUBROUTINE AscBinStrWrite
   

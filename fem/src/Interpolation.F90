@@ -139,11 +139,11 @@ MODULE Interpolation
 !>    If it does, returns the local coordinates in the bulk element
 !------------------------------------------------------------------------------
      FUNCTION PointInElement( Element, ElementNodes, Point, &
-	  LocalCoordinates, GlobalEps, LocalEps, NumericEps, &
+          LocalCoordinates, GlobalEps, LocalEps, NumericEps, &
           GlobalDistance, LocalDistance, EdgeBasis, &
           USolver ) RESULT(IsInElement)
 !------------------------------------------------------------------------------
-    TYPE(Element_t), POINTER :: Element  !< Bulk element we are checking
+    TYPE(Element_t) :: Element  !< Bulk element we are checking
     TYPE(Nodes_t) :: ElementNodes        !< The nodal points of the bulk element
     LOGICAL :: IsInElement               !< Whether the node lies within the element
     REAL(KIND=dp), DIMENSION(:) :: Point      !< Point under study.
@@ -589,24 +589,30 @@ MODULE Interpolation
 !-------------------------------------------------------------------------------
   SUBROUTINE CopyElementNodesFromMesh(ElementNodes, Mesh, n, Indexes)
 !-------------------------------------------------------------------------------    
-    TYPE(Nodes_t) :: ElementNodes
-    TYPE(Mesh_t), POINTER :: Mesh
+    TYPE(Nodes_t), TARGET :: ElementNodes
+    TYPE(Mesh_t) :: Mesh
     INTEGER :: n
-    INTEGER, POINTER :: Indexes(:)
+    INTEGER :: Indexes(:)
 !-------------------------------------------------------------------------------
     INTEGER :: m
 !-------------------------------------------------------------------------------    
-    IF ( .NOT. ASSOCIATED( ElementNodes % x ) ) THEN
-      ALLOCATE( ElementNodes % x(n), ElementNodes % y(n), ElementNodes % z(n) )
+
+
+    IF ( .NOT. ALLOCATED( ElementNodes % xyz ) ) THEN
+      ALLOCATE( ElementNodes % xyz(n,3) )
+      ElementNodes % x => ElementNodes % xyz(1:n,1)
+      ElementNodes % y => ElementNodes % xyz(1:n,2)
+      ElementNodes % z => ElementNodes % xyz(1:n,3)
     ELSE
-      m = SIZE(ElementNodes % x)
+      m = SIZE(ElementNodes % xyz,1)
       IF ( m < n ) THEN
-        DEALLOCATE(ElementNodes % x, ElementNodes % y, ElementNodes % z)
-        ALLOCATE( ElementNodes % x(n), ElementNodes % y(n), ElementNodes % z(n) )
+        DEALLOCATE(ElementNodes % xyz)
+        ALLOCATE( ElementNodes % xyz(n,3) )
+        ElementNodes % x => ElementNodes % xyz(1:n,1)
+        ElementNodes % y => ElementNodes % xyz(1:n,2)
+        ElementNodes % z => ElementNodes % xyz(1:n,3)
       ELSE IF( m > n ) THEN
-        ElementNodes % x(n+1:m) = 0.0_dp
-        ElementNodes % y(n+1:m) = 0.0_dp
-        ElementNodes % z(n+1:m) = 0.0_dp
+        ElementNodes % xyz(n+1:m,:) = 0.0_dp
       END IF
     END IF
 
@@ -629,16 +635,16 @@ MODULE Interpolation
   SUBROUTINE NodalToNedelecPiMatrix(PiMat, Edge, Mesh, dim, SecondFamily)
 !------------------------------------------------------------------------------
     REAL(KIND=dp), INTENT(OUT) :: PiMat(2,6)      !< The interpolation operator as a matrix 
-    TYPE(Element_t), POINTER, INTENT(IN) :: Edge  !< The element for which the operator is created
-    TYPE(Mesh_t), POINTER, INTENT(IN) :: Mesh     !< The Edge should belong to the mesh given
-    INTEGER, INTENT(IN) :: dim                    !< The number of components of the vector field  
-    LOGICAL, OPTIONAL, INTENT(IN) :: SecondFamily !< To select the Nedelec family    
+    TYPE(Element_t), INTENT(IN) :: Edge  !< The element for which the operator is created
+    TYPE(Mesh_t), INTENT(IN) :: Mesh     !< The Edge should belong to the mesh given
+    INTEGER, INTENT(IN) :: dim                    !< The number of components of the vector field
+    LOGICAL, OPTIONAL, INTENT(IN) :: SecondFamily !< To select the Nedelec family
 !------------------------------------------------------------------------------
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     LOGICAL :: SecondKindBasis, stat
     INTEGER, ALLOCATABLE, SAVE :: Ind(:)
-    
+
     INTEGER :: EDOFs, i, k, p, i1, i2, j1, j2, n
     REAL(KIND=dp) :: Basis(2), detJ, s, e(3), t(3), fun(3), u, v, sgn
 !------------------------------------------------------------------------------
@@ -724,10 +730,10 @@ MODULE Interpolation
   SUBROUTINE NodalToNedelecPiMatrix_Faces(PiMat, Face, Mesh, dim, BasisDegree)
 !------------------------------------------------------------------------------
     REAL(KIND=dp), INTENT(OUT) :: PiMat(2,12)     !< The interpolation operator as a matrix 
-    TYPE(Element_t), POINTER, INTENT(IN) :: Face  !< The element for which the operator is created
-    TYPE(Mesh_t), POINTER, INTENT(IN) :: Mesh     !< The Face should belong to the mesh given
-    INTEGER, INTENT(IN) :: dim                    !< The number of components of the vector field  
-    INTEGER, OPTIONAL, INTENT(IN) :: BasisDegree  !< The order of basis     
+    TYPE(Element_t), INTENT(IN) :: Face  !< The element for which the operator is created
+    TYPE(Mesh_t), INTENT(IN) :: Mesh     !< The Face should belong to the mesh given
+    INTEGER, INTENT(IN) :: dim                    !< The number of components of the vector field
+    INTEGER, OPTIONAL, INTENT(IN) :: BasisDegree  !< The order of basis
 !------------------------------------------------------------------------------
     TYPE(Nodes_t), SAVE :: Nodes, EdgeNodes
     TYPE(Element_t), POINTER, SAVE :: Edge => NULL()
@@ -1057,15 +1063,15 @@ MODULE Interpolation
   SUBROUTINE NodalGradientToNedelecPiMatrix(PiMat, Edge, Mesh, SecondFamily)
 !------------------------------------------------------------------------------
     REAL(KIND=dp), INTENT(OUT) :: PiMat(2,2)      !< The interpolation operator as a matrix 
-    TYPE(Element_t), POINTER, INTENT(IN) :: Edge  !< The element for which the operator is created
-    TYPE(Mesh_t), POINTER, INTENT(IN) :: Mesh     !< The Edge should belong to the mesh given
-    LOGICAL, OPTIONAL, INTENT(IN) :: SecondFamily !< To select the Nedelec family    
+    TYPE(Element_t), INTENT(IN) :: Edge  !< The element for which the operator is created
+    TYPE(Mesh_t), INTENT(IN) :: Mesh     !< The Edge should belong to the mesh given
+    LOGICAL, OPTIONAL, INTENT(IN) :: SecondFamily !< To select the Nedelec family
 !------------------------------------------------------------------------------
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     LOGICAL :: SecondKindBasis, stat
     INTEGER, ALLOCATABLE, SAVE :: Ind(:)
-    
+
     INTEGER :: EDOFs, i, k, p, i1, i2, j1, j2, n
     REAL(KIND=dp) :: dBasis(2,3), Basis(2), detJ, s, e(3), t(3), fun(3), u, v, sgn
 
@@ -1148,9 +1154,9 @@ MODULE Interpolation
   SUBROUTINE NodalGradientToNedelecPiMatrix_Faces(PiMat, Face, Mesh, BasisDegree)
 !------------------------------------------------------------------------------
     REAL(KIND=dp), INTENT(OUT) :: PiMat(2,4)      !< The interpolation operator as a matrix 
-    TYPE(Element_t), POINTER, INTENT(IN) :: Face  !< The element for which the operator is created
-    TYPE(Mesh_t), POINTER, INTENT(IN) :: Mesh     !< The Face should belong to the mesh given
-    INTEGER, OPTIONAL, INTENT(IN) :: BasisDegree  !< The order of basis     
+    TYPE(Element_t), INTENT(IN) :: Face  !< The element for which the operator is created
+    TYPE(Mesh_t), INTENT(IN) :: Mesh     !< The Face should belong to the mesh given
+    INTEGER, OPTIONAL, INTENT(IN) :: BasisDegree  !< The order of basis
 !------------------------------------------------------------------------------
     TYPE(Nodes_t), SAVE :: Nodes, EdgeNodes
     TYPE(Element_t), POINTER, SAVE :: Edge => NULL()

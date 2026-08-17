@@ -126,8 +126,8 @@ void AMGXSolve( int **a_in, int *n_in, int *rows, int *cols, double *vals,
   double *b_in, double *x_in,int *nonlin_update, char *config_name)
 */
 void AMGXSolve( int **a_in, int *n_in, int *rows, int *cols, double *vals,
-  double *b_in, double *x_in,int *nonlin_update, char *config_name, int *fcomm, 
-     int *ng_in, int *part_vec, double *bnrm_in )
+  double *b_in, double *x_in,int *nonlin_update, char *config_name, int *fcomm,
+     int *ng_in, int *part_vec, double *bnrm_in, int *solve_status )
 {
     int i,j,k,n = *n_in, ng=*ng_in, lrank, nranks, gpu_count;
     static MPI_Comm comm;
@@ -212,7 +212,7 @@ void AMGXSolve( int **a_in, int *n_in, int *rows, int *cols, double *vals,
       // WRITE OUT MATRIX (REMOVE)
       //AMGX_write_system(ptr->A, ptr->b, ptr->x, "mymatrix.dat");
       //exit(0);
-		  
+
       AMGX_solver_setup(ptr->solver, ptr->A);
       AMGX_solver_solve(ptr->solver, ptr->b, ptr->x);
 
@@ -245,7 +245,8 @@ void AMGXSolve( int **a_in, int *n_in, int *rows, int *cols, double *vals,
       free(b_t); free(x_t);
     }
 
-//    AMGX_solver_get_status(ptr->solver, &status);
+    AMGX_solver_get_status(ptr->solver, &status);
+    *solve_status = (int)status;
 
 #if 0
     AMGX_solver_destroy(solver);
