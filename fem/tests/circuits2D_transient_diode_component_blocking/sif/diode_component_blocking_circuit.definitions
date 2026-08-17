@@ -1,0 +1,51 @@
+! Circuit definitions for circuits2D_transient_diode_component_blocking.
+! Identical topology to circuits2D_transient_diode_rectifier: an ideal voltage
+! source in series with the FEM (stranded) coil component(1) and a lumped
+! component(2). Here component(2) is the BUILT-IN diode
+! ("Component Type = String Diode" in the sif), so -- unlike the MATC-based gate
+! test -- nothing in this file or in the sif refers to an exported "crt v"
+! index: the component reads its own voltage dof internally.
+$ Circuits = 1
+
+! ------------------------ Circuit 1 ------------------------
+! Define variable count and initialize circuit matrices.
+$ C.1.perm = zeros(6)
+$ C.1.perm(0) = 0
+$ C.1.perm(1) = 1
+$ C.1.perm(2) = 2
+$ C.1.perm(3) = 3
+$ C.1.perm(4) = 4
+$ C.1.perm(5) = 5
+
+$ C.1.variables = 6
+$ C.1.A = zeros(6,6)
+$ C.1.B = zeros(6,6)
+$ C.1.Mre = zeros(6,6)
+$ C.1.Mim = zeros(6,6)
+
+! Define variables.
+$ C.1.name.1 = "i_testsource"
+$ C.1.name.2 = "v_testsource"
+$ C.1.name.3 = "i_component(1)"
+$ C.1.name.4 = "v_component(1)"
+! The diode. Elmer writes the component equation R(V)*I - V = 0 to the row of
+! the voltage variable (row 6), so it is not written here.
+$ C.1.name.5 = "i_component(2)" ! diode current
+$ C.1.name.6 = "v_component(2)" ! diode voltage
+
+! Define sources:
+!------------------
+$ C.1.B(0,1) = 1
+$ C.1.source.1 = "testsource"
+
+! Define network cycles:
+!-------------------------
+!Voltage relations.
+$ C.1.B(1,1) = -1
+$ C.1.B(1,3) = 1
+$ C.1.B(1,5) = 1
+!Current relations.
+$ C.1.B(2,0) = 1
+$ C.1.B(2,2) = -1
+$ C.1.B(4,0) = 1
+$ C.1.B(4,4) = -1
