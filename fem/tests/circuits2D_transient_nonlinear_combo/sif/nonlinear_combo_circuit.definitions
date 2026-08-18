@@ -1,0 +1,117 @@
+! Circuit definitions for circuits2D_transient_nonlinear_combo.
+!
+! The ZENER-CLAMPED BUCK CELL: the buck topology of the sibling
+! circuits2D_transient_switch_diode_freewheel with the single freewheel diode
+! replaced by a two-element CLAMP BRANCH (diode in series with a zener), which
+! is what turns a freewheel into a demagnetization clamp.
+!
+!            +--- switch(2) ---+-------------+
+!            |    S         A  |             |
+!   source --+                 |           coil(1)
+!            |                 |             |
+!            |         zener(4)|             |
+!            +------- M -------+             |
+!            |  diode(3)                     |
+!            +-------------------------------+
+!                     G (return rail)
+!
+! 5 branches and 4 nodes (G, S, A, M) give 3 independent KCL and 2 independent
+! KVL relations. With 5 branches the circuit has 10 variables, i.e. 10 rows:
+! row 0 carries the source definition, rows 1, 2, 4, 6 and 8 the five topology
+! relations, and the four v_component rows 3, 5, 7 and 9 are left EMPTY for
+! Elmer to write the component equations R*I - V = 0 into. That accounts for
+! every row: 1 + 5 + 4 = 10.
+!
+! BRANCH DIRECTIONS. Each component's voltage is the DROP in the direction of
+! its own positive current, which is the convention Elmer's component equations
+! are written in:
+!   source   G -> S     v_testsource     = V(S) - V(G)
+!   switch   S -> A     v_component(2)   = V(S) - V(A)
+!   coil     A -> G     v_component(1)   = V(A) - V(G)
+!   diode    G -> M     v_component(3)   = V(G) - V(M)
+!   zener    A -> M     v_component(4)   = V(A) - V(M)
+!
+! THE ZENER POINTS THE OTHER WAY ROUND, AND THAT IS THE WHOLE DESIGN. The clamp
+! current in the demagnetizing state runs G -> M -> A, i.e. FORWARD through the
+! diode (i_component(3) > 0) and BACKWARD through the zener
+! (i_component(4) = -i_component(3) < 0). The zener therefore sits in REVERSE
+! BREAKDOWN, not in forward conduction, and the branch drop is
+!   V(G) - V(A) = v_component(3) - v_component(4)
+!               = (Vf + I*Ron_d) + (Vz + I*Ron_z),
+! so node A is held at -(Vz + Vf + I*(Ron_d + Ron_z)) instead of at the one
+! forward drop a plain freewheel would give. Turn the zener the other way and
+! both elements conduct forward, the branch drop collapses to two forward knees
+! and the clamp is gone; give it no breakdown voltage at all and the two
+! elements are plain diodes in ANTI-SERIES, which cannot conduct in either
+! direction. Both variants are computed in the companion combo_reference.py.
+!
+! WHILE THE SWITCH IS CLOSED the branch must block, and it is the DIODE that
+! does it: node A sits at ~+9.2 V, the diode sees v_component(3) ~ -9.0 V and
+! stays at Roff, while the zener is pushed slightly FORWARD (~+0.19 V, ~2.1e3
+! ohm, its Vf being 0). The blocking is therefore carried by one Roff, not two
+! -- see the leakage assertion in the sif.
+$ Circuits = 1
+
+! ------------------------ Circuit 1 ------------------------
+! Define variable count and initialize circuit matrices.
+$ C.1.perm = zeros(10)
+$ C.1.perm(0) = 0
+$ C.1.perm(1) = 1
+$ C.1.perm(2) = 2
+$ C.1.perm(3) = 3
+$ C.1.perm(4) = 4
+$ C.1.perm(5) = 5
+$ C.1.perm(6) = 6
+$ C.1.perm(7) = 7
+$ C.1.perm(8) = 8
+$ C.1.perm(9) = 9
+
+$ C.1.variables = 10
+$ C.1.A = zeros(10,10)
+$ C.1.B = zeros(10,10)
+$ C.1.Mre = zeros(10,10)
+$ C.1.Mim = zeros(10,10)
+
+! Define variables.  Matrix indices are 0 based, the name.N counter is 1 based:
+!   name.1 -> index 0, name.2 -> index 1, ...
+$ C.1.name.1  = "i_testsource"
+$ C.1.name.2  = "v_testsource"
+$ C.1.name.3  = "i_component(1)" ! coil current
+$ C.1.name.4  = "v_component(1)" ! coil voltage   -- row 3, coil equation
+$ C.1.name.5  = "i_component(2)" ! switch current
+$ C.1.name.6  = "v_component(2)" ! switch voltage -- row 5, R(t)*I - V = 0
+$ C.1.name.7  = "i_component(3)" ! diode current
+$ C.1.name.8  = "v_component(3)" ! diode voltage  -- row 7, R(V)*I - V = 0
+$ C.1.name.9  = "i_component(4)" ! zener current
+$ C.1.name.10 = "v_component(4)" ! zener voltage  -- row 9, R(V)*I - V = 0
+
+! Define sources:
+!------------------
+$ C.1.B(0,1) = 1
+$ C.1.source.1 = "testsource"
+
+! Define network cycles:
+!-------------------------
+! Voltage relations (2 independent loops).
+! Row 1, source-switch-coil loop:   -v_src + v_switch + v_coil = 0
+$ C.1.B(1,1) = -1
+$ C.1.B(1,5) = 1
+$ C.1.B(1,3) = 1
+! Row 6, clamp loop A -> coil -> G -> diode -> M -> zener -> A. The last leg is
+! traversed AGAINST the zener's own direction, hence the minus sign:
+!   v_coil + v_diode - v_zener = 0
+$ C.1.B(6,3) = 1
+$ C.1.B(6,7) = 1
+$ C.1.B(6,9) = -1
+
+! Current relations (3 independent nodes; G is the dependent one).
+! Row 2, node S:  i_source - i_switch = 0
+$ C.1.B(2,0) = 1
+$ C.1.B(2,4) = -1
+! Row 4, node A:  i_switch - i_coil - i_zener = 0
+$ C.1.B(4,4) = 1
+$ C.1.B(4,2) = -1
+$ C.1.B(4,8) = -1
+! Row 8, node M:  i_diode + i_zener = 0  (the two clamp elements are in series)
+$ C.1.B(8,6) = 1
+$ C.1.B(8,8) = 1
