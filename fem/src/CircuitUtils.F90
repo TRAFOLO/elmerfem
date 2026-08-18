@@ -48,6 +48,31 @@ MODULE CircuitUtils
 CONTAINS
 
 !------------------------------------------------------------------------------
+!> TRAFOLO: True for the purely LUMPED component types, i.e. the ones that own a
+!> single (i,v) dof pair, write their whole equation on the voltage row and have
+!> no FEM bodies attached ('resistor' and the new 'diode').
+!> Why: 'diode' must be recognised at every site that previously special-cased
+!> 'resistor' (dof counts and the two circuit-matrix structure passes); a helper
+!> keeps those sites in sync instead of three independent string comparisons.
+!> Before: each site tested Comp % ComponentType == 'resistor' inline, so adding
+!> a type meant editing every one of them and silently producing a wrong matrix
+!> structure if one was missed.
+!> Limitation: membership is a hard-coded name list, not a property read from the
+!> component itself; a new lumped type still has to be added here.
+!------------------------------------------------------------------------------
+  FUNCTION IsLumpedComponent(Comp) RESULT (Lumped)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    LOGICAL :: Lumped
+
+    Lumped = ( Comp % ComponentType == 'resistor' .OR. &
+               Comp % ComponentType == 'diode' )
+!------------------------------------------------------------------------------
+  END FUNCTION IsLumpedComponent
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
   FUNCTION GetCircuitModelDepth() RESULT (Depth)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
@@ -993,7 +1018,12 @@ END FUNCTION isComponentName
         END IF
       END IF
 
-      IF (Comp % ComponentType == 'resistor') THEN
+      ! TRAFOLO: 'diode' is a lumped component and gets the same single-dof
+      ! (i,v) pair as 'resistor'. Before: only 'resistor' took this branch, so a
+      ! diode would have fallen into the SELECT CASE below with an empty
+      ! Coil Type and been left with dofs = 0. Limitation: like the resistor, the
+      ! diode is assumed to have exactly one current and one voltage dof.
+      IF (IsLumpedComponent(Comp)) THEN
        Comp % ivar % dofs = 1
         Comp % vvar % dofs = 1
         Comp % ivar % pdofs = 0
@@ -1716,6 +1746,10 @@ END MODULE CircuitsMod
 MODULE CircMatInitMod
 
   USE CircuitsMod
+  ! TRAFOLO: needed for IsLumpedComponent(), used by the two circuit-matrix
+  ! structure passes below so that 'diode' reserves the same entries as
+  ! 'resistor'. CircuitsMod does not re-export CircuitUtils.
+  USE CircuitUtils
   IMPLICIT NONE
 
 CONTAINS
@@ -2035,7 +2069,11 @@ CONTAINS
         Cvar => Comp % vvar
         RowId = Cvar % ValueId + nm
         ColId = Cvar % ValueId + nm
-        IF (Comp % ComponentType == 'resistor') THEN
+        ! TRAFOLO: a diode reserves exactly the same two entries on its voltage
+        ! row as a resistor ( R*I and -V ). Before: only 'resistor' was counted
+        ! here, so a diode's two matrix entries would have had no room reserved
+        ! and the CRS structure pass below would have dropped them.
+        IF (IsLumpedComponent(Comp)) THEN
             CALL CountMatElement(Rows, Cnts, RowId, 1)
             CALL CountMatElement(Rows, Cnts, RowId, 1)
             CYCLE
@@ -2108,7 +2146,11 @@ CONTAINS
         VvarId = Comp % vvar % ValueId + nm
         IvarId = Comp % ivar % ValueId + nm
 
-        IF (Comp % ComponentType == 'resistor') THEN
+        ! TRAFOLO: same structure as the resistor, see CountComponentEquations.
+        ! Before: 'diode' would have fallen through to the Coil Type SELECT CASE
+        ! (empty for a lumped component) and got no matrix entries at all, so its
+        ! voltage row would have stayed empty and the system singular.
+        IF (IsLumpedComponent(Comp)) THEN
             CALL CreateMatElement(Rows, Cols, Cnts, VvarId, IvarId)
             CALL CreateMatElement(Rows, Cols, Cnts, VvarId, VvarId)
             CYCLE

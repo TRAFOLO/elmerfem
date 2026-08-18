@@ -257,7 +257,13 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   TYPE(Matrix_t), POINTER :: CM
   INTEGER, POINTER :: n_Circuits => Null()
   TYPE(Circuit_t), POINTER :: Circuits(:)  
-  REAL(KIND=dp), ALLOCATABLE :: Crt(:)     
+  REAL(KIND=dp), ALLOCATABLE :: Crt(:)
+  ! TRAFOLO: latest (current-iteration) circuit dofs and the vector actually
+  ! exported last time, both kept separate from Crt. Crt must keep
+  ! PREVIOUS-TIMESTEP values because AddBasicCircuitEquations uses it for the
+  ! BDF1 history term.
+  REAL(KIND=dp), ALLOCATABLE :: CrtIter(:), CrtExp(:)
+  REAL(KIND=dp) :: CrtRelax
   TYPE(Variable_t), POINTER :: LagrangeVar
   INTEGER :: Tstep=-1
   LOGICAL :: Parallel
@@ -267,7 +273,7 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   CHARACTER(LEN=MAX_NAME_LEN) :: sname
   CHARACTER(*), PARAMETER :: Caller = 'CircuitsAndDynamics'
 
-  SAVE First, Tstep, Parallel, Crt, MultName
+  SAVE First, Tstep, Parallel, Crt, CrtIter, CrtExp, CrtRelax, MultName
   
 !------------------------------------------------------------------------------
   
@@ -369,6 +375,17 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     ! ------------------------------------------------------
     CALL Circuits_MatrixInit()
     ALLOCATE(Crt(Model % Circuit_tot_n))
+    ! TRAFOLO: buffers for the latest coupled iterate and for the vector last
+    ! exported (needed for the optional relaxation), see the refresh below.
+    ALLOCATE(CrtIter(Model % Circuit_tot_n), CrtExp(Model % Circuit_tot_n))
+    CrtExp = 0._dp
+    CrtRelax = ListGetConstReal( Solver % Values,'Circuit Variable Relaxation Factor', Found )
+    IF(.NOT. Found ) THEN
+      CrtRelax = 1.0_dp
+    ELSE
+      WRITE( Message,'(A,ES12.3)') 'Relaxing exported circuit variables with factor: ',CrtRelax
+      CALL Info(Caller,Message,Level=6)
+    END IF
 
     MultName = LagrangeMultiplierName(ASolver)
   END IF
@@ -425,7 +442,53 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
       Crt = LagrangeVar % PrevValues(1:Model%Circuit_tot_n,1)
     END IF
     
-    CALL Circuits_ToMeshVariable(Solver,crt) 
+    CALL Circuits_ToMeshVariable(Solver,crt)
+    ! TRAFOLO: the relaxation history starts from the previous-timestep values.
+    IF( ALLOCATED(CrtExp) ) CrtExp = Crt
+  END IF
+
+  ! TRAFOLO: refresh the exported circuit variables ("crt i"/"crt v") from the
+  ! LATEST coupled iterate on every execution, so that solution-dependent
+  ! component parameters (e.g. a nonlinear Resistance = Variable "crt i 2")
+  ! see current-iteration values. Together with Steady State Max Iterations > 1
+  ! this makes the nonlinearity a Picard fixed point inside each timestep, and
+  ! 'Circuit Variable Relaxation Factor' w < 1 damps it when the fixed-point
+  ! map is not a contraction (exported = w*new + (1-w)*previously exported).
+  ! Before: the exported variables were written only once per timestep, from
+  ! PrevValues (the block just above), so any solution dependence lagged a full
+  ! timestep and never updated during the coupled iterations.
+  ! Limitations: Picard only (no Newton); convergence of the coupled loop is
+  ! monitored by the attached field solver, so a circuit with no FEM-coupled
+  ! component has no monitor.
+  ! Backward compatible: at coupled iteration 1 of a timestep the Lagrange
+  ! values still equal PrevValues (rotated just above), so with the default
+  ! w = 1 and Steady State Max Iterations = 1 the values written here are
+  ! identical to the ones written by the call above.
+  !
+  ! TRAFOLO: the two steps below are deliberately SEPARATE.
+  ! (1) maintaining CrtIter/CrtExp is UNCONDITIONAL: 'Component Type = Diode'
+  !     reads its own branch voltage straight out of CrtExp in
+  !     AddComponentEquationsAndCouplings, so a diode needs no mesh export at
+  !     all. Before: the buffers were (already) updated on every execution, but
+  !     the comment above declared the whole refresh "a no-op unless
+  !     Export Circuit Variables = True" -- true only while the exported mesh
+  !     variables were the sole consumer, and misleading now.
+  ! (2) publishing them as the "crt i"/"crt v" mesh variables is the ONLY part
+  !     gated by 'Export Circuit Variables'; the check lives inside
+  !     Circuits_ToMeshVariable, which early-returns when the flag is off.
+  ! Limitation: CrtExp holds the RELAXED iterate, i.e. what a keyword-driven
+  ! component would have seen; internal readers therefore inherit the same
+  ! relaxation, which is intended (it is what makes the Picard loop contract).
+  LagrangeVar => VariableGet( Solver % Mesh % Variables, MultName )
+  IF( ASSOCIATED(LagrangeVar) ) THEN
+    IF( SIZE(LagrangeVar % Values) >= Model % Circuit_tot_n ) THEN
+      ! (1) always maintain the relaxed latest-iterate buffers
+      CrtIter = LagrangeVar % Values(1:Model % Circuit_tot_n)
+      IF( CrtRelax /= 1.0_dp ) CrtIter = CrtRelax * CrtIter + (1.0_dp - CrtRelax) * CrtExp
+      CrtExp = CrtIter
+      ! (2) export only if the user asked for it (checked inside the callee)
+      CALL Circuits_ToMeshVariable(Solver,CrtIter)
+    END IF
   END IF
 
   max_element_dofs = Model % Mesh % MaxElementDOFs
@@ -567,6 +630,8 @@ CONTAINS
     REAL(KIND=dp) :: val, dt, crt(:)
     CHARACTER(LEN=MAX_NAME_LEN) :: CoilType
     LOGICAL :: Found, IsActive
+    ! TRAFOLO: diode working variables (see the 'diode' branch below).
+    REAL(KIND=dp) :: Vd, Vf, Ron, Roff, Vs
 
     ASolver => CurrentModel % Asolver
     IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('AddComponentEquationsAndCouplings','ASolver not found!')
@@ -613,6 +678,58 @@ CONTAINS
                 'Writing resistor equation, component '//i2s(CompInd), Level = 7)
             CALL AddToMatrixElement(CM, VvarId, IvarId, Comp % Resistance)
             CALL AddToMatrixElement(CM, VvarId, VvarId, -1._dp)
+        ! TRAFOLO: first-class smoothed DIODE, stamped exactly like the resistor
+        ! branch above (R*I - V = 0 on the component's voltage row) but with a
+        ! resistance evaluated from the component's OWN branch voltage:
+        !   R(V) = Ron + 0.5*(Roff - Ron)*(1 - TANH((V - Vf)/Vs))
+        ! Forward bias is V > Vf (positive own branch voltage), which is the sign
+        ! convention of the circuit equations as written by Elmer, so no flip is
+        ! needed. TANH is used rather than the algebraic sigmoid V/SQRT(V^2+Vs^2):
+        ! the latter has a 1/V^2 tail that would still leave ~390 ohm at a 0.7 V
+        ! forward drop for (Roff,Vs) = (1e5,0.1); TANH saturates instead.
+        ! V is taken from CrtExp -- the RELAXED latest coupled iterate maintained
+        ! unconditionally at the top of CircuitsAndDynamics -- so the diode needs
+        ! no 'Export Circuit Variables' and no MATC keyword string.
+        ! Before: the only way to model a diode was
+        !   Component Type = Resistor
+        !   Resistance = Variable "crt v <n>"; Real MATC "..."
+        ! which required the export flag, hard-coded the exported variable index
+        ! in the sif and left the sign convention to the user.
+        ! Limitations: PICARD only -- the stamped R is frozen at the previous
+        ! iterate, there is no dR/dV Newton term, so a stiff diode needs
+        ! 'Steady State Max Iterations' > 1 and typically
+        ! 'Circuit Variable Relaxation Factor' < 1 (0.10 for Ron/Roff/Vs =
+        ! 0.1/1e5/0.1). Transient only (the harmonic solver rejects diodes).
+        ! Serial only in practice: CrtExp is read at the component's global dof
+        ! index, which is exercised for serial runs only.
+        ELSE IF (Comp % ComponentType == 'diode') THEN
+            Vf = ListGetCReal(CompParams, 'Diode Forward Voltage', Found)
+            IF (.NOT. Found) Vf = 0._dp
+
+            Ron = ListGetCReal(CompParams, 'Diode On Resistance', Found)
+            IF (.NOT. Found) CALL Fatal('AddComponentEquationsAndCouplings', &
+                'Component '//i2s(Comp % ComponentId)// &
+                ': "Diode On Resistance" is required for Component Type = Diode!')
+
+            Roff = ListGetCReal(CompParams, 'Diode Off Resistance', Found)
+            IF (.NOT. Found) Roff = 1.0e5_dp
+
+            Vs = ListGetCReal(CompParams, 'Diode Smoothing Voltage', Found)
+            IF (.NOT. Found) Vs = 0.1_dp
+            IF (Vs <= 0._dp) CALL Fatal('AddComponentEquationsAndCouplings', &
+                'Component '//i2s(Comp % ComponentId)// &
+                ': "Diode Smoothing Voltage" must be positive!')
+
+            Vd = CrtExp(Comp % vvar % ValueId)
+            Comp % Resistance = Ron + 0.5_dp * (Roff - Ron) * &
+                (1._dp - TANH((Vd - Vf)/Vs))
+
+            WRITE(Message,'(A,I0,A,ES12.5,A,ES12.5)') 'Writing diode equation, component ', &
+                CompInd,': V = ',Vd,' R = ',Comp % Resistance
+            CALL Info('AddComponentEquationsAndCouplings', Message, Level = 7)
+
+            CALL AddToMatrixElement(CM, VvarId, IvarId, Comp % Resistance)
+            CALL AddToMatrixElement(CM, VvarId, VvarId, -1._dp)
         ELSE
           SELECT CASE (Comp % CoilType)
           CASE('stranded')
@@ -650,7 +767,12 @@ CONTAINS
         END IF
       END IF
       
-      IF (Comp % ComponentType == 'resistor') CYCLE
+      ! TRAFOLO: a diode is lumped exactly like a resistor -- it owns no bodies,
+      ! so the element loop below (and the parallel reduction after it) would do
+      ! nothing but cost a full sweep over the active elements. Before: only
+      ! 'resistor' skipped it. Limitation: this also means a diode can never be
+      ! given Master Bodies; it is a pure circuit element.
+      IF (IsLumpedComponent(Comp)) CYCLE
 
       DO q=GetNOFActive(),1,-1
         Element => GetActiveElement(q)
@@ -1753,8 +1875,23 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     DO CompInd = 1, Circuit % n_comp
       Comp => Circuit % Components(CompInd)
 
-      Comp % Resistance = 0._dp 
-      Comp % Conductance = 0._dp 
+      ! TRAFOLO: reject diodes in the harmonic solver instead of silently
+      ! computing nonsense. A diode is a strongly nonlinear element: its
+      ! resistance depends on the instantaneous branch voltage, which a
+      ! single-frequency phasor formulation cannot represent (and the harmonic
+      ! path has no coupled Picard iterate to evaluate R at either). Before:
+      ! this loop simply had no branch for lumped component types, so such a
+      ! component produced an EMPTY voltage row and a silently wrong (or
+      ! singular) system. Limitation: this is a hard stop, not a fallback --
+      ! there is no harmonic-balance or describing-function approximation.
+      IF (Comp % ComponentType == 'diode') THEN
+        CALL Fatal('AddComponentEquationsAndCouplings', &
+            'Component '//i2s(Comp % ComponentId)//': "Component Type = Diode" is '// &
+            'transient-only and cannot be used with CircuitsAndDynamicsHarmonic!')
+      END IF
+
+      Comp % Resistance = 0._dp
+      Comp % Conductance = 0._dp
 
       Cvar => Comp % vvar
       vvarId = Comp % vvar % ValueId + nm
