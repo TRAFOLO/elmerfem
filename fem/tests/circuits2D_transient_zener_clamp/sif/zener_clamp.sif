@@ -1,0 +1,323 @@
+! Reverse CLAMP: the built-in Diode component given an optional
+! "Diode Breakdown Voltage", i.e. a zener, in a transient circuit-coupled
+! magnetodynamics run.
+!
+! WHY THIS TEST EXISTS
+! --------------------
+! The four sibling diode tests all exercise the SINGLE-knee law: forward
+! conduction above Vf, blocking at Roff for every reverse voltage no matter how
+! large. A zener adds a SECOND knee, so the element conducts again below -Vz.
+! TRAFOLO needs that for snubber and clamp branches. No new component type was
+! introduced: a zener is the same Diode component with one extra keyword, and
+! when that keyword is absent the original expression is evaluated unchanged --
+! the four existing diode tests are bit-identical, which is the other half of
+! what this feature had to prove.
+!
+! CIRCUIT
+!   ideal sinusoidal source -- stranded FEM coil (component 1) -- zener (2)
+! all in series, exactly as circuits2D_transient_diode_component_rectifier. The
+! coil is given an explicit "Resistance = Real 1.0", so the loop resistance is
+! exactly 1 ohm + R_zener.
+!
+! ZENER MODEL (smoothed, two knees, VOLTAGE controlled)
+!   R(V) = Ron + (Roff-Ron)*0.25*(1 - TANH((V-Vf)/Vs))*(1 + TANH((V+Vz)/Vs))
+! Limits, all printed by the companion reference script:
+!   V >> Vf     -> first factor  -> 0  -> R = Ron     (forward conduction)
+!   V << -Vz    -> second factor -> 0  -> R = Ron     (reverse breakdown)
+!   -Vz << V << Vf                     -> R = Roff    (blocking window)
+!   V = -Vz exactly                    -> R = (Ron+Roff)/2  (the knee midpoint,
+!                                         R(-5) = 5.000005e4 below)
+! Values: Vf = 0.7, Vz = 5, Ron = 0.1, Roff = 1e5, Vs = 0.1.
+!
+! THE POINT OF THIS TEST, AND WHY Vs IS 0.1 (it was 1.0 in the Picard slice).
+! The knee width Vs sets the clamp ACCURACY: the flank sits at
+!   V_clamp = -Vz - 0.5*Vs*ln(Roff/R)
+! so the overshoot beyond the nominal breakdown voltage is proportional to Vs.
+! Vs could not be made small while the coupled loop was PICARD (R frozen at the
+! relaxed iterate, linear solve, repeat), because on this series loop that is
+! the scalar map
+!   V <- G(V) = R(V)*S/(D + R(V)),  G'(V) = S*D*R'(V)/(D + R(V))^2
+! with S = Vsrc(t) + a*I_{n-1}, D = a + Rcoil, a = L/dt, which converges under
+! relaxation w only while w < 2/(1 + |G'|). In reverse conduction the branch is
+! held at |V| ~ Vz by a resistance sitting on the exponential flank, where
+! R' = 2R/Vs, and the whole story collapses to
+!   |G'| = 2*|V_clamp|*D / ( Vs*(D + R) )   ~   2*Vz/Vs   for R << D,
+! i.e. the Picard stiffness is inversely proportional to exactly the parameter
+! that controls the accuracy. At Vs = 0.1 this run has max|G'| = 101.7, needing
+! w < 0.020 -- hundreds of iterations per timestep. That is why the Picard
+! version of this test ran at Vs = 1.0 and clamped at -8.85 V for a 5 V part.
+!
+! Slice 4 stamps the analytic dR/dV instead ("Diode Newton Linearization",
+! default True), so the flank is no longer a stability limit and Vs goes back to
+! 0.1. MEASURED here over the full 75-step run, with the residual gate below
+! (timesteps exhausting "Steady State Max Iterations = 100" / min / median / max
+! coupled iterations / wall clock):
+!   w = 1.0  ->  73/75 exhausted   4/100/100   80.3 s   diverges
+!   w = 0.7  ->   0/75 exhausted   4/  7/ 29    2.6 s   <== used here
+!   w = 0.5  ->   1/75 exhausted   4/ 11/100    5.2 s
+!   w = 0.3  ->   0/75 exhausted   5/ 19/ 92   18.3 s
+! w = 0.7 is both the largest stable value of the sweep and the cheapest. Newton
+! still needs SOME damping here -- the expansion point is the relaxed iterate and
+! the two knees are only 5.7 V apart at a knee width of 0.1 V -- unlike the
+! single-knee sibling circuits2D_transient_switch_diode_freewheel, which now runs
+! with no relaxation at all. For the record, the Picard version of this test
+! needed w = 0.10 AND Vs = 1.0 and took 14.9 s at median 8 iterations.
+!
+! WHAT THIS BUYS: the clamp moves from -8.853 V to -5.462 V against a nominal
+! -Vz = -5 V, i.e. the overshoot drops from 77% to 9.2%. Both the current and
+! the clamp voltage are asserted below.
+!
+! LIMITATIONS THIS TEST RECORDS RATHER THAN HIDES
+!  * The knee is still SOFT, just much less so: the residual 0.462 V of
+!    overshoot is 0.5*Vs*ln(Roff/R) = 4.6*Vs and scales linearly with Vs. It is
+!    now a pure knee-width effect that the sif author controls, not a stability
+!    compromise forced by the solver.
+!  * Newton is a BLOCK Newton on the diode's own row, linearized about the
+!    relaxed iterate of the previous coupled iteration. It is not a full Newton
+!    on the coupled field/circuit system, which is why w = 1.0 still chatters.
+!  * Ron is the same in both directions; a real zener has a larger dynamic
+!    resistance in breakdown. Not modelled (see the Fortran).
+!  * "r_component(2)" in the .dat is the STAMPED resistance, i.e. R evaluated at
+!    the relaxed iterate, so it lags the converged V by ~2.6e-05 relative even
+!    though V and I themselves agree with the reference to 11 digits. The
+!    asserted quantities are the solved dofs, not the stamped R.
+!
+! SOURCE AMPLITUDE. V0 = 10 V against Vz = 5 V is deliberate: the source has to
+! exceed the breakdown voltage by a wide margin or the reverse half would never
+! leave the blocking window and the test would assert nothing new.
+!
+! LINEAR SYSTEM: a DIRECT solve, and STEADY STATE CONVERGENCE IS ABSOLUTE, for
+! the reasons spelled out in full in
+! ../circuits2D_transient_diode_rectifier/sif/diode_rectifier.sif -- the field
+! norm passes through ~0 at the source zero crossings, where a relative
+! criterion is 0/0, and in the blocking phase it sits at the level of an
+! iterative solve's own noise.
+!
+! CALIBRATION. L is not a free parameter; it is the coil inductance of this
+! mesh, re-derived for this slice from an Elmer run of the same coil with a
+! fixed 1 ohm resistor in place of the nonlinear element, 250 steps: per-step
+! solution of the BDF1 recurrence gives min 2.395782954 H / max 2.395782960 H /
+! median 2.3957829546 H, and a golden-section fit minimising the worst replay
+! error over the run lands on the same 2.3957829546 H with a replay error of
+! 5.95e-13 A on a 3.172770 A amplitude. It agrees to 7e-10 H with the value the
+! diode tests calibrated.
+!
+! REFERENCE VALUES
+! From the companion zener_clamp_reference.py in this directory, which shares no
+! code with Elmer: per step it solves the implicit BDF1 relation for V_Z by
+! scanning the residual g(V) = R(V)*I(V) - V for sign changes and bisecting,
+! never by Picard. The scan confirms EXACTLY ONE fixed point at every step, so
+! the two-knee law has not introduced the multiple operating points a clamp
+! could in principle have.
+! The run stops at step 75, t = 3.75 s = 0.75 T, the deepest reverse point of
+! the first period (Vsrc = -10 V):
+!   I = -5.537790488e-01 A,  V_zener = -5.461713292 V,  R_zener = 9.862622 ohm
+! Elmer reproduces both to 11 significant digits (-5.537790487613e-01 A and
+! -5.461713292394e+00 V).
+! This is the assertion that the single-knee diode cannot pass: at the very same
+! instant, with the breakdown keyword removed, the law of
+! circuits2D_transient_diode_blocking gives -9.999890537e-05 A and lets the
+! branch follow the source all the way to -10 V. The clamp carries 5538 times
+! more reverse current and holds the branch 4.54 V off the source.
+! The CLAMP CHECK is asserted separately (Solver 6): the ideal clamp voltage is
+! -(Vz + Ron*|I|) = -5.055378 V, and the solved -5.461713 V sits 0.406 V beyond
+! it -- the knee-width term above. At Vs = 1.0 the same number was 3.833 V.
+! The run is asserted STEP BY STEP against the reference, not against a periodic
+! state: at Vs = 0.1 the same instant one period later (step 175) gives
+! -5.578004664e-01 A, a 0.73% period-to-period drift.
+!
+! Based on circuits2D_transient_diode_component_rectifier.
+Check Keywords "Warn"
+INCLUDE sif/zener_clamp_circuit.definitions
+INCLUDE 1381/mesh.names
+Header 1
+   Mesh DB "." "1381"
+End
+
+$ V0 = 10        ! source amplitude [V]
+$ f  = 0.2       ! source frequency [Hz], chosen so that wL = 2.74*(Rcoil+Ron)
+$ T  = 1/f
+$ nper = 100     ! timesteps per period
+$ dt = T/nper
+$ nsteps = 75    ! last step lands on t = 0.75 T, the deepest reverse point
+$ Vf = 0.7       ! forward knee [V]
+$ Vz = 5.0       ! breakdown (zener) voltage [V]
+$ Ron = 0.1      ! on-state resistance, both directions [ohm]
+$ Roff = 1.0e5   ! blocking-window resistance [ohm]
+$ Vs = 0.1       ! smoothing voltage, applied to BOTH knees [V], see above
+$ wrel = 0.7     ! Circuit Variable Relaxation Factor, see the sweep above
+$ crtres = 1.0e-8 ! circuit-residual tolerance, see Solver 1
+$ sstol = 1.0e-10
+
+Simulation 1
+   Max Output Level = 5
+   Coordinate System = Axi symmetric
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+   Timestep Sizes(1) = $ dt
+   Timestep Intervals(1) = $ nsteps
+!  > 1 enables the within-timestep coupled loop over the nonlinear resistance.
+!  Measured on this run: min 4, median 7, max 29 iterations per timestep and
+!  ZERO timesteps that exhaust the limit.
+   Steady State Max Iterations = 100
+!  Guards against a premature exit while the field is nearly zero (blocking
+!  phase and the zero crossings), where a single coupled iteration can look
+!  converged before the nonlinearity has been iterated at all. It is a FLOOR
+!  only -- the real gate is the circuit residual on Solver 1.
+   Steady State Min Iterations = 3
+End
+Solver 1
+   Exec Solver = Always
+   Equation = Circuits
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+!  NOTE: "Export Circuit Variables" is deliberately NOT set. The Diode component
+!  reads its own branch voltage from the solver's internal relaxed iterate.
+   Circuit Variable Relaxation Factor = Real $ wrel
+!  The coupled loop cannot exit while any solution-dependent lumped component
+!  still violates its own equation by more than this (scaled) amount. Without
+!  it the loop is gated purely on the FIELD norm of Solver 2, which cannot see a
+!  circuit dof that is still travelling -- see the sibling
+!  ../circuits2D_transient_switch_diode_freewheel, where that hole cost 26% on
+!  the coil current. "Exec Solver = Always" above is required for this to have
+!  any effect at all.
+   Nonlinear Circuit Residual Tolerance = Real $ crtres
+End
+Solver 2
+   Equation = "Mag"
+   Variable = A
+   Procedure = "MagnetoDynamics2D" "MagnetoDynamics2D"
+   NonLinear System Relaxation Factor=1
+   Export Lagrange Multiplier = Logical True
+   Linear System Solver = Direct
+   Linear System Direct Method = UMFPACK
+   Steady State Convergence Tolerance = $ sstol
+   Steady State Convergence Absolute = Logical True
+End
+Solver 3 ! Result output
+   Exec Solver = Never
+   Equation = "ResultOutput"
+   Procedure = "ResultOutputSolve" "ResultOutputSolver"
+   Output File Name = 1381-results
+   Vtu format = Logical True
+   Save Geometry Ids = Logical True
+End
+Solver 4
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 5
+   Exec Solver = After Timestep
+   Equation = "sv"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/zener_clamp.dat
+!  The asserted quantity is the SOLVED circuit dof published by CircuitsOutput.
+   Show Norm Name = String "res: i_component(2)"
+End
+Solver 6
+   Exec Solver = After Timestep
+   Equation = "sv v"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/zener_clamp_v.dat
+!  THE CLAMP VOLTAGE -- the headline quantity of this test. Asserted separately
+!  from the current because it is the number the Newton term exists to fix:
+!  -5.4617 V here against -8.8531 V for the same nominal 5 V part under relaxed
+!  Picard.
+   Show Norm Name = String "res: v_component(2)"
+End
+Equation 1
+   Active Solvers(2) = 2 3
+End
+Equation 2
+   Active Solvers(3) = 1 2 3
+End
+Material 1
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+End
+Material 2
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+End
+Material 3
+   Name = aluminium
+   Relative Permeability = 1
+   Electric Conductivity = 1e7
+End
+Body 1
+   Name = Core
+   Target Bodies(6) = 1 2 3 4 5 6
+   Equation = 1
+   Material = 1
+End
+Body 2
+   Name = air
+   Target Bodies(2) = 9 7
+   Equation = 1
+   Material = 2
+End
+Body 3
+   Name = test 1
+   Target Bodies = 8
+   Equation = 2
+   Material = 3
+End
+Component 1
+   Name = String test inductor
+   Master Bodies = Integer 3
+   Coil Type = String stranded
+   Number of Turns = Real 1000
+!  Explicit coil resistance: suppresses the FEM sigma-based resistance so that
+!  the loop resistance is exactly 1 ohm + R_zener.
+   Resistance = Real 1.0
+End
+Component 2
+   Name = String zener
+!  The first-class diode with breakdown. "Diode Breakdown Voltage" is the ONLY
+!  keyword that separates this from the plain diode of the sibling tests.
+   Component Type = String Diode
+   Diode Forward Voltage = Real $ Vf
+   Diode Breakdown Voltage = Real $ Vz
+   Diode On Resistance = Real $ Ron
+   Diode Off Resistance = Real $ Roff
+   Diode Smoothing Voltage = Real $ Vs
+End
+Body Force 1
+   Name = "Circuit"
+   testsource = Variable time
+     Real MATC "V0*sin(2*pi*f*tx)"
+End
+Boundary Condition 1
+   Target Boundaries(4) = $ center0 center1 center2 center3
+   A = Real 0
+End
+Boundary Condition 2
+   Target Boundaries(2) = 4 6
+   Name = "Air Gap"
+   Air Gap = logical True
+   Air Gap Relative Permeability = Real 1
+   Air Gap Length = Real 0.0001
+End
+Boundary Condition 3
+   Target Boundaries(7) = 10 13 14 17 18 19 27
+   Infinity BC = Logical True
+End
+
+Solver 2 :: Reference Norm = 1.38453356E-03
+Solver 2 :: Reference Norm Tolerance = Real 1E-04
+! Independent lumped BDF1 reference at t = 3.75 s, see REFERENCE VALUES above.
+! Given as a MAGNITUDE: SaveScalars reports the norm of the saved value, so the
+! sign of the reverse current is dropped -- exactly as in the sibling
+! circuits2D_transient_diode_blocking, which asserts 9.9998905371E-05 for a
+! current that is likewise negative.
+Solver 5 :: Reference Norm = 5.5377904876E-01
+Solver 5 :: Reference Norm Tolerance = Real 1E-03
+! The CLAMP VOLTAGE at the same instant, likewise as a magnitude: the branch is
+! held at -5.461713292 V while the source is at -10 V. Nominal breakdown is
+! -Vz = -5 V and the ideal clamp -(Vz + Ron*|I|) = -5.055378 V, so the smoothed
+! knee costs 0.406 V. The Picard predecessor of this test clamped at -8.853 V.
+Solver 6 :: Reference Norm = 5.4617132924E+00
+Solver 6 :: Reference Norm Tolerance = Real 1E-03

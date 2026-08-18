@@ -263,7 +263,15 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   ! PREVIOUS-TIMESTEP values because AddBasicCircuitEquations uses it for the
   ! BDF1 history term.
   REAL(KIND=dp), ALLOCATABLE :: CrtIter(:), CrtExp(:)
+  ! TRAFOLO: the RAW (unrelaxed) latest Lagrange values, kept separate from
+  ! CrtIter because CrtIter is overwritten by the relaxed combination and it is
+  ! the raw iterate the circuit-residual check has to police. See
+  ! PublishCircuitResidual.
+  REAL(KIND=dp), ALLOCATABLE :: CrtRaw(:)
   REAL(KIND=dp) :: CrtRelax
+  ! TRAFOLO: circuit-residual convergence check state.
+  REAL(KIND=dp) :: CrtResTol, CrtRes
+  LOGICAL :: CrtResCheck
   TYPE(Variable_t), POINTER :: LagrangeVar
   INTEGER :: Tstep=-1
   LOGICAL :: Parallel
@@ -273,7 +281,8 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   CHARACTER(LEN=MAX_NAME_LEN) :: sname
   CHARACTER(*), PARAMETER :: Caller = 'CircuitsAndDynamics'
 
-  SAVE First, Tstep, Parallel, Crt, CrtIter, CrtExp, CrtRelax, MultName
+  SAVE First, Tstep, Parallel, Crt, CrtIter, CrtExp, CrtRaw, CrtRelax, MultName
+  SAVE CrtResTol, CrtRes, CrtResCheck
   
 !------------------------------------------------------------------------------
   
@@ -378,13 +387,41 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     ! TRAFOLO: buffers for the latest coupled iterate and for the vector last
     ! exported (needed for the optional relaxation), see the refresh below.
     ALLOCATE(CrtIter(Model % Circuit_tot_n), CrtExp(Model % Circuit_tot_n))
+    ! TRAFOLO: raw latest-iterate buffer for the circuit-residual check.
+    ALLOCATE(CrtRaw(Model % Circuit_tot_n))
     CrtExp = 0._dp
+    CrtRaw = 0._dp
     CrtRelax = ListGetConstReal( Solver % Values,'Circuit Variable Relaxation Factor', Found )
     IF(.NOT. Found ) THEN
       CrtRelax = 1.0_dp
     ELSE
       WRITE( Message,'(A,ES12.3)') 'Relaxing exported circuit variables with factor: ',CrtRelax
       CALL Info(Caller,Message,Level=6)
+    END IF
+
+    ! TRAFOLO: opt-in circuit-residual convergence check. The keyword being
+    ! ABSENT must leave the solver behaving exactly as before, so everything
+    ! below -- including the 'Skip Compute Steady State Change' override that
+    ! stops ComputeChange from clobbering the published values -- is inside this
+    ! branch. See PublishCircuitResidual for the mechanism and its limits.
+    ! Before: there was no circuit-side convergence criterion at all; the coupled
+    ! loop was gated purely on the field solver's norm.
+    ! Limitation: the override is added to the solver's own value list at first
+    ! execution, i.e. it silently wins over a user-set
+    ! 'Skip Compute Steady State Change = False' on the circuits solver.
+    CrtRes = 0._dp
+    CrtResTol = ListGetConstReal( Solver % Values,'Nonlinear Circuit Residual Tolerance', CrtResCheck )
+    IF( CrtResCheck ) THEN
+      IF( CrtResTol <= 0.0_dp ) CALL Fatal(Caller, &
+          '"Nonlinear Circuit Residual Tolerance" must be positive!')
+      WRITE( Message,'(A,ES12.3)') &
+          'Gating the coupled loop on the circuit residual, tolerance: ',CrtResTol
+      CALL Info(Caller,Message,Level=5)
+      CALL ListAddLogical( Solver % Values,'Skip Compute Steady State Change',.TRUE.)
+      IF( Solver % SolverExecWhen /= SOLVER_EXEC_ALWAYS ) CALL Warn(Caller, &
+          '"Nonlinear Circuit Residual Tolerance" has no effect unless the circuits '// &
+          'solver runs with "Exec Solver = Always": the coupled loop marks every '// &
+          'other solver converged without testing it.')
     END IF
 
     MultName = LagrangeMultiplierName(ASolver)
@@ -484,10 +521,19 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     IF( SIZE(LagrangeVar % Values) >= Model % Circuit_tot_n ) THEN
       ! (1) always maintain the relaxed latest-iterate buffers
       CrtIter = LagrangeVar % Values(1:Model % Circuit_tot_n)
+      ! TRAFOLO: keep the RAW values before CrtIter is overwritten by the relaxed
+      ! combination -- the residual check needs the true (unrelaxed) iterate the
+      ! coupled loop is about to accept, not the point the stamp linearizes
+      ! about. Copied only when that check is on: it is dead weight otherwise.
+      IF( CrtResCheck ) CrtRaw = CrtIter
       IF( CrtRelax /= 1.0_dp ) CrtIter = CrtRelax * CrtIter + (1.0_dp - CrtRelax) * CrtExp
       CrtExp = CrtIter
       ! (2) export only if the user asked for it (checked inside the callee)
       CALL Circuits_ToMeshVariable(Solver,CrtIter)
+      ! (3) TRAFOLO: gate the coupled loop on the circuit residual when asked.
+      ! Placed here so it sees the freshly read raw iterate, and BEFORE the
+      ! early RETURN on an unassociated circuit matrix below.
+      IF( CrtResCheck ) CALL PublishCircuitResidual()
     END IF
   END IF
 
@@ -536,11 +582,198 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   END IF
 
   CALL Info(Caller,'Finished assembly of circuit matrix',Level=12)
-  
+
 CONTAINS
 
-    
-    
+!------------------------------------------------------------------------------
+!> TRAFOLO: the ONE place the Diode component's keywords are read, their
+!> defaults applied and their values validated. Two call sites need exactly the
+!> same numbers: the matrix stamp in AddComponentEquationsAndCouplings and the
+!> circuit-residual check in PublishCircuitResidual. Before: the reads were
+!> open-coded at the single stamp site. Limitation: the caller must pass the
+!> component id purely so the Fatal messages can name it.
+!------------------------------------------------------------------------------
+   SUBROUTINE GetDiodeParams(CompParams, CompId, Vf, Ron, Roff, Vs, Vz, HasBreakdown)
+!------------------------------------------------------------------------------
+     IMPLICIT NONE
+     TYPE(Valuelist_t), POINTER :: CompParams
+     INTEGER :: CompId
+     REAL(KIND=dp) :: Vf, Ron, Roff, Vs, Vz
+     LOGICAL :: HasBreakdown
+     LOGICAL :: Got
+!------------------------------------------------------------------------------
+     Vf = ListGetCReal(CompParams, 'Diode Forward Voltage', Got)
+     IF (.NOT. Got) Vf = 0._dp
+
+     Ron = ListGetCReal(CompParams, 'Diode On Resistance', Got)
+     IF (.NOT. Got) CALL Fatal('GetDiodeParams', &
+         'Component '//i2s(CompId)// &
+         ': "Diode On Resistance" is required for Component Type = Diode!')
+
+     Roff = ListGetCReal(CompParams, 'Diode Off Resistance', Got)
+     IF (.NOT. Got) Roff = 1.0e5_dp
+
+     Vs = ListGetCReal(CompParams, 'Diode Smoothing Voltage', Got)
+     IF (.NOT. Got) Vs = 0.1_dp
+     IF (Vs <= 0._dp) CALL Fatal('GetDiodeParams', &
+         'Component '//i2s(CompId)// &
+         ': "Diode Smoothing Voltage" must be positive!')
+
+     Vz = ListGetCReal(CompParams, 'Diode Breakdown Voltage', HasBreakdown)
+     IF (HasBreakdown .AND. Vz <= 0._dp) CALL Fatal('GetDiodeParams', &
+         'Component '//i2s(CompId)// &
+         ': "Diode Breakdown Voltage" must be positive!')
+!------------------------------------------------------------------------------
+   END SUBROUTINE GetDiodeParams
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> TRAFOLO: the ONE definition of the smoothed diode resistance law.
+!>   HasBreakdown = .FALSE. (plain diode, single knee)
+!>     R(V) = Ron + 0.5*(Roff-Ron)*(1 - TANH((V-Vf)/Vs))
+!>   HasBreakdown = .TRUE.  (zener, two knees)
+!>     R(V) = Ron + 0.25*(Roff-Ron)*(1-TANH((V-Vf)/Vs))*(1+TANH((V+Vz)/Vs))
+!> The keyword-absent branch is deliberately the ORIGINAL expression, evaluated
+!> without the extra factor at all, so the four pre-existing diode tests stay
+!> bit-identical. Its derivative is stamped inline by the Newton branch of
+!> AddComponentEquationsAndCouplings -- if this law ever changes, that dR/dV
+!> must change with it (they are a pair, and the only reason the derivative is
+!> not here too is that it needs the intermediate TANH values anyway).
+!> Limitation: PURE-style scalar helper with no memoisation; it is re-evaluated
+!> once per component per solver execution at each of the two call sites.
+!------------------------------------------------------------------------------
+   FUNCTION DiodeLawResistance(Vd, Vf, Vz, Ron, Roff, Vs, HasBreakdown) RESULT(Rd)
+!------------------------------------------------------------------------------
+     IMPLICIT NONE
+     REAL(KIND=dp), INTENT(IN) :: Vd, Vf, Vz, Ron, Roff, Vs
+     LOGICAL, INTENT(IN) :: HasBreakdown
+     REAL(KIND=dp) :: Rd
+!------------------------------------------------------------------------------
+     IF (HasBreakdown) THEN
+       Rd = Ron + 0.25_dp * (Roff - Ron) * &
+           (1._dp - TANH((Vd - Vf)/Vs)) * (1._dp + TANH((Vd + Vz)/Vs))
+     ELSE
+       Rd = Ron + 0.5_dp * (Roff - Ron) * &
+           (1._dp - TANH((Vd - Vf)/Vs))
+     END IF
+!------------------------------------------------------------------------------
+   END FUNCTION DiodeLawResistance
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> TRAFOLO: CIRCUIT-RESIDUAL convergence check for the coupled (steady state)
+!> loop, active only when 'Nonlinear Circuit Residual Tolerance' is given on
+!> the circuits solver.
+!>
+!> WHY. The coupled loop's convergence monitor is the FIELD norm of the
+!> magnetodynamics solver. A solution-dependent lumped component can sit at a
+!> point that is NOT a fixed point of its own equation while that field norm has
+!> already stopped moving: when the diode's TANH saturates, R is stamped at
+!> exactly Ron for a whole range of iterates, the linear system repeats itself
+!> unchanged, and the loop declares success. Measured on
+!> fem/tests/circuits2D_transient_switch_diode_freewheel: up to 26% error on the
+!> coil current at a switching edge, with ZERO non-converged timesteps reported.
+!> BEFORE: the only defence was 'Steady State Min Iterations', forced to 40 in
+!> that test purely to outlast the saturated phase -- a crutch that costs every
+!> timestep in the run and that has to be re-tuned per dt.
+!>
+!> WHAT. Per solution-dependent lumped component (i.e. Diode; the Switch is
+!> driven by the clock and the Resistor is linear, neither has a fixed point),
+!>   res_c = |R(V)*I - V| / ( |V| + |R*I| + 1e-30 )
+!> evaluated at the UNRELAXED latest Lagrange values (CrtRaw) -- the true
+!> iterate, not the relaxed point the stamp linearizes about, because it is the
+!> true iterate the loop is about to accept as the answer. The scaling makes it
+!> dimensionless and keeps it well defined in the blocking phase, where V and
+!> R*I are both large but nearly equal, and at a zero crossing, where both go to
+!> zero. res = MAX over components; a circuit of only linear elements has res =
+!> 0 identically, since the linear solve enforces R*I - V = 0 exactly.
+!>
+!> HOW IT REACHES THE LOOP (verified against the library, not assumed):
+!> MainUtils.F90 SolveEquations/SolveCoupled decides per solver with
+!>   DoneThis(k) = ( Solver % Variable % SteadyConverged /= 0 )
+!> and only the exact value 0 blocks the exit; the flag is set by
+!> SolverUtils.F90 ComputeChange, but ONLY inside its
+!> 'Steady State Convergence Tolerance' block -- a solver without that keyword
+!> keeps whatever the flag already held (its initial -1, i.e. silently "done").
+!> So this routine writes the flag itself, and the keyword ALSO switches on
+!> 'Skip Compute Steady State Change' for the circuits solver so that the
+!> ComputeChange call that follows returns immediately (SolverUtils.F90:11105)
+!> instead of overwriting both the flag and the published SteadyChange with a
+!> norm-based measure of the Lagrange vector.
+!>
+!> LIMITATIONS.
+!>  * The circuits solver must run with 'Exec Solver = Always'; any other
+!>    setting takes it out of the coupled loop entirely (MainUtils.F90:3383,
+!>    DoneThis(k) = .TRUE.; CYCLE) and this check then has no effect. Warned
+!>    about at initialization.
+!>  * The residual is that of the PREVIOUS coupled iterate: the circuits solver
+!>    runs before the field solver, so the Lagrange values it reads are the ones
+!>    the field solver last produced. The loop therefore accepts one iterate
+!>    beyond the one whose residual passed. That is conservative (the extra
+!>    iterate is a further Newton step from an already-converged point), but it
+!>    means the reported residual is one iteration stale.
+!>  * 'Steady State Min Iterations' still applies and still wins: while
+!>    i < CoupledMinIter the loop does not test convergence at all.
+!>  * No parallel reduction is done here; the residual is rank-local over the
+!>    components this rank owns. That is correct for the exit decision (MainUtils
+!>    does ParallelAllReduceAnd over DoneThis, so any rank that is not converged
+!>    blocks everyone) but the PUBLISHED number is local. The diode is a
+!>    serial-only element in practice anyway.
+!>  * Only the diode is covered. A future solution-dependent lumped type must be
+!>    added here as well as to IsLumpedComponent.
+!------------------------------------------------------------------------------
+   SUBROUTINE PublishCircuitResidual()
+!------------------------------------------------------------------------------
+     IMPLICIT NONE
+     TYPE(Component_t), POINTER :: Comp
+     TYPE(Valuelist_t), POINTER :: CompParams
+     REAL(KIND=dp) :: Vf, Ron, Roff, Vs, Vz, Vd, Id, Rd, RI
+     LOGICAL :: HasBreakdown, IsActive
+     INTEGER :: ci, ck
+!------------------------------------------------------------------------------
+     CrtRes = 0._dp
+
+     DO ci = 1, Model % n_Circuits
+       DO ck = 1, Model % Circuits(ci) % n_comp
+         Comp => Model % Circuits(ci) % Components(ck)
+         IF (Comp % ComponentType /= 'diode') CYCLE
+
+         IsActive = .TRUE.
+         IF (Model % Circuits(ci) % Parallel) &
+             IsActive = (Comp % vvar % Owner == ParEnv % myPE)
+         IF (.NOT. IsActive) CYCLE
+
+         CompParams => Model % Components(Comp % ComponentId) % Values
+         IF (.NOT. ASSOCIATED(CompParams)) CYCLE
+
+         CALL GetDiodeParams(CompParams, Comp % ComponentId, &
+             Vf, Ron, Roff, Vs, Vz, HasBreakdown)
+
+         Vd = CrtRaw(Comp % vvar % ValueId)
+         Id = CrtRaw(Comp % ivar % ValueId)
+         Rd = DiodeLawResistance(Vd, Vf, Vz, Ron, Roff, Vs, HasBreakdown)
+         RI = Rd * Id
+
+         CrtRes = MAX(CrtRes, ABS(RI - Vd) / (ABS(Vd) + ABS(RI) + 1.0e-30_dp))
+       END DO
+     END DO
+
+     IF (ASSOCIATED(Solver % Variable)) THEN
+       Solver % Variable % SteadyChange = CrtRes
+       IF (CrtRes > CrtResTol) THEN
+         Solver % Variable % SteadyConverged = 0
+       ELSE
+         Solver % Variable % SteadyConverged = 1
+       END IF
+     END IF
+
+     WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Circuit residual: ', CrtRes, &
+         '  tolerance: ', CrtResTol
+     CALL Info(Caller, Message, Level = 6)
+!------------------------------------------------------------------------------
+   END SUBROUTINE PublishCircuitResidual
+!------------------------------------------------------------------------------
+
 !------------------------------------------------------------------------------
    SUBROUTINE AddBasicCircuitEquations(p,Crt,dt)
 !------------------------------------------------------------------------------
@@ -632,6 +865,17 @@ CONTAINS
     LOGICAL :: Found, IsActive
     ! TRAFOLO: diode working variables (see the 'diode' branch below).
     REAL(KIND=dp) :: Vd, Vf, Ron, Roff, Vs
+    ! TRAFOLO: zener breakdown voltage of the diode, and the flag telling whether
+    ! the (optional) keyword was given at all -- the single-knee law must stay
+    ! bit-identical when it was not, see the 'diode' branch below.
+    REAL(KIND=dp) :: Vz
+    LOGICAL :: HasBreakdown
+    ! TRAFOLO: Newton linearization of the diode law -- the latest branch current
+    ! I_k, the analytic dR/dV and the two TANH values it is built from.
+    REAL(KIND=dp) :: Id, dRdV, ta, tb
+    LOGICAL :: DiodeNewton
+    ! TRAFOLO: working variables of the time-driven PWM switch ('switch' branch).
+    REAL(KIND=dp) :: SwFreq, SwDuty, SwPhase, SwPhi
 
     ASolver => CurrentModel % Asolver
     IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('AddComponentEquationsAndCouplings','ASolver not found!')
@@ -695,37 +939,180 @@ CONTAINS
         !   Resistance = Variable "crt v <n>"; Real MATC "..."
         ! which required the export flag, hard-coded the exported variable index
         ! in the sif and left the sign convention to the user.
-        ! Limitations: PICARD only -- the stamped R is frozen at the previous
-        ! iterate, there is no dR/dV Newton term, so a stiff diode needs
-        ! 'Steady State Max Iterations' > 1 and typically
-        ! 'Circuit Variable Relaxation Factor' < 1 (0.10 for Ron/Roff/Vs =
-        ! 0.1/1e5/0.1). Transient only (the harmonic solver rejects diodes).
+        ! Limitations: a diode always needs 'Steady State Max Iterations' > 1 --
+        ! the row is linearized about the previous coupled iterate whichever
+        ! linearization is chosen (Newton by default, Picard with
+        ! 'Diode Newton Linearization = False'; see the stamps below).
+        ! Transient only (the harmonic solver rejects diodes).
         ! Serial only in practice: CrtExp is read at the component's global dof
         ! index, which is exercised for serial runs only.
         ELSE IF (Comp % ComponentType == 'diode') THEN
-            Vf = ListGetCReal(CompParams, 'Diode Forward Voltage', Found)
-            IF (.NOT. Found) Vf = 0._dp
-
-            Ron = ListGetCReal(CompParams, 'Diode On Resistance', Found)
-            IF (.NOT. Found) CALL Fatal('AddComponentEquationsAndCouplings', &
-                'Component '//i2s(Comp % ComponentId)// &
-                ': "Diode On Resistance" is required for Component Type = Diode!')
-
-            Roff = ListGetCReal(CompParams, 'Diode Off Resistance', Found)
-            IF (.NOT. Found) Roff = 1.0e5_dp
-
-            Vs = ListGetCReal(CompParams, 'Diode Smoothing Voltage', Found)
-            IF (.NOT. Found) Vs = 0.1_dp
-            IF (Vs <= 0._dp) CALL Fatal('AddComponentEquationsAndCouplings', &
-                'Component '//i2s(Comp % ComponentId)// &
-                ': "Diode Smoothing Voltage" must be positive!')
+            ! TRAFOLO: the keyword reads, their defaults and their validation all
+            ! moved into GetDiodeParams, and the resistance law itself into
+            ! DiodeLawResistance. Why: slice 4 added a SECOND reader of both --
+            ! the circuit-residual convergence check (PublishCircuitResidual)
+            ! must evaluate exactly the same R(V) from exactly the same
+            ! parameters, or it would police a law the matrix does not stamp.
+            ! Before: the reads and the law were open-coded here, this being the
+            ! only site that needed them. Limitation: the two helpers are
+            ! contained in CircuitsAndDynamics, so the harmonic solver (which
+            ! rejects diodes outright) cannot share them.
+            ! TRAFOLO: OPTIONAL zener/avalanche breakdown. Why: TRAFOLO models
+            ! need clamping elements (snubbers, freewheel paths, gate clamps),
+            ! and a zener is a diode with a SECOND knee -- introducing a separate
+            ! component type would have duplicated this whole branch.
+            ! When 'Diode Breakdown Voltage' Vz is given, the blocking window
+            ! shrinks from (-infinity, Vf) to (-Vz, Vf) and the law becomes the
+            ! product of the two knees:
+            !   R(V) = Ron + (Roff-Ron)*0.25*(1-TANH((V-Vf)/Vs))*(1+TANH((V+Vz)/Vs))
+            ! Limits: V >> Vf -> first factor 0 -> R = Ron (forward conduction);
+            ! V << -Vz -> second factor 0 -> R = Ron (reverse breakdown);
+            ! -Vz << V << Vf -> 0.25*2*2 = 1 -> R = Roff (blocking).
+            ! Before: there was no breakdown at all, so a reverse-biased diode
+            ! blocked at Roff for ANY reverse voltage and could not clamp.
+            ! Limitations: the same Ron is used in both directions (a real zener
+            ! has a different, usually larger, dynamic resistance in breakdown);
+            ! the same Vs smooths both knees; and Vz and Vf must be separated by
+            ! several Vs or the two knees overlap and the blocking plateau never
+            ! reaches Roff.
+            ! Vs IS NOT FREE for a clamp AS LONG AS THE LOOP IS PICARD (R frozen
+            ! at the relaxed iterate): the amplification on a series branch is
+            ! |G'| = 2*|V_clamp|*D/(Vs*(D+R)), D = L/dt + Rloop. In breakdown the
+            ! branch is held at |V| ~ Vz, so |G'| ~ 2*Vz/Vs: a clamp is stiffer
+            ! than the FORWARD knee of the same diode by the ratio of the branch
+            ! voltages (measured 101.7 against 10.2 at Vz = 5, Vs = 0.1).
+            ! Relaxation needs w < 2/(1+|G'|), and combining that with the flank
+            ! position V = -Vz - 0.5*Vs*LN(Roff/R) gives Vs ~ 0.37*Vz and a clamp
+            ! voltage ~1.85*Vz: a SMOOTHED CLAMP DRIVEN BY RELAXED PICARD
+            ! OVERSHOOTS ITS NOMINAL BREAKDOWN VOLTAGE BY ROUGHLY 85%. That is
+            ! what the Newton term below removes: with dR/dV in the Jacobian the
+            ! stiff flank is no longer a stability limit, so Vs can go back to
+            ! 0.1 and the only remaining overshoot is the knee-width term
+            ! 0.5*Vs*LN(Roff/R) itself -- measured -5.4617 V for Vz = 5, against
+            ! -8.8531 V under Picard. The sweep behind these numbers is in
+            ! fem/tests/circuits2D_transient_zener_clamp.
+            CALL GetDiodeParams(CompParams, Comp % ComponentId, &
+                Vf, Ron, Roff, Vs, Vz, HasBreakdown)
 
             Vd = CrtExp(Comp % vvar % ValueId)
-            Comp % Resistance = Ron + 0.5_dp * (Roff - Ron) * &
-                (1._dp - TANH((Vd - Vf)/Vs))
+            Comp % Resistance = DiodeLawResistance(Vd, Vf, Vz, Ron, Roff, Vs, HasBreakdown)
 
             WRITE(Message,'(A,I0,A,ES12.5,A,ES12.5)') 'Writing diode equation, component ', &
                 CompInd,': V = ',Vd,' R = ',Comp % Resistance
+            CALL Info('AddComponentEquationsAndCouplings', Message, Level = 7)
+
+            CALL AddToMatrixElement(CM, VvarId, IvarId, Comp % Resistance)
+
+            ! TRAFOLO: NEWTON linearization of the component equation.
+            ! Why: the two stamps above are a PICARD (frozen-R) linearization of
+            ! f(V,I) = R(V)*I - V = 0. Its contraction factor on a series branch
+            ! is |G'| ~ 2*|V_branch|/Vs, so the smoothing voltage Vs had to be
+            ! opened up (and the relaxation factor closed down) until the loop
+            ! contracted -- which is exactly what smeared the zener clamp out to
+            ! -8.85 V for a nominal -5 V part, and what made a switching edge
+            ! take tens of iterations to walk back down. Differentiating the
+            ! component equation about the current iterate (V_k, I_k) instead:
+            !   df/dI = R(V_k),  df/dV = R'(V_k)*I_k - 1
+            !   R(V_k)*I + (R'(V_k)*I_k - 1)*V = R'(V_k)*I_k*V_k
+            ! i.e. the R*I stamp is unchanged, the -1 on the diagonal picks up
+            ! +R'(V_k)*I_k, and the row gains an RHS. R' is analytic:
+            !   single knee  R' = -0.5*(Roff-Ron)/Vs * (1 - ta^2)
+            !   two knees    R' =  0.25*(Roff-Ron)/Vs *
+            !                        ( (1-ta)*(1-tb^2) - (1-ta^2)*(1+tb) )
+            ! with ta = TANH((V-Vf)/Vs), tb = TANH((V+Vz)/Vs); both were checked
+            ! against a central finite difference (rel. err < 1e-6, see the
+            ! companion reference scripts of the zener and freewheel tests).
+            ! Before: Picard only -- there was no RHS on a diode row at all.
+            ! Limitations: the expansion point is the RELAXED iterate held in
+            ! CrtExp, so 'Circuit Variable Relaxation Factor' still moves the
+            ! point Newton linearizes about (it no longer has to be small, but a
+            ! very small w still slows the quadratic phase down to the relaxed
+            ! rate). The Jacobian is exact only for the diode's OWN row -- the
+            ! coupled field/circuit system as a whole is still solved by the
+            ! outer loop, so this is a block-Newton, not a full Newton. And it
+            ! linearizes about a point that is one coupled iteration old, so the
+            ! convergence is quadratic only once that lag has died out.
+            ! 'Diode Newton Linearization = False' restores the old two-stamp
+            ! Picard row bit-for-bit (no Newton code runs at all).
+            DiodeNewton = ListGetLogical(CompParams, 'Diode Newton Linearization', Found)
+            IF (.NOT. Found) DiodeNewton = .TRUE.
+
+            IF (DiodeNewton) THEN
+              Id = CrtExp(Comp % ivar % ValueId)
+              ta = TANH((Vd - Vf)/Vs)
+              IF (HasBreakdown) THEN
+                tb = TANH((Vd + Vz)/Vs)
+                dRdV = 0.25_dp * (Roff - Ron) / Vs * &
+                    ( (1._dp - ta) * (1._dp - tb*tb) - (1._dp - ta*ta) * (1._dp + tb) )
+              ELSE
+                dRdV = -0.5_dp * (Roff - Ron) / Vs * (1._dp - ta*ta)
+              END IF
+              CALL AddToMatrixElement(CM, VvarId, VvarId, dRdV * Id - 1._dp)
+              CM % RHS(VvarId) = CM % RHS(VvarId) + dRdV * Id * Vd
+            ELSE
+              CALL AddToMatrixElement(CM, VvarId, VvarId, -1._dp)
+            END IF
+        ! TRAFOLO: first-class time-driven PWM SWITCH. Stamped exactly like the
+        ! resistor and the diode (R*I - V = 0 on the component's own voltage
+        ! row), but the resistance is a function of TIME ONLY:
+        !   s   = t*f - phase/360      (t = current solution time, f in Hz)
+        !   closed  iff  MODULO(s, 1) < duty      ->  R = Ron
+        !   open                                  ->  R = Roff
+        ! Why time-explicit: a converter model needs a gate signal that is
+        ! prescribed, not solved for. Because R does NOT depend on the solution
+        ! there is no fixed point to iterate, so a switch works at
+        ! 'Steady State Max Iterations = 1' -- unlike the diode, which needs the
+        ! Picard loop. Before: a PWM switch could only be faked as
+        ! 'Component Type = Resistor' with a MATC expression of "time", which
+        ! required Export Circuit Variables and open-coded the modulo in the sif.
+        ! MODULO() is used rather than s - FLOOR(s) because FLOOR returns a
+        ! default INTEGER, which would overflow for large t*f.
+        ! Limitations: the switching edges are QUANTIZED to the timestep grid --
+        ! R is constant across a whole step and is evaluated at the step's end
+        ! time (the BDF1 implicit point), so the sif author must resolve the
+        ! switching period (dt <= Tsw/50 recommended, and edges placed off the
+        ! grid points to keep the state unambiguous). There is no dead time, no
+        ! on/off transition ramp and no gate-signal source: duty and phase are
+        ! constants read per assembly, not controllable quantities. Transient
+        ! only (the harmonic solver rejects switches).
+        ELSE IF (Comp % ComponentType == 'switch') THEN
+            SwFreq = ListGetCReal(CompParams, 'Switch Frequency', Found)
+            IF (.NOT. Found) CALL Fatal('AddComponentEquationsAndCouplings', &
+                'Component '//i2s(Comp % ComponentId)// &
+                ': "Switch Frequency" is required for Component Type = Switch!')
+            IF (SwFreq <= 0._dp) CALL Fatal('AddComponentEquationsAndCouplings', &
+                'Component '//i2s(Comp % ComponentId)// &
+                ': "Switch Frequency" must be positive!')
+
+            SwDuty = ListGetCReal(CompParams, 'Switch Duty Cycle', Found)
+            IF (.NOT. Found) CALL Fatal('AddComponentEquationsAndCouplings', &
+                'Component '//i2s(Comp % ComponentId)// &
+                ': "Switch Duty Cycle" is required for Component Type = Switch!')
+            IF (SwDuty <= 0._dp .OR. SwDuty >= 1._dp) CALL Fatal( &
+                'AddComponentEquationsAndCouplings', &
+                'Component '//i2s(Comp % ComponentId)// &
+                ': "Switch Duty Cycle" must be strictly between 0 and 1!')
+
+            SwPhase = ListGetCReal(CompParams, 'Switch Phase', Found)
+            IF (.NOT. Found) SwPhase = 0._dp
+
+            Ron = ListGetCReal(CompParams, 'Switch On Resistance', Found)
+            IF (.NOT. Found) CALL Fatal('AddComponentEquationsAndCouplings', &
+                'Component '//i2s(Comp % ComponentId)// &
+                ': "Switch On Resistance" is required for Component Type = Switch!')
+
+            Roff = ListGetCReal(CompParams, 'Switch Off Resistance', Found)
+            IF (.NOT. Found) Roff = 1.0e5_dp
+
+            SwPhi = MODULO(GetTime() * SwFreq - SwPhase / 360._dp, 1._dp)
+            IF (SwPhi < SwDuty) THEN
+              Comp % Resistance = Ron
+            ELSE
+              Comp % Resistance = Roff
+            END IF
+
+            WRITE(Message,'(A,I0,A,ES12.5,A,ES12.5)') 'Writing switch equation, component ', &
+                CompInd,': phase = ',SwPhi,' R = ',Comp % Resistance
             CALL Info('AddComponentEquationsAndCouplings', Message, Level = 7)
 
             CALL AddToMatrixElement(CM, VvarId, IvarId, Comp % Resistance)
@@ -767,11 +1154,12 @@ CONTAINS
         END IF
       END IF
       
-      ! TRAFOLO: a diode is lumped exactly like a resistor -- it owns no bodies,
-      ! so the element loop below (and the parallel reduction after it) would do
-      ! nothing but cost a full sweep over the active elements. Before: only
-      ! 'resistor' skipped it. Limitation: this also means a diode can never be
-      ! given Master Bodies; it is a pure circuit element.
+      ! TRAFOLO: a diode (and now a switch) is lumped exactly like a resistor --
+      ! it owns no bodies, so the element loop below (and the parallel reduction
+      ! after it) would do nothing but cost a full sweep over the active
+      ! elements. Before: only 'resistor' skipped it. Limitation: this also means
+      ! a diode or a switch can never be given Master Bodies; both are pure
+      ! circuit elements.
       IF (IsLumpedComponent(Comp)) CYCLE
 
       DO q=GetNOFActive(),1,-1
@@ -1887,6 +2275,20 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (Comp % ComponentType == 'diode') THEN
         CALL Fatal('AddComponentEquationsAndCouplings', &
             'Component '//i2s(Comp % ComponentId)//': "Component Type = Diode" is '// &
+            'transient-only and cannot be used with CircuitsAndDynamicsHarmonic!')
+      END IF
+
+      ! TRAFOLO: same hard stop for the PWM switch. It is not nonlinear, but it
+      ! is explicitly TIME dependent: its resistance is a square wave of the
+      ! solution time, and a phasor formulation has no time to evaluate it at
+      ! (the harmonic path never advances 'time' at all). Before: as for the
+      ! diode, a switch here produced an EMPTY voltage row and a silently wrong
+      ! or singular system. Limitation: hard stop, not a fallback -- modelling a
+      ! chopper in the frequency domain would need the switching-function
+      ! harmonics, which are not implemented.
+      IF (Comp % ComponentType == 'switch') THEN
+        CALL Fatal('AddComponentEquationsAndCouplings', &
+            'Component '//i2s(Comp % ComponentId)//': "Component Type = Switch" is '// &
             'transient-only and cannot be used with CircuitsAndDynamicsHarmonic!')
       END IF
 
