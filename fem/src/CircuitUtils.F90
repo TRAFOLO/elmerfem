@@ -50,13 +50,18 @@ CONTAINS
 !------------------------------------------------------------------------------
 !> TRAFOLO: True for the purely LUMPED component types, i.e. the ones that own a
 !> single (i,v) dof pair, write their whole equation on the voltage row and have
-!> no FEM bodies attached ('resistor' and the new 'diode').
+!> no FEM bodies attached ('resistor', 'diode' and the new 'switch').
 !> Why: 'diode' must be recognised at every site that previously special-cased
 !> 'resistor' (dof counts and the two circuit-matrix structure passes); a helper
 !> keeps those sites in sync instead of three independent string comparisons.
 !> Before: each site tested Comp % ComponentType == 'resistor' inline, so adding
 !> a type meant editing every one of them and silently producing a wrong matrix
 !> structure if one was missed.
+!> Adding 'switch' here is the ONLY change the new time-driven PWM switch needs
+!> outside AddComponentEquationsAndCouplings -- it stamps the identical two
+!> entries (R*I and -V) on its voltage row, so every dof-count and
+!> matrix-structure site follows automatically. That is exactly what this helper
+!> was introduced for.
 !> Limitation: membership is a hard-coded name list, not a property read from the
 !> component itself; a new lumped type still has to be added here.
 !------------------------------------------------------------------------------
@@ -67,7 +72,8 @@ CONTAINS
     LOGICAL :: Lumped
 
     Lumped = ( Comp % ComponentType == 'resistor' .OR. &
-               Comp % ComponentType == 'diode' )
+               Comp % ComponentType == 'diode'    .OR. &
+               Comp % ComponentType == 'switch' )
 !------------------------------------------------------------------------------
   END FUNCTION IsLumpedComponent
 !------------------------------------------------------------------------------

@@ -1,0 +1,51 @@
+! Circuit definitions for circuits2D_transient_zener_clamp.
+! Identical topology to circuits2D_transient_diode_component_rectifier: an ideal
+! voltage source in series with the FEM (stranded) coil component(1) and the
+! lumped diode component(2). Here component(2) additionally has
+! "Diode Breakdown Voltage", which turns it into a zener.
+$ Circuits = 1
+
+! ------------------------ Circuit 1 ------------------------
+! Define variable count and initialize circuit matrices.
+$ C.1.perm = zeros(6)
+$ C.1.perm(0) = 0
+$ C.1.perm(1) = 1
+$ C.1.perm(2) = 2
+$ C.1.perm(3) = 3
+$ C.1.perm(4) = 4
+$ C.1.perm(5) = 5
+
+$ C.1.variables = 6
+$ C.1.A = zeros(6,6)
+$ C.1.B = zeros(6,6)
+$ C.1.Mre = zeros(6,6)
+$ C.1.Mim = zeros(6,6)
+
+! Define variables.
+!   crt i 1 = coil current,   crt i 2 = zener current
+!   crt v 1 = coil voltage,   crt v 2 = zener voltage
+$ C.1.name.1 = "i_testsource"
+$ C.1.name.2 = "v_testsource"
+$ C.1.name.3 = "i_component(1)"
+$ C.1.name.4 = "v_component(1)"
+! The zener. Elmer writes the component equation R(V)*I - V = 0 to the row of
+! the voltage variable (row 6), so that row is left empty here.
+$ C.1.name.5 = "i_component(2)" ! zener current
+$ C.1.name.6 = "v_component(2)" ! zener voltage
+
+! Define sources:
+!------------------
+$ C.1.B(0,1) = 1
+$ C.1.source.1 = "testsource"
+
+! Define network cycles:
+!-------------------------
+!Voltage relations.  -v_source + v_coil + v_zener = 0
+$ C.1.B(1,1) = -1
+$ C.1.B(1,3) = 1
+$ C.1.B(1,5) = 1
+!Current relations.  i_source = i_coil = i_zener  (single series loop)
+$ C.1.B(2,0) = 1
+$ C.1.B(2,2) = -1
+$ C.1.B(4,0) = 1
+$ C.1.B(4,4) = -1
