@@ -941,19 +941,25 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
       END IF
     END DO
 
-    IF( Solver % Parallel .NEQV. Asolver % Parallel  ) THEN
-      CALL Warn(Caller,'Conflicting parallel status for circuit and A solver!')
-      Solver % Parallel = .TRUE.
-      ASolver % Parallel = .TRUE.
-    END IF
-    
+    ! The fallback has to come before ASolver is dereferenced: the loop above
+    ! only recognizes the solver by its "Procedure" string, so ASolver is still
+    ! null here for e.g. an A solver reached through a wrapper module. The
+    ! parallel status is reconciled after that, as in the harmonic version.
     IF(.NOT. ASSOCIATED(ASolver) ) THEN
       ASolver => FindSolverWithKey('Export Lagrange Multiplier')
     END IF
     CALL Info(Caller,'Circuit equations associated with solver index: '&
         //I2S(ASolver % SolverId),Level=6)
-    Model % ASolver => ASolver 
-       
+    Model % ASolver => ASolver
+
+    IF( Solver % Parallel .NEQV. Asolver % Parallel  ) THEN
+      CALL Warn(Caller,'Conflicting parallel status for circuit and A solver!')
+      Solver % Parallel = .TRUE.
+      ASolver % Parallel = .TRUE.
+      ! Keep the local copy in step, it is what Circuit % Parallel is set from.
+      Parallel = Solver % Parallel
+    END IF
+
     CALL AllocateCircuitsList() ! CurrentModel%Circuits
     Circuits => Model % Circuits
 
@@ -1413,8 +1419,12 @@ CONTAINS
       DO CompInd = 1, Circuit % n_comp
         Comp => Circuit % Components(CompInd)
         ! A foil sheet's resistance comes from strand sums that are already
-        ! reduced over the partitions.
-        IF (Comp % CoilType /= 'foil sheet') &
+        ! reduced over the partitions. Only an integrated resistance is a
+        ! partial sum over the partitions either: one that came from the
+        ! "Resistance" keyword is already the whole value on every partition,
+        ! and summing it would report it PEs times too large. Both tests are
+        ! uniform over the partitions, so the collective stays collective.
+        IF (Comp % CoilType /= 'foil sheet' .AND. .NOT. Comp % UseCoilResistance) &
             Comp % Resistance = ParallelReduction(Comp % Resistance)
         IF (StrandedSkinActive(Comp % ComponentId)) &
             SSkin(Comp % ComponentId) % K = ParallelReduction(SSkin(Comp % ComponentId) % K)
@@ -2695,12 +2705,14 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     END IF
     CALL Info(Caller,'Circuit equations associated with solver index: '&
         //I2S(ASolver % SolverId),Level=6)
-    Model % ASolver => ASolver 
+    Model % ASolver => ASolver
 
     IF( Solver % Parallel .NEQV. Asolver % Parallel  ) THEN
       CALL Warn(Caller,'Conflicting parallel status for circuit and A solver!')
       Solver % Parallel = .TRUE.
       ASolver % Parallel = .TRUE.
+      ! Keep the local copy in step, it is what Circuit % Parallel is set from.
+      Parallel = Solver % Parallel
     END IF
     
     CALL AllocateCircuitsList() ! CurrentModel%Circuits
@@ -3001,7 +3013,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal ('AddComponentEquationsAndCouplings', &
                'Component parameters not found')
 
-      IF (Comp % CoilType == 'stranded') THEN
+      IF (Comp % CoilType == 'stranded' .OR. Comp % ComponentType == 'resistor') THEN
         Comp % Resistance = ListGetCReal(CompParams, 'Resistance', Found)
         IF (Found) THEN
           Comp % UseCoilResistance = .TRUE.
@@ -3011,6 +3023,15 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       END IF
 
       IF ( Cvar % Owner == ParEnv % myPE .OR. .NOT. Circuit % Parallel ) THEN
+        IF (Comp % ComponentType == 'resistor') THEN
+          ! V = R I, mirroring the transient branch. A resistor has no coil type,
+          ! so the SELECT CASE below would simply skip it and leave the row empty,
+          ! which made the circuit block singular.
+          CALL Info('AddComponentEquationsAndCouplings',&
+              'Writing resistor equation, component '//i2s(CompInd), Level = 7)
+          CALL AddToCmplxMatrixElement(CM, VvarId, IvarId, Comp % Resistance, 0._dp)
+          CALL AddToCmplxMatrixElement(CM, VvarId, VvarId, -1._dp, 0._dp)
+        ELSE
         SELECT CASE (Comp % CoilType)
         CASE('stranded')
           IF (Comp % UseCoilResistance) THEN
@@ -3082,7 +3103,12 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
                REAL(cmplx_val), AIMAG(cmplx_val))
           END DO
         END SELECT
+        END IF
       END IF
+
+      ! A resistor has no elements of its own; as in the transient path there is
+      ! nothing further to assemble for it.
+      IF (Comp % ComponentType == 'resistor') CYCLE
 
       DO q=GetNOFActive(),1,-1
         Element => GetActiveElement(q)
@@ -3106,8 +3132,12 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       DO CompInd = 1, Circuit % n_comp
         Comp => Circuit % Components(CompInd)
         ! A foil sheet's resistance comes from strand sums that are already
-        ! reduced over the partitions.
-        IF (Comp % CoilType /= 'foil sheet') &
+        ! reduced over the partitions. Only an integrated resistance is a
+        ! partial sum over the partitions either: one that came from the
+        ! "Resistance" keyword is already the whole value on every partition,
+        ! and summing it would report it PEs times too large. Both tests are
+        ! uniform over the partitions, so the collective stays collective.
+        IF (Comp % CoilType /= 'foil sheet' .AND. .NOT. Comp % UseCoilResistance) &
             Comp % Resistance = ParallelReduction(Comp % Resistance)
         Comp % Conductance = ParallelReduction(Comp % Conductance)
       END DO
@@ -3983,7 +4013,11 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
                      RotMLoc(3,3), RotM(3,3,nn)
-    REAL(KIND=dp) :: Jvec(3)
+    ! Jvec is sigma * grad v0 and sigma may be complex ("Electric Conductivity
+    ! im", homogenization models). It used to be REAL, which silently threw the
+    ! imaginary part away in the V-V stiffness block and in the A-V coupling
+    ! block below, while the V-A block kept the full complex C.
+    COMPLEX(KIND=dp) :: Jvec(3)
     INTEGER :: i,ncdofs,q,EdgeBasisDegree,ni
     LOGICAL :: ConstraintActive
     TYPE(Variable_t), POINTER, SAVE :: Wpot
@@ -4147,7 +4181,9 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         C = MATMUL(MATMUL(RotMLoc, C),TRANSPOSE(RotMLoc))
 
         IF (FoilUseJvec) THEN
-          Jvec = ListGetElementVectorSolution( Jvec_h, Basis, Element, dofs = dim )
+          ! A given J vector is a real field, so it has no imaginary part.
+          Jvec = CMPLX( ListGetElementVectorSolution( Jvec_h, Basis, Element, dofs = dim ), &
+              0.0_dp, KIND=dp )
         ELSE
           Jvec = MATMUL(C,gradv)
         END IF
@@ -4499,7 +4535,7 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
        CALL MPI_ALLREDUCE(crtt,crt,circuit_tot_n, MPI_DOUBLE_PRECISION, &
                   MPI_SUM, ASolver % Matrix % Comm, j)
      ELSE
-       crt(1:circuit_tot_n) = LagrangeVar % Values
+       crt(1:circuit_tot_n) = LagrangeVar % Values(1:circuit_tot_n)
      END IF
    END IF
 
@@ -4607,13 +4643,21 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
            TRIM(Circuits(p) % names(i))//' im', crt(Cvar % ImValueId), Level=10)
 
          IF (Cvar % pdofs /= 0 ) THEN
+           ! The harmonic assembly places polynomial term m (m=0,...,pdofs-1) of a
+           ! foil winding voltage at Cvar % ValueId + AddIndex(m+1) and its
+           ! imaginary part one row further, see Add_foil_winding() and
+           ! CountAndCreateFoilWinding(); flat wire and foil sheet cells likewise
+           ! sit at 2*j. Hence AddIndex/AddImIndex here. ReIndex/ImIndex used to
+           ! be used instead, which are 2*jj-1 and 2*jj and so reported every dof
+           ! one slot too low: "re dof 1" was the imaginary part of the voltage
+           ! itself, "im dof 1" the real part of dof 1, and so on.
            DO jj = 1, Cvar % pdofs
              CALL SimListAddAndOutputConstReal(&
                TRIM(Circuits(p) % names(i))&
-               //'re dof '//I2S(jj), crt(Cvar % ValueId + ReIndex(jj)), Level=10)
+               //' re dof '//I2S(jj), crt(Cvar % ValueId + AddIndex(jj)), Level=10)
              CALL SimListAddAndOutputConstReal(&
                TRIM(Circuits(p) % names(i))&
-               //'im dof '//I2S(jj), crt(Cvar % ValueId + ImIndex(jj)), Level=10)
+               //' im dof '//I2S(jj), crt(Cvar % ValueId + AddImIndex(jj)), Level=10)
            END DO
          END IF
        ELSE
@@ -4624,7 +4668,7 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
            DO jj = 1, Cvar % pdofs
              CALL SimListAddAndOutputConstReal(&
                TRIM(Circuits(p) % names(i))&
-               //'dof '//I2S(jj), crt(Cvar % ValueId + jj), Level=10)
+               //' dof '//I2S(jj), crt(Cvar % ValueId + jj), Level=10)
            END DO
          END IF
        END IF

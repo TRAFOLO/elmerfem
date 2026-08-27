@@ -986,8 +986,14 @@ MODULE Types
 
 !-------------------Circuit stuff----------------------------------------------
   TYPE CircuitVariable_t
-    LOGICAL :: isIvar, isVvar
-    INTEGER :: BodyId, valueId, ImValueId, dofs, pdofs, Owner, ComponentId
+    ! Default initialized for the same reason as Component_t below. ImValueId in
+    ! particular is only assigned for a harmonic circuit, while
+    ! GetComponentCurrent() tests it with "> 0" for any circuit - so in a
+    ! transient run it used to decide on uninitialized memory, and when that
+    ! happened to be a valid index it read the real current as the imaginary one.
+    LOGICAL :: isIvar = .FALSE., isVvar = .FALSE.
+    INTEGER :: BodyId = 0, valueId = 0, ImValueId = 0, dofs = 0, pdofs = 0, &
+         Owner = 0, ComponentId = 0
     TYPE(Component_t), POINTER :: Component => NULL()
     REAL(KIND=dp), ALLOCATABLE :: A(:), B(:)
     REAL(KIND=dp), ALLOCATABLE :: SourceRe(:), SourceIm(:), Mre(:), Mim(:)
@@ -995,10 +1001,17 @@ MODULE Types
   END TYPE CircuitVariable_t
   
   TYPE Component_t
-    REAL(KIND=dp) :: Inductance=0._dp, Resistance=0._dp, Conductance = 0._dp, ElArea, &
-         N_j, coilthickness, i_multiplier_re, i_multiplier_im, nofturns, &
+    ! Every field is default initialized on purpose. ReadComponents() only fills
+    ! the ones that its coil type needs - ElArea and N_j for instance are set for
+    ! 'stranded' and 'foil winding' but not for 'massive' or for a resistor - yet
+    ! consumers such as GetComponentArea() and the 'Stranded Coil N_j' keyword
+    ! read them for any component. Without the initializers those reads returned
+    ! whatever was on the heap. Zero also doubles as a detectable "not set".
+    REAL(KIND=dp) :: Inductance=0._dp, Resistance=0._dp, Conductance = 0._dp, &
+         ElArea=0._dp, N_j=0._dp, coilthickness=1._dp, i_multiplier_re=0._dp, &
+         i_multiplier_im=0._dp, nofturns=0._dp, &
          VoltageFactor=1._dp, SymmetryCoeff=1._dp
-    INTEGER :: polord, nofcnts, BodyId, ComponentId
+    INTEGER :: polord=0, nofcnts=0, BodyId=0, ComponentId=0
     ! flat wire: turn cells along the stacking direction and across it
     INTEGER :: nStack = 1, nAcross = 1
     LOGICAL :: StackAlongAlpha = .FALSE.
