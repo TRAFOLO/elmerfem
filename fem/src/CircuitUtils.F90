@@ -250,9 +250,14 @@ CONTAINS
           Found = .TRUE.
           CurrRe = LagrangeVar % Values(iVar % ValueId)
         END IF
-        IF(iVar % ImValueId > 0 ) THEN
+        ! Guarded on the circuit being harmonic, not just on the index looking
+        ! plausible: ImValueId is only ever assigned for a harmonic circuit, so
+        ! for a transient one this used to branch on uninitialized memory, and
+        ! when that happened to be a valid index it read the real current as the
+        ! imaginary part. A transient current is real by construction.
+        IF( Circuit % Harmonic .AND. iVar % ImValueId > 0 ) THEN
           CurrIm = LagrangeVar % Values(iVar % ImValueId)
-        END IF        
+        END IF
         IF(Found) EXIT
       END DO
       IF(Found) EXIT
@@ -281,27 +286,41 @@ CONTAINS
     TYPE(Variable_t), POINTER :: LagrangeVar
     REAL(KIND=dp) :: CurrIm, CurrRe
     TYPE(Circuit_t), POINTER :: Circuit
-    CHARACTER(LEN=MAX_NAME_LEN) :: str 
-       
+    CHARACTER(LEN=MAX_NAME_LEN) :: str
+    LOGICAL :: GotComp
+
     Found = .FALSE.
+    GotComp = .FALSE.
     Area = 0.0_dp
 
     IF(CurrentModel % n_Circuits == 0) RETURN
-    
-    DO i = 1, CurrentModel % n_Circuits     
-      Circuit => CurrentModel % Circuits(i)      
+
+    DO i = 1, CurrentModel % n_Circuits
+      Circuit => CurrentModel % Circuits(i)
       DO j = 1, SIZE(Circuit % Components)
         ivar => Circuit % Components(j) % ivar
+        IF(.NOT. ASSOCIATED(ivar)) CYCLE
         IF(iVar % BodyId /= CompId ) CYCLE
 
+        GotComp = .TRUE.
         Area = Circuit % Components(j) % ElArea
-        Found = .TRUE.
+
+        ! ElArea is only computed for the coil types that need it, so a zero here
+        ! means "this component has no electrode area", not "the area is zero".
+        ! Report that through Found rather than returning a number the caller
+        ! cannot use - it is only ever wanted for optional postprocessing, so it
+        ! is not worth aborting the run over.
+        Found = ( Area > 0.0_dp )
+        IF( .NOT. Found ) THEN
+          CALL Warn('GetComponentArea','No electrode area for component '&
+              //I2S(CompId)//' of coil type: '//TRIM(Circuit % Components(j) % CoilType))
+        END IF
         EXIT
       END DO
-      IF(Found) EXIT
+      IF(GotComp) EXIT
     END DO
 
-    IF(.NOT. Found) THEN
+    IF(.NOT. GotComp) THEN
       CALL Fatal('GetComponentArea','Got circuits but no area for component: '//I2S(CompId))
     END IF
       
@@ -341,11 +360,19 @@ CONTAINS
 
 
 !------------------------------------------------------------------------------
-  SUBROUTINE GetWPotentialVar(pVar)
+  SUBROUTINE GetWPotentialVar(pVar, Quiet)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
 
     TYPE(Variable_t), POINTER :: pVar
+    !> Probe only: the caller reports the missing field itself, or does not need
+    !> one. The warning is for the assembly routines, which cannot do their job
+    !> without the field.
+    LOGICAL, OPTIONAL :: Quiet
+    LOGICAL :: Silent
+
+    Silent = .FALSE.
+    IF( PRESENT(Quiet) ) Silent = Quiet
 
     pVar => VariableGet( CurrentModel % Mesh % Variables,'W Potential')
     IF(.NOT. ASSOCIATED(pVar) ) THEN
@@ -354,7 +381,7 @@ CONTAINS
     IF(ASSOCIATED(pVar)) THEN
       CALL Info('GetWPotentialVar','Using gradient of field to define direction: '&
           //TRIM(pVar % Name),Level=7)
-    ELSE
+    ELSE IF( .NOT. Silent ) THEN
       CALL Warn('GetWPotentialVar','Could not obtain variable for potential "W"')
     END IF
 !------------------------------------------------------------------------------
@@ -2625,8 +2652,12 @@ FUNCTION isComponentName(name, len) RESULT(L)
    L = .FALSE.
    IF(len<12) RETURN
    IF(name(1:12)=='i_component(' .OR. &
-      name(1:12)=='v_component(' .OR. &
-      name(1:14)=='phi_component(') L=.TRUE.
+      name(1:12)=='v_component(') THEN
+     L = .TRUE.
+   ELSE IF(len>=14) THEN
+     ! Needs its own guard: 14 characters were read behind a check for 12.
+     L = (name(1:14)=='phi_component(')
+   END IF
 !------------------------------------------------------------------------------
 END FUNCTION isComponentName
 !------------------------------------------------------------------------------
@@ -2637,11 +2668,17 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     INTEGER :: slen, ComponentId,i,j,CId, CompInd, nofc, ibracket
+    LOGICAL :: Found
     TYPE(Circuit_t), POINTER :: Circuit
     TYPE(CircuitVariable_t), POINTER :: CVar
-    LOGICAL :: LondonEquations = .FALSE.
+    ! Not initialized in the declaration: that would give it an implicit SAVE and
+    ! carry a value over from the previous component, which combined with the
+    ! aliasing below made the outcome depend on the order the variables are read.
+    LOGICAL :: LondonEquations
     CHARACTER(:), ALLOCATABLE :: cmd
     CHARACTER(LEN=MAX_NAME_LEN) :: name
+
+    LondonEquations = .FALSE.
 
     Circuit => CurrentModel % Circuits(CId)
 
@@ -2689,8 +2726,14 @@ END FUNCTION isComponentName
           CVar % isIvar = .TRUE.
           CVar % Component % ivar => CVar
         CASE('v_component(')
+          ! Was passing LondonEquations as both the assignment target and the
+          ! Found argument, i.e. aliasing an INTENT(OUT) dummy with the variable
+          ! being assigned. It happened to work because the assignment lands
+          ! after the call, but the value it read back was the Found flag rather
+          ! than a default, so use a separate flag.
           LondonEquations = ListGetLogical(CurrentModel % Components (ComponentId) % Values, &
-                                           'London Equations', LondonEquations)
+                                           'London Equations', Found)
+          IF(.NOT. Found) LondonEquations = .FALSE.
           IF (.NOT. LondonEquations) THEN
             CVar % isVvar = .TRUE.
             CVar % Component % vvar => CVar
@@ -3744,18 +3787,38 @@ END FUNCTION isComponentName
     IMPLICIT NONE
     INTEGER :: nn, dim
     TYPE(Element_t), POINTER :: Element
-    LOGICAL :: support, First=.TRUE., Found
+    LOGICAL :: support, First=.TRUE., Found, Gate=.FALSE.
     REAL(KIND=dp) :: wBase(nn)
     TYPE(ValueList_t), POINTER :: CompParams
-    SAVE dim, First
+    TYPE(Variable_t), POINTER, SAVE :: Wpot => NULL()
+    SAVE dim, First, Gate
 
     IF (First) THEN
       First = .FALSE.
       dim = CoordinateSystemDimension()
+
+      ! Resolve the wire direction potential through GetWPotentialVar(), which is
+      ! what the assembly routines use: "W Potential" first and "W" only as a
+      ! fallback. This used to ask for "W" and nothing else, so a case naming its
+      ! potential "W Potential" found no support in any element and had all of its
+      ! massive and foil winding elements dropped - from the matrix structure as
+      ! well as from the assembly, hence without so much as a warning.
+      Wpot => NULL()
+      IF( dim == 3 ) CALL GetWPotentialVar(Wpot, Quiet=.TRUE.)
+
+      ! With no such field at all there is nothing to test against, so do not
+      ! gate on it. The component may be driven by its own current density
+      ! instead ("Coil Use W Vector", "Foil Winding Use J Vector"), and answering
+      ! .FALSE. here would silently discard every one of its elements.
+      Gate = ( dim == 3 .AND. ASSOCIATED(Wpot) )
+      IF( dim == 3 .AND. .NOT. ASSOCIATED(Wpot) ) THEN
+        CALL Info('HasSupport','No potential field to test element support with, '//&
+            'accepting all elements of coil components',Level=7)
+      END IF
     END IF
-    
-    support = .TRUE. 
-    IF (dim == 3) THEN
+
+    support = .TRUE.
+    IF (Gate) THEN
       ! A closed coil has no electrode potential W at all; its
       ! direction field is the CoilSolver cut potential, which is defined on
       ! every element of the coil.
@@ -3764,9 +3827,9 @@ END FUNCTION isComponentName
         IF (ListGetLogical(CompParams,'Coil Closed',Found)) RETURN
       END IF
 
-      support = .FALSE.
-      CALL GetLocalSolution(Wbase,'W')
-      IF ( ANY(Wbase .ne. 0d0) ) support = .TRUE.
+      Wbase = 0.0_dp
+      CALL GetLocalSolution(Wbase,UElement=Element,UVariable=Wpot)
+      support = ANY( Wbase(1:nn) /= 0.0_dp )
     END IF
 !------------------------------------------------------------------------------
    END FUNCTION HasSupport
