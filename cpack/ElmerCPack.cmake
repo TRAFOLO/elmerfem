@@ -127,18 +127,24 @@ IF(CMAKE_SYSTEM_NAME MATCHES "Windows")
       SET(CPACK_COMPONENT_STRIPPED_GFORTRAN_DISPLAY_NAME "gfortran 10.2.0")
     ENDIF()
 
-    IF(WITH_MPI)
-      IF(BUNDLE_MSMPI_REDIST)
-        INSTALL(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../msmpi_redist/msmpisetup.exe" DESTINATION "redist" COMPONENT "MS_MPI_Redistributable")
-        SET(CPACK_COMPONENT_MS_MPI_REDISTRIBUTABLE_DESCRIPTION "Install MS-MPI 10.1.1. Redistributable Package")
-        SET(CPACK_COMPONENT_MS_MPI_REDISTRIBUTABLE_DISPLAY_NAME "MS-MPI")
-        LIST(APPEND CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
-        IfFileExists '$INSTDIR\\\\redist\\\\msmpisetup.exe' MSMpiSetupExists MsMpiSetupNotExist
-        MsMpiSetupExists:
-        ExecWait '$INSTDIR\\\\redist\\\\msmpisetup.exe'
-        MsMpiSetupNotExist:
-        ")
-      ENDIF()
+  ENDIF()
+
+  # Un-nested from CPACK_BUNDLE_EXTRA_WINDOWS_DLLS (2026-08-27): that flag guards
+  # bundle_msys2/bin-style DLL closures which aren't relevant to every build layout
+  # (e.g. TRAFOLO's deploy_msys2.sh sets it OFF because ../bundle_msys2/bin doesn't
+  # exist there), but the MS-MPI redistributable staging is an independent concern
+  # and must run whenever BUNDLE_MSMPI_REDIST is requested, regardless of that flag.
+  IF(WITH_MPI)
+    IF(BUNDLE_MSMPI_REDIST)
+      INSTALL(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../msmpi_redist/msmpisetup.exe" DESTINATION "redist" COMPONENT "MS_MPI_Redistributable")
+      SET(CPACK_COMPONENT_MS_MPI_REDISTRIBUTABLE_DESCRIPTION "Install MS-MPI 10.1.1. Redistributable Package")
+      SET(CPACK_COMPONENT_MS_MPI_REDISTRIBUTABLE_DISPLAY_NAME "MS-MPI")
+      LIST(APPEND CPACK_NSIS_EXTRA_INSTALL_COMMANDS "
+      IfFileExists '$INSTDIR\\\\redist\\\\msmpisetup.exe' MSMpiSetupExists MsMpiSetupNotExist
+      MsMpiSetupExists:
+      ExecWait '$INSTDIR\\\\redist\\\\msmpisetup.exe'
+      MsMpiSetupNotExist:
+      ")
     ENDIF()
   ENDIF()
 
