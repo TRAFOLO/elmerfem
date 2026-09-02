@@ -69,6 +69,29 @@ real(kind=dp):: xxx, yyy
   TYPE (ParEnv_t), POINTER, SAVE :: ParEnv => ParEnv_Common
   TYPE (SParIterSolverGlobalD_t), POINTER :: PIGpntr
   TYPE (SParIterSolverGlobalD_t), POINTER :: GlobalData
+
+CONTAINS
+
+!------------------------------------------------------------------------------
+!> Number of neighbouring partitions of a parallel environment, derived from the
+!> > IsNeighbour < mask rather than read from the cached > NumOfNeighbours <.
+!> The mask is a pointer that may be shared between the environments of several
+!> matrices of a solver, while the counter is a plain scalar copied by value.
+!> Neighbour discovery updates the mask in place but writes the count into
+!> whichever environment > ParEnv < aimed at, so the two halves can end up
+!> describing different matrices. Anything that sizes an array or bounds a
+!> message loop must therefore use this and not the counter.
+!------------------------------------------------------------------------------
+  FUNCTION ParEnvNeighbourCount( PEnv ) RESULT( n )
+!------------------------------------------------------------------------------
+    TYPE(ParEnv_t) :: PEnv
+    INTEGER :: n
+!------------------------------------------------------------------------------
+    n = 0
+    IF( ASSOCIATED( PEnv % IsNeighbour ) ) n = COUNT( PEnv % IsNeighbour )
+!------------------------------------------------------------------------------
+  END FUNCTION ParEnvNeighbourCount
+!------------------------------------------------------------------------------
 END MODULE SParIterGlobals
 
 !> \}
