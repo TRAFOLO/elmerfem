@@ -914,7 +914,7 @@ CONTAINS
             END IF
          CASE ('massive')
             CoilBody = .TRUE.
-         CASE ('foil winding')
+         CASE ('foil winding','flat wire')
             CoilBody = .TRUE.
             CALL GetElementRotM(Element, RotM, n)
          CASE DEFAULT
@@ -1332,7 +1332,7 @@ BLOCK
       IF (.NOT. ASSOCIATED(CompParams)) CYCLE
 
       CoilType = GetString(CompParams, 'Coil Type', Found)
-      IF(CoilType/='massive' .AND. CoilType/='foil winding') CYCLE
+      IF(CoilType/='massive' .AND. CoilType/='foil winding' .AND. CoilType/='flat wire') CYCLE
 
       ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found )
       IF( .NOT. ConstraintActive ) CYCLE
