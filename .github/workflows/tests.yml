@@ -66,6 +66,7 @@ jobs:
             -DWITH_Mumps=OFF \
             -DWITH_ElmerIce=OFF \
             -DWITH_ELMERGUI=OFF \
+            -DCPACK_BUNDLE_EXTRA_WINDOWS_DLLS=OFF \
             ..
 
       - name: Build
