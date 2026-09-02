@@ -1611,7 +1611,7 @@ END SUBROUTINE ZeroSplittedMatrix
        ALLOCATE(isNeighbour(ParEnv % PEs))
        nneigh = MeshNeighbours(Mesh,isNeighbour)
      ELSE
-       nneigh = ParEnv % NumOfNeighbours
+       nneigh = ParEnvNeighbourCount( ParEnv )
        isNeighbour => ParEnv % IsNeighbour
      ENDIF
  
@@ -2602,7 +2602,7 @@ END SUBROUTINE SolveHutiter
   !
   !----------------------------------------------------------------------
 
-  nneigh = ParEnv % NumOfNeighbours
+  nneigh = ParEnvNeighbourCount( ParEnv )
   ALLOCATE( neigh(nneigh) )
 
   j = 0
@@ -2735,7 +2735,7 @@ REAL(kind=dp) :: s, RealTime
   !
   !----------------------------------------------------------------------
 
-  nneigh = ParEnv % NumOfNeighbours
+  nneigh = ParEnvNeighbourCount( ParEnv )
   ALLOCATE( neigh(nneigh) )
 
   j = 0
