@@ -1764,6 +1764,17 @@ END FUNCTION isComponentName
 !> divided into nStack cells and the other in-plane direction into nAcross
 !> cells. Every cell carries the full component current and has its own
 !> voltage dof, so the component voltage is V = sum_k V_k.
+!>
+!> Component keywords:
+!>   Number of Turns        total turns, must be an integer (= number of cells)
+!>   Stacking Direction     beta (default) or alpha: direction field along the stack
+!>   Turns Across           cells across the stack (default 1), divides Number of Turns
+!>   Electrode Boundaries   as for foil, used for the electrode area / DC resistance
+!>   Fill Factor            conductor volume fraction along the wire (default 1), or
+!>   Conductor Thickness    [+ Conductor Width] to compute it from the block lengths
+!>
+!> Circuit dofs: vvar = V, then V_1..V_n (AddIndex(k) offsets; harmonic uses 2k).
+!> Cell k of a Gauss point: FlatWireCellIndex(nStack, nAcross, sStack, sAcross).
 !------------------------------------------------------------------------------
   SUBROUTINE InitFlatWireComponent(Comp, CompParams, CompInd, ExtMaster)
 !------------------------------------------------------------------------------
