@@ -265,7 +265,7 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
           IF (.NOT. NoRotM) CALL GetElementRotM(Element, RotM, n)
         CASE ('massive')
           CoilBody = .True.
-        CASE ('foil winding')
+        CASE ('foil winding','flat wire')
           CoilBody = .True.
           CALL GetElementRotM(Element, RotM, n)
         CASE DEFAULT
@@ -341,7 +341,7 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
           IF (.NOT. NoRotM) CALL GetElementRotM(Element, RotM, n)
         CASE ('massive')
           CoilBody = .True.
-        CASE ('foil winding')
+        CASE ('foil winding','flat wire')
           CoilBody = .True.
           CALL GetElementRotM(Element, RotM, n)
         CASE DEFAULT

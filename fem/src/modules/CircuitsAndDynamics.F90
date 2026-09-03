@@ -693,6 +693,16 @@ CONTAINS
               ! ----------------------------------------------------------
               CALL AddToMatrixElement(CM, j + VvarId, IvarId, val)
             END DO
+          CASE('flat wire')
+            ! Flat wire voltage: V - sum_k V_k = 0
+            ! ------------------------------------
+            CALL AddToMatrixElement(CM, VvarId, VvarId, 1._dp)
+            DO j = 1, Cvar % pdofs
+              CALL AddToMatrixElement(CM, VvarId, j + VvarId, -1._dp)
+              ! Cell k: (sigma V_k grad W, grad W) + (sigma dA/dt, grad W) - I = 0
+              ! -----------------------------------------------------------------
+              CALL AddToMatrixElement(CM, j + VvarId, IvarId, -1._dp)
+            END DO
           END SELECT
         END IF
       END IF
@@ -729,6 +739,9 @@ CONTAINS
           CASE ('foil winding')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
             CALL Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt)
+          CASE ('flat wire')
+            IF (.NOT. HasSupport(Element,nn)) CYCLE
+            CALL Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt)
           CASE DEFAULT
             CALL Fatal ('AddComponentEquationsAndCouplings', 'Non-existent Coil Type Chosen!')
           END SELECT
@@ -1190,6 +1203,120 @@ CONTAINS
 
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_massive
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Flat wire winding: a massive conductor restricted to each turn cell. Cell k
+!> owns the voltage dof vvar+k and carries the full component current, so the
+!> series voltage is V = sum_k V_k.
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    REAL(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val, dt
+    TYPE(Component_t) :: Comp
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, localR
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
+    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId
+    LOGICAL :: stat, PiolaVersion, Found
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
+                     RotMLoc(3,3), RotM(3,3,nn)
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_flat_wire','Flat wire is implemented only in 3D!')
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_flat_wire','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
+
+    CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
+    IF(Solver % Order<2.OR.GetTimeStep()<=2) THEN
+      tscl=1.0_dp
+    ELSE
+      tscl=1.5_dp
+      CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
+      pPot = 2*pPOT - 0.5_dp*ppPOT
+    END IF
+
+    CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    CALL GetElementRotM(Element, RotM, nn)
+    ncdofs = nd - nn
+
+    vvarId = Comp % vvar % ValueId
+
+    IF (PiolaVersion) THEN
+      IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
+    ELSE
+      IP = GaussPoints(Element)
+    END IF
+
+    DO t=1,IP % n
+      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+
+      DO i=1,3
+        DO j=1,3
+          C(i,j) = SUM( Tcoef(i,j,1:nn) * Basis(1:nn) )
+          RotMLoc(i,j) = SUM( RotM(i,j,1:nn) * Basis(1:nn) )
+        END DO
+      END DO
+
+      ! I * R, where R = (1/sigma * js,js):
+      ! -----------------------------------
+      localR = Comp % N_j **2 * IP % s(t)*detJ/C(3,3)/Comp % VoltageFactor
+      Comp % Resistance = Comp % Resistance + localR
+
+      C = MATMUL(MATMUL(RotMLoc, C),TRANSPOSE(RotMLoc))
+
+      k = FlatWireCellIndex(Comp % nStack, Comp % nAcross, &
+          SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)))
+      dofId = vvarId + k
+
+      ! Conductance of the cell: V_k (sigma grad W, grad W)
+      ! --------------------------------------------------
+      val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*gradv) * Comp % VoltageFactor
+      CALL AddToMatrixElement(CM, dofId+nm, dofId+nm, val)
+
+      DO j=1,ncdofs
+        q = j + nn
+        IF ( TransientSimulation ) THEN
+          ! (sigma d/dt a, grad W)
+          ! ----------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,Wbasis(j,:))*gradv)/dt
+          CALL AddToMatrixElement(CM, dofId+nm, PS(Indexes(q)), tscl * val)
+          CM % RHS(dofId+nm) = CM % RHS(dofId+nm) + pPOT(q) * val
+        END IF
+        ! Source of the a equation: V_k (sigma grad W, a')
+        ! ------------------------------------------------
+        val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*Wbasis(j,:)) * Comp % VoltageFactor
+        CALL AddToMatrixElement(CM, PS(Indexes(q)), dofId+nm, val)
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_flat_wire
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -1864,6 +1991,19 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
             CALL AddToCmplxMatrixElement(CM, 2*j + VvarId, IvarId, &
                REAL(cmplx_val), AIMAG(cmplx_val))
           END DO
+        CASE('flat wire')
+          ! Flat wire voltage: V - sum_k V_k = 0
+          ! ------------------------------------
+          i_multiplier = Comp % i_multiplier_re + im * Comp % i_multiplier_im
+          IF (i_multiplier == 0_dp) i_multiplier = 1.0_dp
+          CALL AddToCmplxMatrixElement(CM, VvarId, VvarId, 1._dp, 0._dp)
+          DO j = 1, Cvar % pdofs
+            CALL AddToCmplxMatrixElement(CM, VvarId, 2*j + VvarId, -1._dp, 0._dp)
+            ! Cell k: (sigma V_k grad W, grad W) + (i omega sigma a, grad W) - I = 0
+            ! ---------------------------------------------------------------------
+            CALL AddToCmplxMatrixElement(CM, 2*j + VvarId, IvarId, &
+               -REAL(i_multiplier), -AIMAG(i_multiplier))
+          END DO
         END SELECT
       END IF
 
@@ -1968,6 +2108,11 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         IF (HasSupport(Element,nn_elem)) THEN
           Tcoef = GetCMPLXElectricConductivityTensor(Element, nn_elem, .TRUE., CoilType) 
           CALL Add_foil_winding(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
+        END IF
+      CASE ('flat wire')
+        IF (HasSupport(Element,nn_elem)) THEN
+          Tcoef = GetCMPLXElectricConductivityTensor(Element, nn_elem, .TRUE., CoilType)
+          CALL Add_flat_wire(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
         END IF
       CASE DEFAULT
         CALL Fatal ('AddComponentEquationsAndCouplings', 'Non existent Coil Type Chosen!')
@@ -2418,6 +2563,121 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_massive
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Flat wire winding, harmonic version: see the transient Add_flat_wire.
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_flat_wire(Element,Tcoef,Comp,nn,nd,CompParams)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    COMPLEX(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val
+    TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, Omega, localR
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
+    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId
+    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname
+    TYPE(VariableHandle_t), SAVE :: Wvec_h
+    REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
+                     RotMLoc(3,3), RotM(3,3,nn)
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE., CoilUseWvec0 = .FALSE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_flat_wire','Flat wire is implemented only in 3D!')
+      CoilUseWvec0 = GetLogical(CurrentModel % Solver % Values, 'Coil Use W Vector', Found)
+      CoilWVecVarName = GetString(CurrentModel % Solver % Values,'W Vector Variable Name', Found)
+      IF (.NOT. Found) CoilWVecVarname = 'W Vector E'
+      CALL ListInitElementVariable(Wvec_h, CoilWVecVarname)
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_flat_wire','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+    Omega = GetAngularFrequency()
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
+
+    CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
+    IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
+    IF (.NOT. CoilUseWvec) CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    CALL GetElementRotM(Element, RotM, nn)
+    ncdofs = nd - nn
+
+    vvarId = Comp % vvar % ValueId
+
+    IF (PiolaVersion) THEN
+      IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
+    ELSE
+      IP = GaussPoints(Element)
+    END IF
+
+    DO t=1,IP % n
+      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      IF (CoilUseWvec) THEN
+        gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = 3 )
+      ELSE
+        gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+      END IF
+
+      DO i=1,3
+        DO j=1,3
+          C(i,j) = SUM( Tcoef(i,j,1:nn) * Basis(1:nn) )
+          RotMLoc(i,j) = SUM( RotM(i,j,1:nn) * Basis(1:nn) )
+        END DO
+      END DO
+
+      ! I * R, where R = (1/sigma * js,js):
+      ! -----------------------------------
+      localR = Comp % N_j **2 * IP % s(t)*detJ/C(3,3) / Comp % VoltageFactor
+      Comp % Resistance = Comp % Resistance + localR
+
+      C = MATMUL(MATMUL(RotMLoc, C),TRANSPOSE(RotMLoc))
+
+      k = FlatWireCellIndex(Comp % nStack, Comp % nAcross, &
+          SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)))
+      dofId = vvarId + 2*k
+
+      ! Conductance of the cell: V_k (sigma grad W, grad W)
+      ! --------------------------------------------------
+      val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*gradv) * Comp % VoltageFactor
+      CALL AddToCmplxMatrixElement(CM, dofId+nm, dofId+nm, REAL(val), AIMAG(val))
+
+      DO j=1,ncdofs
+        q = j + nn
+        ! (i omega sigma a, grad W)
+        ! -------------------------
+        val = im * Omega * IP % s(t)*detJ*SUM(MATMUL(C,Wbasis(j,:))*gradv)
+        CALL AddToCmplxMatrixElement(CM, dofId+nm, ReIndex(PS(Indexes(q))), REAL(val), AIMAG(val))
+        ! Source of the a equation: V_k (sigma grad W, a')
+        ! ------------------------------------------------
+        val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*Wbasis(j,:)) * Comp % VoltageFactor
+        CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(q))), dofId+nm, REAL(val), AIMAG(val))
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_flat_wire
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------

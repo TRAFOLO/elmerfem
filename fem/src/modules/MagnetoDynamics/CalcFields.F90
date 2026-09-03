@@ -608,7 +608,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp), ALLOCATABLE :: WBasis(:,:), RotWBasis(:,:), Basis(:), lBasis(:), &
                 dBasisdx(:,:)
    REAL(KIND=dp), ALLOCATABLE :: SOL(:,:), PSOL(:), ElPotSol(:,:), C(:)
-   REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), NF_ip(:,:)
+   REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), beta(:), NF_ip(:,:)
+   INTEGER :: FwStack, FwAcross
+   LOGICAL :: FwStackAlongAlpha
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: R_Z(:), PR(:)
@@ -965,11 +967,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 !------------------------------------------------------------------------------
    ALLOCATE( WBasis(n,3), RotWBasis(n,3), Basis(n), dBasisdx(n,3), lBasis(n) )
    ALLOCATE( SOL(2,n), PSOL(n), ElPotSol(1,n), C(n) )
-   ALLOCATE( Wbase(n), alpha(n), NF_ip(n,3) )
+   ALLOCATE( Wbase(n), alpha(n), beta(n), NF_ip(n,3) )
    ALLOCATE( PR(n), omega_velo(3,n), lorentz_velo(3,n) )
    ALLOCATE( Magnetization(3,n), BodyForceCurrDens(3,n), R_Z(n) )
 !------------------------------------------------------------------------------
-   Wbase = 0; alpha=0; NF_ip=0
+   Wbase = 0; alpha=0; beta=0; NF_ip=0
    SOL = 0._dp; PSOL=0._dp
 
    IF ( ASSOCIATED(ESP) ) THEN
@@ -1315,6 +1317,21 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
          IF (.NOT. Found) CALL Fatal (Caller, 'Circuit Voltage Variable Id not found!')
 
+       CASE ('flat wire')
+         IF (dim /= 3) CALL Fatal(Caller,'Flat wire is implemented only in 3D!')
+         CALL GetElementRotM(Element, RotM, n)
+         VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Circuit Voltage Variable Id not found!')
+         FwStack = GetInteger(CompParams, 'Flat Wire Stack Cells', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Flat Wire Stack Cells not found!')
+         FwAcross = GetInteger(CompParams, 'Flat Wire Across Cells', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Flat Wire Across Cells not found!')
+         FwStackAlongAlpha = GetLogical(CompParams, 'Flat Wire Stack Along Alpha', Found)
+         CALL GetFlatWireLocalFields(FwStackAlongAlpha, Element, n, alpha, beta)
+         DO k = 1,n
+           Tcoef(1:3,1:3,k) = MATMUL(MATMUL(RotM(1:3,1:3,k), Tcoef(1:3,1:3,k)), TRANSPOSE(RotM(1:3,1:3,k)))
+         END DO
+
        CASE ('foil winding')
          CALL GetLocalSolution(alpha,'Alpha')
          
@@ -1543,6 +1560,18 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              E(2,:) = E(2,:)-localV(2) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
            END SELECT
            
+         CASE ('flat wire')
+           k = FlatWireCellIndex(FwStack, FwAcross, SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)))
+           localV(1) = LagrangeVar % Values(VvarId+2*k) * CircEqVoltageFactor
+           localV(2) = LagrangeVar % Values(VvarId+2*k+1) * CircEqVoltageFactor
+           IF (CoilUseWvec) THEN
+             wvec = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
+           ELSE
+             wvec = MATMUL(Wbase(1:np), dBasisdx(1:np,:))
+           END IF
+           E(1,:) = E(1,:)-localV(1) * wvec
+           E(2,:) = E(2,:)-localV(2) * wvec
+
          CASE ('foil winding')
            localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 
            DO k = 1, VvarDofs-1
@@ -1651,6 +1680,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            CASE(3)
              E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
            END SELECT
+
+         CASE ('flat wire')
+           k = FlatWireCellIndex(FwStack, FwAcross, SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)))
+           localV(1) = LagrangeVar % Values(VvarId+k) * CircEqVoltageFactor
+           E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
 
          CASE ('foil winding')
            localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 

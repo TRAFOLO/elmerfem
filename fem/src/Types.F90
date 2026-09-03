@@ -999,6 +999,10 @@ MODULE Types
          N_j, coilthickness, i_multiplier_re, i_multiplier_im, nofturns, &
          VoltageFactor=1._dp, SymmetryCoeff=1._dp
     INTEGER :: polord, nofcnts, BodyId, ComponentId
+    ! flat wire: turn cells along the stacking direction and across it
+    INTEGER :: nStack = 1, nAcross = 1
+    LOGICAL :: StackAlongAlpha = .FALSE.
+    REAL(KIND=dp) :: FillFactor = 1._dp
     INTEGER, POINTER :: ElBoundaries(:) => NULL()
     INTEGER, POINTER :: BodyIds(:) => NULL()
     CHARACTER(:), ALLOCATABLE :: CoilType, ComponentType

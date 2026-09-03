@@ -399,7 +399,7 @@ CONTAINS
       SELECT CASE (CoilType)
       CASE ('stranded')
         VarName = 'Circuit Current Variable Id'
-      CASE ('massive','foil winding')
+      CASE ('massive','foil winding','flat wire')
         VarName = 'Circuit Voltage Variable Id'
       CASE DEFAULT
         CYCLE
@@ -556,6 +556,50 @@ CONTAINS
 
 
   
+!------------------------------------------------------------------------------
+!> Nodal values of the stacking coordinate and the across coordinate of a
+!> flat wire element, taken from the Alpha and Beta direction fields.
+!------------------------------------------------------------------------------
+  SUBROUTINE GetFlatWireLocalFields(StackAlongAlpha, Element, n, sStack, sAcross)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    LOGICAL :: StackAlongAlpha
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: n
+    REAL(KIND=dp) :: sStack(:), sAcross(:)
+    REAL(KIND=dp) :: alpha(n), beta(n)
+
+    CALL GetLocalSolution(alpha, 'Alpha', UElement=Element)
+    CALL GetLocalSolution(beta, 'Beta', UElement=Element)
+    IF (StackAlongAlpha) THEN
+      sStack(1:n) = alpha
+      sAcross(1:n) = beta
+    ELSE
+      sStack(1:n) = beta
+      sAcross(1:n) = alpha
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE GetFlatWireLocalFields
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> 1-based turn cell index of a point with normalized coordinates sStack and
+!> sAcross in [0,1]. Cells are numbered across first, then along the stack.
+!------------------------------------------------------------------------------
+  FUNCTION FlatWireCellIndex(nStack, nAcross, sStack, sAcross) RESULT(k)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nStack, nAcross, k
+    REAL(KIND=dp) :: sStack, sAcross
+    INTEGER :: ks, ka
+
+    ks = MIN(nStack,  MAX(1, FLOOR(sStack  * nStack)  + 1))
+    ka = MIN(nAcross, MAX(1, FLOOR(sAcross * nAcross) + 1))
+    k = (ks-1) * nAcross + ka
+!------------------------------------------------------------------------------
+  END FUNCTION FlatWireCellIndex
+!------------------------------------------------------------------------------
+
 END MODULE CircuitUtils
 
 
@@ -1071,6 +1115,9 @@ END FUNCTION isComponentName
           END IF
           
           Comp % N_j = Comp % nofturns / Comp % ElArea
+
+        CASE ('flat wire')
+          CALL InitFlatWireComponent(Comp, CompParams, CompInd, ExtMaster)
         END SELECT
       END IF
 
@@ -1711,6 +1758,168 @@ END FUNCTION isComponentName
   END SUBROUTINE Circuits_ToMeshVariable
 
    
+!------------------------------------------------------------------------------
+!> Flat wire winding: the coil block is split into turn cells by the normalized
+!> direction fields Alpha and Beta. The stacking direction (default Beta) is
+!> divided into nStack cells and the other in-plane direction into nAcross
+!> cells. Every cell carries the full component current and has its own
+!> voltage dof, so the component voltage is V = sum_k V_k.
+!>
+!> Component keywords:
+!>   Number of Turns        total turns, must be an integer (= number of cells)
+!>   Stacking Direction     beta (default) or alpha: direction field along the stack
+!>   Turns Across           cells across the stack (default 1), divides Number of Turns
+!>   Electrode Boundaries   as for foil, used for the electrode area / DC resistance
+!>   Fill Factor            conductor volume fraction along the wire (default 1), or
+!>   Conductor Thickness    [+ Conductor Width] to compute it from the block lengths
+!>
+!> Circuit dofs: vvar = V, then V_1..V_n (AddIndex(k) offsets; harmonic uses 2k).
+!> Cell k of a Gauss point: FlatWireCellIndex(nStack, nAcross, sStack, sAcross).
+!------------------------------------------------------------------------------
+  SUBROUTINE InitFlatWireComponent(Comp, CompParams, CompInd, ExtMaster)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: CompInd, ExtMaster
+    INTEGER :: nturns
+    LOGICAL :: Found
+    CHARACTER(LEN=MAX_NAME_LEN) :: str
+
+    IF (CoordinateSystemDimension() /= 3) &
+        CALL Fatal('Circuits_Init','Flat wire coil type is implemented only in 3D!')
+
+    Comp % nofturns = GetConstReal(CompParams, 'Number of Turns', Found)
+    IF (.NOT. Found) CALL Fatal('Circuits_Init','Flat wire: Number of Turns not found!')
+    nturns = NINT(Comp % nofturns)
+    IF (nturns < 1 .OR. ABS(Comp % nofturns - nturns) > 1.0d-8) &
+        CALL Fatal('Circuits_Init','Flat wire: Number of Turns must be a positive integer!')
+
+    Comp % nAcross = GetInteger(CompParams, 'Turns Across', Found)
+    IF (.NOT. Found) Comp % nAcross = 1
+    IF (Comp % nAcross < 1 .OR. MOD(nturns, Comp % nAcross) /= 0) &
+        CALL Fatal('Circuits_Init','Flat wire: Number of Turns must be divisible by Turns Across!')
+    Comp % nStack = nturns / Comp % nAcross
+
+    str = GetString(CompParams, 'Stacking Direction', Found)
+    IF (.NOT. Found) str = 'beta'
+    SELECT CASE (str)
+    CASE ('alpha')
+      Comp % StackAlongAlpha = .TRUE.
+    CASE ('beta')
+      Comp % StackAlongAlpha = .FALSE.
+    CASE DEFAULT
+      CALL Fatal('Circuits_Init','Flat wire: Stacking Direction must be alpha or beta!')
+    END SELECT
+
+    IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Alpha'))) &
+        CALL Fatal('Circuits_Init','Flat wire needs the direction field "Alpha"!')
+    IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Beta'))) &
+        CALL Fatal('Circuits_Init','Flat wire needs the direction field "Beta"!')
+
+    ! Current has one dof, voltage has the total and one dof per turn cell:
+    ! dofs: V, V_1, V_2, ..., V_nturns
+    Comp % ivar % dofs = 1
+    Comp % ivar % pdofs = 0
+    Comp % vvar % dofs = nturns + 1
+    Comp % vvar % pdofs = nturns
+
+    Comp % coilthickness = 1._dp
+
+    Comp % ElArea = GetConstReal(CompParams, 'Electrode Area', Found)
+    IF (.NOT. Found) THEN
+      CALL ComputeElectrodeArea(Comp, CompParams, ExtMaster)
+      WRITE(Message,'(A,ES12.5)') 'Component '//I2S(CompInd)//' "Electrode Area" is ',Comp % ElArea
+      CALL Info('Circuits_Init',Message,Level=10)
+    END IF
+    Comp % N_j = Comp % nofturns / Comp % ElArea
+
+    Comp % FillFactor = GetConstReal(CompParams, 'Fill Factor', Found)
+    IF (.NOT. Found) THEN
+      IF (ListCheckPresent(CompParams, 'Conductor Thickness')) THEN
+        CALL ComputeFlatWireFillFactor(Comp, CompParams)
+      ELSE
+        Comp % FillFactor = 1._dp
+      END IF
+    END IF
+    WRITE(Message,'(A,ES12.5)') 'Component '//I2S(CompInd)//' flat wire fill factor is ',Comp % FillFactor
+    CALL Info('Circuits_Init',Message,Level=6)
+
+    CALL ListAddConstReal(CompParams, 'Flat Wire Fill Factor', Comp % FillFactor)
+    CALL ListAddInteger(CompParams, 'Flat Wire Stack Cells', Comp % nStack)
+    CALL ListAddInteger(CompParams, 'Flat Wire Across Cells', Comp % nAcross)
+    CALL ListAddLogical(CompParams, 'Flat Wire Stack Along Alpha', Comp % StackAlongAlpha)
+!------------------------------------------------------------------------------
+  END SUBROUTINE InitFlatWireComponent
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Geometric fill factor f = nStack*t_c/L_stack [* nAcross*w_c/L_across]. The
+!> block lengths follow from the normalized direction fields, L = V/int|grad s|.
+!------------------------------------------------------------------------------
+  SUBROUTINE ComputeFlatWireFillFactor(Comp, CompParams)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sStack(:), sAcross(:)
+    REAL(KIND=dp) :: Vol, GradStack, GradAcross, detJ, Lstack, Lacross, tc, wc, f
+    INTEGER :: t, n, i, nmax
+    LOGICAL :: stat, Found, Parallel
+
+    nmax = CurrentModel % Mesh % MaxElementNodes
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sStack(nmax), sAcross(nmax))
+
+    Vol = 0._dp
+    GradStack = 0._dp
+    GradAcross = 0._dp
+    DO t=1,GetNOFActive()
+      Element => GetActiveElement(t)
+      IF (.NOT. ElAssocToComp(Element, Comp)) CYCLE
+      n = GetElementNOFNodes(Element)
+      CALL GetElementNodes(Nodes, Element)
+      CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, n, sStack, sAcross)
+      IP = GaussPoints(Element)
+      DO i=1,IP % n
+        stat = ElementInfo(Element, Nodes, IP % U(i), IP % V(i), IP % W(i), detJ, Basis, dBasisdx)
+        Vol = Vol + IP % s(i)*detJ
+        GradStack = GradStack + IP % s(i)*detJ*SQRT(SUM(MATMUL(sStack(1:n), dBasisdx(1:n,:))**2))
+        GradAcross = GradAcross + IP % s(i)*detJ*SQRT(SUM(MATMUL(sAcross(1:n), dBasisdx(1:n,:))**2))
+      END DO
+    END DO
+
+    Parallel = (ParEnv % PEs > 1) .AND. .NOT. CurrentModel % Mesh % SingleMesh
+    IF (Parallel) THEN
+      Vol = ParallelReduction(Vol)
+      GradStack = ParallelReduction(GradStack)
+      GradAcross = ParallelReduction(GradAcross)
+    END IF
+    IF (GradStack <= 0._dp .OR. GradAcross <= 0._dp) &
+        CALL Fatal('ComputeFlatWireFillFactor','Direction fields are constant over the component!')
+
+    Lstack = Vol / GradStack
+    Lacross = Vol / GradAcross
+
+    tc = GetConstReal(CompParams, 'Conductor Thickness', Found)
+    f = Comp % nStack * tc / Lstack
+    wc = GetConstReal(CompParams, 'Conductor Width', Found)
+    IF (Found) f = f * Comp % nAcross * wc / Lacross
+
+    WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Flat wire block length along stack ',Lstack,' across ',Lacross
+    CALL Info('ComputeFlatWireFillFactor',Message,Level=6)
+    IF (f <= 0._dp .OR. f > 1._dp) THEN
+      WRITE(Message,'(A,ES12.5)') 'Flat wire fill factor out of (0,1]: ',f
+      CALL Fatal('ComputeFlatWireFillFactor',Message)
+    END IF
+    Comp % FillFactor = f
+!------------------------------------------------------------------------------
+  END SUBROUTINE ComputeFlatWireFillFactor
+!------------------------------------------------------------------------------
+
 END MODULE CircuitsMod
 
 MODULE CircMatInitMod
@@ -2057,6 +2266,13 @@ CONTAINS
             DO j=1, Cvar % pdofs
               CALL CountMatElement(Rows, Cnts, RowId + AddIndex(j), Cvar % dofs)
             END DO
+          CASE('flat wire')
+            ! V - sum_k V_k = 0
+            CALL CountMatElement(Rows, Cnts, RowId, Cvar % dofs)
+            ! cell rows: (V_k, V_k) and (V_k, I)
+            DO j=1, Cvar % pdofs
+              CALL CountMatElement(Rows, Cnts, RowId + AddIndex(j), 2)
+            END DO
           END SELECT
         END IF
 
@@ -2134,6 +2350,13 @@ CONTAINS
                 END DO
               END IF
             END DO
+          CASE('flat wire')
+            CALL CreateMatElement(Rows, Cols, Cnts, VvarId, VvarId)
+            DO j=1, Cvar % pdofs
+              CALL CreateMatElement(Rows, Cols, Cnts, VvarId, VvarId + AddIndex(j))
+              CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), IvarId)
+              CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), VvarId + AddIndex(j))
+            END DO
           END SELECT
         END IF
 
@@ -2185,6 +2408,10 @@ CONTAINS
         IF (HasSupport(Element,nn)) THEN
           CALL CountAndCreateFoilWinding(Element,nn,nd,Comp,Cnts,Done,Rows)
         END IF
+     CASE('flat wire')
+        IF (HasSupport(Element,nn)) THEN
+          CALL CountAndCreateFlatWire(Element,nn,nd,Comp,Cnts,Done,Rows)
+        END IF
       END SELECT
     END IF
 !------------------------------------------------------------------------------
@@ -2217,6 +2444,10 @@ CONTAINS
      CASE('foil winding')
         IF (HasSupport(Element,nn)) THEN
           CALL CountAndCreateFoilWinding(Element,nn,nd,Comp,Cnts,Done,Rows,Cols=Cols)
+        END IF
+     CASE('flat wire')
+        IF (HasSupport(Element,nn)) THEN
+          CALL CountAndCreateFlatWire(Element,nn,nd,Comp,Cnts,Done,Rows,Cols=Cols)
         END IF
       END SELECT
     END IF
@@ -2437,6 +2668,75 @@ CONTAINS
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE CountAndCreateFoilWinding
+!------------------------------------------------------------------------------
+
+
+
+
+
+!------------------------------------------------------------------------------
+!> Matrix structure of the flat wire couplings: every cell voltage row that the
+!> element can touch couples with the edge dofs of the element and vice versa.
+!------------------------------------------------------------------------------
+  SUBROUTINE CountAndCreateFlatWire(Element,nn,nd,Comp,Cnts,Done,Rows,Cols,Harmonic)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Component_t), POINTER :: Comp
+    INTEGER :: nn, nd
+    OPTIONAL :: Cols
+    INTEGER :: Rows(:), Cols(:), Cnts(:)
+    INTEGER :: Indexes(nd)
+    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs
+    INTEGER, POINTER :: PS(:)
+    LOGICAL*1 :: Done(:)
+    LOGICAL, OPTIONAL :: Harmonic
+    LOGICAL :: harm
+    REAL(KIND=dp) :: sStack(nn), sAcross(nn)
+
+    IF (.NOT. PRESENT(Harmonic)) THEN
+      harm = CurrentModel % HarmonicCircuits
+    ELSE
+      harm = Harmonic
+    END IF
+
+    IF (.NOT. ASSOCIATED(CurrentModel % ASolver) ) CALL Fatal ('CountAndCreateFlatWire','ASolver not found!')
+    IF (CoordinateSystemDimension() /= 3) CALL Fatal('CountAndCreateFlatWire','Flat wire is implemented only in 3D!')
+    PS => CurrentModel % Asolver % Variable % Perm
+    nd = GetElementDOFs(Indexes,Element,CurrentModel % ASolver)
+    nm = CurrentModel % ASolver % Matrix % NumberOfRows
+    ncdofs = nd - nn
+    vvarId = Comp % vvar % ValueId
+
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
+
+    ! Cells the element can touch: the nodal range plus one cell of margin
+    ! for higher order elements and cell edges cutting through elements.
+    ks1 = MAX(1, FLOOR(MINVAL(sStack) * Comp % nStack))
+    ks2 = MIN(Comp % nStack, FLOOR(MAXVAL(sStack) * Comp % nStack) + 2)
+    ka1 = MAX(1, FLOOR(MINVAL(sAcross) * Comp % nAcross))
+    ka2 = MIN(Comp % nAcross, FLOOR(MAXVAL(sAcross) * Comp % nAcross) + 2)
+
+    DO ks = ks1, ks2
+      DO ka = ka1, ka2
+        k = (ks-1) * Comp % nAcross + ka
+        dofId = AddIndex(k, harm) + vvarId
+        DO j=1,ncdofs
+          q = PS(Indexes(j+nn))
+          IF (harm) q = ReIndex(q)
+          IF (PRESENT(Cols)) THEN
+            CALL CreateMatElement(Rows, Cols, Cnts, dofId+nm, q, harm)
+            CALL CreateMatElement(Rows, Cols, Cnts, q, dofId+nm, harm)
+          ELSE
+            CALL CountMatElement(Rows, Cnts, dofId+nm, 1, harm)
+            CALL CountMatElement(Rows, Cnts, q, 1, harm)
+          END IF
+        END DO
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE CountAndCreateFlatWire
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------

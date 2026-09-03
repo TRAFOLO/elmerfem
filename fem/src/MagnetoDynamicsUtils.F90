@@ -91,12 +91,52 @@
         !Tcoef(2,2,1:n) = 0._dp
       CASE ('foil winding')
         Tcoef(1,1,1:n) = 0._dp
+      CASE ('flat wire')
+        CALL FlatWireConductivity(Element, n, Tcoef)
       END SELECT
     END IF
  
 !------------------------------------------------------------------------------
   END FUNCTION GetElectricConductivityTensor
 !------------------------------------------------------------------------------ 
+
+!------------------------------------------------------------------------------
+!> Flat wire: no conduction across the turn stack, geometric fill factor along
+!> the wire. Reads the component keywords directly so that the W potential
+!> solver (run before the circuits are initialized) gets the same tensor.
+!------------------------------------------------------------------------------
+  SUBROUTINE FlatWireConductivity(Element, n, Tcoef)
+!------------------------------------------------------------------------------
+    USE CircuitUtils, ONLY: GetComponentParams
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: n
+    REAL(KIND=dp) :: Tcoef(3,3,n)
+    TYPE(ValueList_t), POINTER :: CompParams
+    CHARACTER(LEN=MAX_NAME_LEN) :: str
+    REAL(KIND=dp) :: f
+    LOGICAL :: Found
+
+    str = 'beta'
+    f = 1._dp
+    CompParams => GetComponentParams(Element)
+    IF (ASSOCIATED(CompParams)) THEN
+      str = GetString(CompParams, 'Stacking Direction', Found)
+      IF (.NOT. Found) str = 'beta'
+      f = GetConstReal(CompParams, 'Flat Wire Fill Factor', Found)
+      IF (.NOT. Found) f = GetConstReal(CompParams, 'Fill Factor', Found)
+      IF (.NOT. Found) f = 1._dp
+    END IF
+
+    IF (str == 'alpha') THEN
+      Tcoef(1,1,1:n) = 0._dp
+    ELSE
+      Tcoef(2,2,1:n) = 0._dp
+    END IF
+    Tcoef(3,3,1:n) = f * Tcoef(3,3,1:n)
+!------------------------------------------------------------------------------
+  END SUBROUTINE FlatWireConductivity
+!------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------ 
   FUNCTION GetCMPLXElectricConductivityTensor(Element, n, CoilBody, CoilType) &
