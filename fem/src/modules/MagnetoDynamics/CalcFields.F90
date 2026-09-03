@@ -682,6 +682,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
    REAL(KIND=dp) :: ItoJCoeff=0, CircuitCurrent=0, CircEqVoltageFactor=0
    TYPE(ValueList_t), POINTER :: CompParams
+   LOGICAL :: ConstraintActive   ! DEV-1491: component solves the nodal potential too
    REAL(KIND=dp) :: DetF, F(3,3), G(3,3), GT(3,3)
    REAL(KIND=dp), ALLOCATABLE :: EBasis(:,:), CurlEBasis(:,:) 
 
@@ -1203,11 +1204,20 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      CoilType = ''
      RotM = 0._dp
      CircEqVoltageFactor = 1._dp
+     ConstraintActive = .FALSE.
      IF (ASSOCIATED(CompParams)) THEN
        CoilType = GetString(CompParams, 'Coil Type', Found)
        IF (Found) CoilBody = .TRUE.
        CircEqVoltageFactor = GetConstReal(CompParams, 'Circuit Equation Voltage Factor', Found)
        IF (.NOT. Found) CircEqVoltageFactor = 1._dp
+       ! DEV-1491: when the component runs with the nodal scalar potential
+       ! ('Activate Constraint', auto-enabled at 0 Hz by the circuits solver),
+       ! -grad v is a genuine part of E in the coil and must be included here.
+       ! Before: the coil branches used only -i*omega*a - V(x)*grad W, which was
+       ! right when the nodal dofs were eliminated but underestimates E (and the
+       ! Joule loss) once they are solved for. Limitation: gated on the keyword,
+       ! so output for existing (unset) cases is unchanged.
+       ConstraintActive = GetLogical(CompParams, 'Activate Constraint', Found)
      END IF 
  
      !------------------------------------------------------------------------------
@@ -1637,6 +1647,18 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
          END SELECT
          
+         ! DEV-1491: -grad v for coil components that solve the nodal potential.
+         ! The DEFAULT (plain conductor) case above already does this; the coil
+         ! cases used to skip it because the nodal dofs were eliminated.
+         ! ------------------------------------------------------------------
+         IF (ConstraintActive .AND. dim == 3 .AND. np > 0) THEN
+           SELECT CASE (CoilType)
+           CASE ('massive','foil winding','flat wire')
+             E(1,:) = E(1,:) - MATMUL(SOL(1,1:np), dBasisdx(1:np,:))
+             E(2,:) = E(2,:) - MATMUL(SOL(2,1:np), dBasisdx(1:np,:))
+           END SELECT
+         END IF
+
        ELSE   ! Real case (transient case)
          E(1,:) = 0._dp
          IF (CoilType /= 'stranded') THEN 
@@ -1742,6 +1764,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
 
          END SELECT
+
+         ! DEV-1491: -grad v for coil components that solve the nodal potential
+         ! (transient counterpart of the harmonic branch above).
+         ! ------------------------------------------------------------------
+         IF (ConstraintActive .AND. dim == 3 .AND. np > 0) THEN
+           SELECT CASE (CoilType)
+           CASE ('massive','foil winding','flat wire')
+             E(1,:) = E(1,:) - MATMUL(SOL(1,1:np), dBasisdx(1:np,:))
+           END SELECT
+         END IF
        END IF
 
        

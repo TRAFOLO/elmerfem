@@ -738,10 +738,13 @@ CONTAINS
             CALL Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt)
           CASE ('foil winding')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
-            CALL Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt)
+            ! DEV-1491: CompParams passed in so that the kernel can read
+            ! 'Activate Constraint' and add the nodal (scalar potential)
+            ! couplings. Before: the kernel had no access to the component list.
+            CALL Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt,CompParams)
           CASE ('flat wire')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
-            CALL Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt)
+            CALL Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt,CompParams)
           CASE DEFAULT
             CALL Fatal ('AddComponentEquationsAndCouplings', 'Non-existent Coil Type Chosen!')
           END SELECT
@@ -1210,7 +1213,7 @@ CONTAINS
 !> owns the voltage dof vvar+k and carries the full component current, so the
 !> series voltage is V = sum_k V_k.
 !------------------------------------------------------------------------------
-   SUBROUTINE Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt)
+   SUBROUTINE Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt,CompParams)
 !------------------------------------------------------------------------------
     USE MGDynMaterialUtils
     IMPLICIT NONE
@@ -1218,14 +1221,15 @@ CONTAINS
     TYPE(Element_t), POINTER :: Element
     REAL(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val, dt
     TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
 
     TYPE(Solver_t), POINTER :: ASolver
     INTEGER, POINTER :: PS(:)
     TYPE(Matrix_t), POINTER :: CM
     REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, localR
     REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
-    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId
-    LOGICAL :: stat, PiolaVersion, Found
+    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId, ni
+    LOGICAL :: stat, PiolaVersion, Found, ConstraintActive
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
@@ -1265,6 +1269,11 @@ CONTAINS
     ncdofs = nd - nn
 
     vvarId = Comp % vvar % ValueId
+
+    ! DEV-1491: see the harmonic Add_flat_wire. Same non-solenoidal source, same
+    ! nodal couplings; the transient system does not stall the same way, so this
+    ! is opt-in only ('Activate Constraint'), never auto-enabled here.
+    ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
 
     IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
@@ -1314,13 +1323,27 @@ CONTAINS
         val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*Wbasis(j,:)) * Comp % VoltageFactor
         CALL AddToMatrixElement(CM, PS(Indexes(q)), dofId+nm, val)
       END DO
+
+      IF (ConstraintActive) THEN
+        DO ni=1,nn
+          ! DEV-1491: (sigma grad v, grad W) -- conduction current of the nodal
+          ! potential. No 1/dt and no history term (this is not an induced term).
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+          CALL AddToMatrixElement(CM, dofId+nm, PS(Indexes(ni)), val)
+          ! DEV-1491: V_k (sigma grad W, grad si) in the nodal constraint rows.
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*dBasisdx(ni,:)) * Comp % VoltageFactor
+          CALL AddToMatrixElement(CM, PS(Indexes(ni)), dofId+nm, val)
+        END DO
+      END IF
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_flat_wire
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-   SUBROUTINE Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt)
+   SUBROUTINE Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt,CompParams)
 !------------------------------------------------------------------------------
     USE MGDynMaterialUtils
     IMPLICIT NONE
@@ -1328,6 +1351,7 @@ CONTAINS
     TYPE(Element_t), POINTER :: Element
     REAL(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val, dt
     TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
 
     TYPE(Solver_t), POINTER :: ASolver
     INTEGER, POINTER :: PS(:)
@@ -1339,14 +1363,14 @@ CONTAINS
     INTEGER :: nm,p,j,t,Indexes(nd),vvarId,vpolord_tot, &
                vpolord, vpolordtest, dofId, dofIdtest, &
                dim
-    LOGICAL :: stat, PiolaVersion
+    LOGICAL :: stat, PiolaVersion, ConstraintActive
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     LOGICAL :: CSymmetry, First=.TRUE.
 
     REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
                      RotMLoc(3,3), RotM(3,3,nn)
-    INTEGER :: i,ncdofs,q,EdgeBasisDegree
+    INTEGER :: i,ncdofs,q,EdgeBasisDegree,ni
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     
     SAVE CSymmetry, dim, First
@@ -1393,6 +1417,13 @@ CONTAINS
 
     vvarId = Comp % vvar % ValueId
     vpolord_tot = Comp % vvar % pdofs - 1
+
+    ! DEV-1491: see the harmonic Add_foil_winding. Same nodal (scalar potential)
+    ! couplings, opt-in only via 'Activate Constraint'; 3D only. Before: the
+    ! circuit source entered the edge rows only and the coil's nodal rows were
+    ! eliminated by the AV solver.
+    ConstraintActive = .FALSE.
+    IF (dim == 3) ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
 
     ! Numerical integration:
     ! ----------------------
@@ -1485,6 +1516,16 @@ CONTAINS
           END DO
         END IF
 
+        ! DEV-1491: (sigma grad v, V'(alpha) grad W) -- conduction current of the
+        ! nodal potential. No 1/dt and no history term.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localVtest*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+            CALL AddToMatrixElement(CM, dofIdtest+nm, PS(Indexes(ni)), val)
+          END DO
+        END IF
+
       END DO
 
       DO vpolord = 0, vpolord_tot ! V(alpha)
@@ -1499,6 +1540,15 @@ CONTAINS
             val = val * Comp % VoltageFactor
             CALL AddToMatrixElement(CM, PS(indexes(q)), dofId+nm, val)
         END DO
+
+        ! DEV-1491: V(alpha) (sigma grad W, grad si) in the nodal constraint rows.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localV*SUM(MATMUL(C,gradv)*dBasisdx(ni,:)) * Comp % VoltageFactor
+            CALL AddToMatrixElement(CM, PS(Indexes(ni)), dofId+nm, val)
+          END DO
+        END IF
       END DO
 
     END DO
@@ -1762,6 +1812,18 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       Circuits(p) % Asolver => ASolver
     END DO
 
+    ! DEV-1491: at DC the foil / flat wire circuit source is not discretely
+    ! solenoidal (V varies over the component), so the edge-only A system is
+    ! singular AND inconsistent and the linear solver stalls on a residual
+    ! floor. Turning the nodal scalar potential on ('Activate Constraint') lets
+    ! it absorb the non-solenoidal part. Before: the keyword had to be set by
+    ! hand and a 0 Hz run simply failed to converge. Limitation: only done at
+    ! exactly omega = 0 so that omega > 0 results stay bit-identical; the user
+    ! must still opt in explicitly at small but nonzero frequencies.
+    ! This must run BEFORE Circuits_MatrixInit(), which reserves the matrix
+    ! structure for the nodal couplings based on this very keyword.
+    CALL AutoActivateConstraintAtDC()
+
     ! Create CRS matrix structures for the circuit equations:
     ! ------------------------------------------------------
     CALL Circuits_MatrixInit()
@@ -1817,6 +1879,61 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
   
   CONTAINS
+
+!------------------------------------------------------------------------------
+!> DEV-1491: At omega = 0 a foil winding / flat wire component cannot be solved
+!> with the edge dofs alone: the circuit source sigma*V(x)*grad W is discretely
+!> solenoidal only for a constant V, so the singular curl-curl system becomes
+!> inconsistent and the Krylov residual floors. The cure is the nodal scalar
+!> potential of the AV solver, which is switched on per component by
+!> 'Activate Constraint'. Enable it automatically here, and only at exactly
+!> omega = 0, so that every omega > 0 result stays bit-identical.
+!------------------------------------------------------------------------------
+   SUBROUTINE AutoActivateConstraintAtDC()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilType
+    INTEGER :: i
+    LOGICAL :: FoundType, FoundFlag, FlagValue, FoundFreq
+    REAL(KIND=dp) :: w
+
+    w = GetAngularFrequency( Found = FoundFreq )
+    IF( .NOT. FoundFreq ) RETURN
+    IF( ABS( w ) > 0.0_dp ) RETURN
+
+    DO i=1,CurrentModel % NumberOfComponents
+      CompParams => CurrentModel % Components(i) % Values
+      IF(.NOT. ASSOCIATED(CompParams)) CYCLE
+
+      CoilType = ListGetString(CompParams,'Coil Type',FoundType)
+      IF(.NOT. FoundType) CYCLE
+      IF(CoilType /= 'foil winding' .AND. CoilType /= 'flat wire') CYCLE
+
+      FlagValue = ListGetLogical(CompParams,'Activate Constraint',FoundFlag)
+
+      IF(.NOT. FoundFlag) THEN
+        CALL ListAddLogical(CompParams,'Activate Constraint',.TRUE.)
+        CALL Info(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): setting '&
+            //'"Activate Constraint = True" because the angular frequency is zero. '&
+            //'The DC circuit source needs the nodal scalar potential to be solvable.',Level=4)
+      ELSE IF(.NOT. FlagValue) THEN
+        CALL Warn(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): '&
+            //'"Activate Constraint = False" at zero frequency. The linear solver is '&
+            //'expected to stall on a residual floor.')
+      END IF
+
+      IF(ListGetLogical(CompParams,'Activate Constraint',FoundFlag)) THEN
+        IF(.NOT. ListCheckPresent(CompParams,'Electrode Boundaries')) THEN
+          CALL Warn(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): no '&
+              //'"Electrode Boundaries" given, so the automatic electrode BC has no '&
+              //'place to pin the nodal potential (or pins it on the whole coil surface).')
+        END IF
+      END IF
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE AutoActivateConstraintAtDC
+!------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
    SUBROUTINE AddBasicCircuitEquations(p)
@@ -2583,8 +2700,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     TYPE(Matrix_t), POINTER :: CM
     REAL(KIND=dp) :: Basis(nd), DetJ, Omega, localR
     REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
-    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId
-    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
+    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId, ni
+    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec, ConstraintActive
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
@@ -2625,6 +2742,14 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     ncdofs = nd - nn
 
     vvarId = Comp % vvar % ValueId
+
+    ! DEV-1491: see the comment in the harmonic Add_foil_winding. The per-cell
+    ! voltages V_k make the circuit source non-solenoidal (cell borders cut
+    ! through elements), so at omega=0 the edge-only system was inconsistent and
+    ! the linear solver floored. Before: the source hit the edge rows only.
+    ! Limitation: needs 'Activate Constraint' on the component (auto-enabled at
+    ! omega=0) plus a Dirichlet point for v ('Electrode Boundaries').
+    ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
 
     IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
@@ -2675,6 +2800,21 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*Wbasis(j,:)) * Comp % VoltageFactor
         CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(q))), dofId+nm, REAL(val), AIMAG(val))
       END DO
+
+      IF (ConstraintActive) THEN
+        DO ni=1,nn
+          ! DEV-1491: (sigma grad v, grad W) -- conduction current of the nodal
+          ! potential in the cell equation. No i*omega, no VoltageFactor.
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+          CALL AddToCmplxMatrixElement(CM, dofId+nm, ReIndex(PS(Indexes(ni))), REAL(val), AIMAG(val))
+          ! DEV-1491: V_k (sigma grad W, grad si) -- the same source as in the
+          ! edge rows, now also in the nodal constraint rows.
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*dBasisdx(ni,:)) * Comp % VoltageFactor
+          CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(ni))), dofId+nm, REAL(val), AIMAG(val))
+        END DO
+      END IF
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_flat_wire
@@ -2716,7 +2856,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
                      RotMLoc(3,3), RotM(3,3,nn)
     REAL(KIND=dp) :: Jvec(3)
-    INTEGER :: i,ncdofs,q,EdgeBasisDegree
+    INTEGER :: i,ncdofs,q,EdgeBasisDegree,ni
+    LOGICAL :: ConstraintActive
     TYPE(Variable_t), POINTER, SAVE :: Wpot
 
     
@@ -2807,6 +2948,20 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     vvarId = Comp % vvar % ValueId
     vpolord_tot = Comp % vvar % pdofs - 1
+
+    ! DEV-1491: couple the circuit source to the nodal potential v as well.
+    ! Why: at (and near) omega=0 the ungauged edge system is singular and the
+    ! circuit source sigma*V(alpha)*grad W is not discretely solenoidal unless
+    ! V is constant, so the edge-only system was inconsistent and Krylov stalled
+    ! on a residual floor. Before: the source entered the edge rows only and the
+    ! nodal rows of the coil were dropped (Activate Constraint unset -> the AV
+    ! solver's ConstrainUnused eliminated them). Limitation: only active when the
+    ! component sets 'Activate Constraint' (auto-enabled at omega=0, see the
+    ! CircuitsAndDynamicsHarmonic init), 3D only, and the exactness of the
+    ! consistency identity assumes grad(nodal basis) is in the edge basis space
+    ! (lowest order Whitney / p-hierarchical edge elements).
+    ConstraintActive = .FALSE.
+    IF (dim == 3) ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
 
     ! Numerical integration:
     ! ----------------------
@@ -2909,6 +3064,17 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
           CALL AddToCmplxMatrixElement(CM, dofIdtest+nm, ReIndex(PS(Indexes(q))), REAL(val), AIMAG(val) )
         END DO
 
+        ! DEV-1491: conduction current driven by the nodal potential,
+        ! (sigma grad v, V'(alpha) grad W). No im*Omega (this is conduction, not
+        ! induction) and no VoltageFactor, exactly like the a-coupling above.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localVtest*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+            CALL AddToCmplxMatrixElement(CM, dofIdtest+nm, ReIndex(PS(Indexes(ni))), REAL(val), AIMAG(val) )
+          END DO
+        END IF
+
       END DO
 
       DO vpolord = 0, vpolord_tot ! V(alpha)
@@ -2923,6 +3089,18 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
             val = val * Comp % VoltageFactor
             CALL AddToCmplxMatrixElement(CM, ReIndex(PS(indexes(q))), dofId+nm, REAL(val), AIMAG(val))
         END DO
+
+        ! DEV-1491: same source in the nodal rows of the constraint equation
+        ! -div(sigma*(im*Omega*a + grad v + V(alpha) grad W)) = 0, i.e. the edge
+        ! source with a' replaced by grad(nodal basis). This is what makes the
+        ! coupled system consistent at Omega = 0.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localV*SUM(Jvec*dBasisdx(ni,:)) * Comp % VoltageFactor
+            CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(ni))), dofId+nm, REAL(val), AIMAG(val))
+          END DO
+        END IF
       END DO
 
     END DO

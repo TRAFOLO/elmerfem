@@ -31,6 +31,21 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   optional `Conductor Thickness` [+ `Conductor Width`] for a geometric fill factor or `Fill
   Factor` directly. Per-turn voltages are exported as `v_component(i) dof k`. Tests:
   `circuits_transient_flatwire`, `circuits_harmonic_flatwire`.
+- DC / low-frequency foil and flat wire coils (3D harmonic circuits). The circuit source
+  `sigma*V(x)*grad W` is discretely solenoidal only when `V` is constant over the component, so
+  for a foil polynomial of order > 0 or a flat wire with more than one cell the ungauged edge-only
+  A system at `omega = 0` is singular *and* inconsistent and the linear solver floors on a residual
+  (measured 1.4e-4 for the foil test, 6e-7 for flat wire) instead of converging. The fix couples
+  the circuit voltage dofs to the nodal scalar potential `v` of the AV solver in both directions
+  (`CircuitsAndDynamics`, harmonic and transient kernels; matrix structure in `CircuitUtils`), so
+  `v` absorbs the non-solenoidal part and `J = sigma*(-i*omega*a - grad v - V(x) grad W)` is
+  divergence free. `CalcFields` adds the matching `-grad v` to `E` for `massive`, `foil winding`
+  and `flat wire`. Gated on the component keyword `Activate Constraint = True` (which also turns on
+  the AV solver's automatic `v = 0` electrode BC and therefore wants `Electrode Boundaries`); the
+  harmonic circuits solver switches it on by itself when the angular frequency is exactly zero, and
+  warns if it is explicitly off or if `Electrode Boundaries` is missing. Nothing changes at
+  `omega > 0` unless the keyword is set. Tests: `circuits_harmonic_foil_dc`,
+  `circuits_harmonic_flatwire_dc`.
 
 ## Building
 

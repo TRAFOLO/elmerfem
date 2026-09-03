@@ -2598,12 +2598,12 @@ CONTAINS
     INTEGER :: Rows(:), Cols(:), Cnts(:)
     INTEGER :: Indexes(nd)
     INTEGER :: p,j,q,vpolord,vpolordtest,vpolord_tot,&
-      dofId,dofIdtest,vvarId, nm
+      dofId,dofIdtest,vvarId, nm, ni, qn
     LOGICAL :: dofsdone, First=.TRUE.
     INTEGER, POINTER :: PS(:)
     LOGICAL*1 :: Done(:)
     LOGICAL, OPTIONAL :: Harmonic
-    LOGICAL :: harm
+    LOGICAL :: harm, ConstraintActive, Found
     SAVE dim, First
 
     IF (First) THEN
@@ -2628,6 +2628,17 @@ CONTAINS
     vvarId = Comp % vvar % ValueId
     vpolord_tot = Comp % vvar % pdofs - 1
 
+    ! DEV-1491: reserve room for the nodal (scalar potential) couplings added by
+    ! Add_foil_winding when the component activates the constraint equation.
+    ! Why: without them the circuit source lives in the edge rows only and the
+    ! DC (omega=0) system is inconsistent -> the linear solver floors. Before:
+    ! only edge dofs were counted/created here. Limitation: gated exactly like
+    ! the assembly (same keyword, 3D only), otherwise the counting pass and the
+    ! creation pass disagree and Circuits_MatrixInit aborts.
+    ConstraintActive = .FALSE.
+    IF (dim == 3) ConstraintActive = ListGetLogical( &
+        CurrentModel % Components(Comp % ComponentId) % Values, 'Activate Constraint', Found)
+
     DO vpolordtest=0,vpolord_tot ! V'(alpha)
       dofIdtest = AddIndex(vpolordtest + 1) + vvarId
       DO vpolord = 0, vpolord_tot ! V(alpha)
@@ -2650,6 +2661,18 @@ CONTAINS
           CALL CountMatElement(Rows, Cnts, dofIdtest+nm, 1, harm)
         END IF
       END DO
+
+      IF (ConstraintActive) THEN
+        DO ni=1,nn
+          IF (PRESENT(Cols)) THEN
+            qn = PS(Indexes(ni))
+            IF (harm) qn = ReIndex(qn)
+            CALL CreateMatElement(Rows, Cols, Cnts, dofIdtest+nm, qn, harm)
+          ELSE
+            CALL CountMatElement(Rows, Cnts, dofIdtest+nm, 1, harm)
+          END IF
+        END DO
+      END IF
     END DO
 
     DO vpolord = 0, vpolord_tot ! V(alpha)
@@ -2665,6 +2688,18 @@ CONTAINS
           CALL CountMatElement(Rows, Cnts, q, 1, harm)
         END IF
       END DO
+
+      IF (ConstraintActive) THEN
+        DO ni=1,nn
+          qn = PS(Indexes(ni))
+          IF (harm) qn = ReIndex(qn)
+          IF (PRESENT(Cols)) THEN
+            CALL CreateMatElement(Rows, Cols, Cnts, qn, dofId+nm, harm)
+          ELSE
+            CALL CountMatElement(Rows, Cnts, qn, 1, harm)
+          END IF
+        END DO
+      END IF
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE CountAndCreateFoilWinding
@@ -2688,11 +2723,11 @@ CONTAINS
     OPTIONAL :: Cols
     INTEGER :: Rows(:), Cols(:), Cnts(:)
     INTEGER :: Indexes(nd)
-    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs
+    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs, ni, qn
     INTEGER, POINTER :: PS(:)
     LOGICAL*1 :: Done(:)
     LOGICAL, OPTIONAL :: Harmonic
-    LOGICAL :: harm
+    LOGICAL :: harm, ConstraintActive, Found
     REAL(KIND=dp) :: sStack(nn), sAcross(nn)
 
     IF (.NOT. PRESENT(Harmonic)) THEN
@@ -2708,6 +2743,13 @@ CONTAINS
     nm = CurrentModel % ASolver % Matrix % NumberOfRows
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
+
+    ! DEV-1491: reserve room for the nodal (scalar potential) couplings added by
+    ! Add_flat_wire when the component activates the constraint equation. See the
+    ! comment in CountAndCreateFoilWinding; the gate must match the assembly
+    ! exactly or Circuits_MatrixInit aborts on an element-count mismatch.
+    ConstraintActive = ListGetLogical( &
+        CurrentModel % Components(Comp % ComponentId) % Values, 'Activate Constraint', Found)
 
     CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
 
@@ -2733,6 +2775,20 @@ CONTAINS
             CALL CountMatElement(Rows, Cnts, q, 1, harm)
           END IF
         END DO
+
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            qn = PS(Indexes(ni))
+            IF (harm) qn = ReIndex(qn)
+            IF (PRESENT(Cols)) THEN
+              CALL CreateMatElement(Rows, Cols, Cnts, dofId+nm, qn, harm)
+              CALL CreateMatElement(Rows, Cols, Cnts, qn, dofId+nm, harm)
+            ELSE
+              CALL CountMatElement(Rows, Cnts, dofId+nm, 1, harm)
+              CALL CountMatElement(Rows, Cnts, qn, 1, harm)
+            END IF
+          END DO
+        END IF
       END DO
     END DO
 !------------------------------------------------------------------------------
