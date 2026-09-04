@@ -1658,6 +1658,11 @@ Component:Real:      'Nu 22 Sigma'
 Component:Real:      'Sigma 33 y0'
 Component:Real:      'Sigma 33 alpha'
 Component:Real:      'Sigma 33 Sigma'
+! Nodal scalar potential of the AV solver inside a coil component. Required for
+! DC / low-frequency foil and flat wire runs (auto-enabled at zero frequency).
+Component:Logical:   'Activate Constraint'
+Component:Logical:   'Automatic Electrode BC'
+Component:Integer:   'Electrode Boundaries'
 !!!!!!!! TRAFOTEK KEYWORDS
 Material:Real:       'rho0'
 Material:Real:       'rho1'
