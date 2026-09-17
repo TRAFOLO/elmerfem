@@ -631,43 +631,6 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Nodal values of the strand-si correction potential of the solenoidal foil
-!> sheet basis (see SolveFoilSheetBasis in WPotentialSolver). Returns .FALSE. and
-!> zeros when the basis was not solved, so the kernels fall back to the plain
-!> P grad(W) shape function.
-!------------------------------------------------------------------------------
-  FUNCTION GetFoilSheetPhi(Element, n, nstr, si, PhiLoc) RESULT(Found)
-!------------------------------------------------------------------------------
-    IMPLICIT NONE
-    TYPE(Element_t), POINTER :: Element
-    INTEGER :: n, nstr, si
-    REAL(KIND=dp) :: PhiLoc(:)
-    LOGICAL :: Found
-    TYPE(Variable_t), POINTER, SAVE :: PhiVar => NULL()
-    LOGICAL, SAVE :: Looked = .FALSE.
-    INTEGER :: i, j
-
-    PhiLoc(1:n) = 0._dp
-    IF (.NOT. Looked) THEN
-      PhiVar => VariableGet(CurrentModel % Mesh % Variables, 'Sheet Phi')
-      Looked = .TRUE.
-    END IF
-    Found = ASSOCIATED(PhiVar)
-    IF (.NOT. Found) RETURN
-    IF (PhiVar % DOFs /= nstr) THEN
-      Found = .FALSE.
-      RETURN
-    END IF
-
-    DO i = 1, n
-      j = PhiVar % Perm(Element % NodeIndexes(i))
-      IF (j > 0) PhiLoc(i) = PhiVar % Values((j-1)*nstr + si)
-    END DO
-!------------------------------------------------------------------------------
-  END FUNCTION GetFoilSheetPhi
-!------------------------------------------------------------------------------
-
-!------------------------------------------------------------------------------
 !> Projector on the foil plane (local directions Beta and Gamma) at an
 !> integration point. The foil sheet current follows the foils, so its shape
 !> function is t = P grad(W): this is the same component the foil winding
