@@ -921,6 +921,8 @@ CONTAINS
             CALL Fatal (Caller, 'Non existent Coil Type Chosen!')
          END SELECT
          ConstraintActive = GetLogical(CompParams, 'Activate Constraint', Found )
+         ! DEV-1513: the foil sheet divergence cleaning needs the nodal potential.
+         IF (CoilType == 'foil sheet') ConstraintActive = FoilSheetCleaning(CompParams)
        END IF
      END IF
 
@@ -1332,9 +1334,13 @@ BLOCK
       IF (.NOT. ASSOCIATED(CompParams)) CYCLE
 
       CoilType = GetString(CompParams, 'Coil Type', Found)
-      IF(CoilType/='massive' .AND. CoilType/='foil winding' .AND. CoilType/='flat wire') CYCLE
+      IF(CoilType/='massive' .AND. CoilType/='foil winding' .AND. CoilType/='flat wire' &
+          .AND. CoilType/='foil sheet') CYCLE
 
       ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found )
+      ! DEV-1513: the foil sheet cleaning potential must be pinned on the
+      ! electrodes too, or v floats and the block shorts the coil out.
+      IF (CoilType == 'foil sheet') ConstraintActive = FoilSheetCleaning(CompParams)
       IF( .NOT. ConstraintActive ) CYCLE
 
       AutomaticBC = GetLogical( CompParams, 'Automatic electrode BC', Found )
@@ -2511,11 +2517,15 @@ END SUBROUTINE LocalConstraintMatrix
                  ! Compute the conductivity term <C A,grad v> for 
                  ! mass matrix (anisotropy taken into account)
                  ! -------------------------------------------
+                 ! DEV-1513: not for a foil sheet; its C only carries the
+                 ! divergence cleaning current C*grad(v), not sigma*dA/dt.
                  IF(ElectroDynamics) THEN
                    MASS(p,q) = MASS(p,q) + P_ip*SUM( dBasisdx(p,:)*WBasis(j,:) )*detJ*IP % s(t)
-                   DAMP(p,q) = DAMP(p,q) + SUM(MATMUL(C, Wbasis(j,:))*dBasisdx(p,:))*detJ*IP % s(t)
+                   IF (CoilType /= 'foil sheet') &
+                       DAMP(p,q) = DAMP(p,q) + SUM(MATMUL(C, Wbasis(j,:))*dBasisdx(p,:))*detJ*IP % s(t)
                  ELSE
-                   MASS(p,q) = MASS(p,q) + SUM(MATMUL(C, Wbasis(j,:))*dBasisdx(p,:))*detJ*IP % s(t)
+                   IF (CoilType /= 'foil sheet') &
+                       MASS(p,q) = MASS(p,q) + SUM(MATMUL(C, Wbasis(j,:))*dBasisdx(p,:))*detJ*IP % s(t)
                  END IF
 
                  ! Compute the conductivity term <C grad V, eta> for 
@@ -2642,16 +2652,15 @@ END SUBROUTINE LocalConstraintMatrix
            ! This is not used in the case of stranded coil:
            ! ----------------------------------------------
            ! A foil sheet block carries no physical volumetric eddy current
-           ! either, but its C is the small 'Sheet Regularization' tensor of
-           ! FoilSheetConductivity, which has to stay in to keep the curl-curl
-           ! operator of the block regular.
+           ! either: its C is only there for the divergence cleaning current
+           ! C*grad(v), so sigma*dA/dt must not be assembled for it.
            IF(ElectroDynamics) THEN
              MASS(p,q) = MASS(p,q) + P_ip*SUM(WBasis(j,:)*WBasis(i,:) )*detJ*IP % s(t)
-             IF (CoilType /= 'stranded') THEN
+             IF (CoilType /= 'stranded' .AND. CoilType /= 'foil sheet') THEN
                DAMP(p,q) = DAMP(p,q) + SUM(MATMUL(C, WBasis(j,:))*WBasis(i,:) )*detJ*IP % s(t)
              END IF
            ELSE
-             IF (CoilType /= 'stranded') THEN
+             IF (CoilType /= 'stranded' .AND. CoilType /= 'foil sheet') THEN
                MASS(p,q) = MASS(p,q) + SUM(MATMUL(C, WBasis(j,:))*WBasis(i,:) )*detJ*IP % s(t)
              END IF
            END IF

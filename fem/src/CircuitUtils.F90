@@ -631,6 +631,29 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Is the per-strand divergence cleaning active for this foil sheet component?
+!> The strand source c_kj*t is piecewise constant over the strands and therefore
+!> not exactly divergence free, and the block has no volumetric conductivity to
+!> absorb it, so the curl-curl operator there is singular and the coupled solve
+!> stagnates. The cleaning gives the block its nodal scalar potential v and lets
+!> it carry the redistribution current C*grad(v) that the segments cannot
+!> represent. Default on.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetCleaning(CompParams) RESULT(on)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    LOGICAL :: on, Found
+
+    on = .TRUE.
+    IF (.NOT. ASSOCIATED(CompParams)) RETURN
+    on = GetLogical(CompParams, 'Sheet Divergence Cleaning', Found)
+    IF (.NOT. Found) on = .TRUE.
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetCleaning
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Projector on the foil plane (local directions Beta and Gamma) at an
 !> integration point. The foil sheet current follows the foils, so its shape
 !> function is t = P grad(W): this is the same component the foil winding
@@ -3039,11 +3062,11 @@ CONTAINS
     OPTIONAL :: Cols
     INTEGER :: Rows(:), Cols(:), Cnts(:)
     INTEGER :: Indexes(nd)
-    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs
+    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs, ni, qn
     INTEGER, POINTER :: PS(:)
     LOGICAL*1 :: Done(:)
     LOGICAL, OPTIONAL :: Harmonic
-    LOGICAL :: harm
+    LOGICAL :: harm, Cleaning
     REAL(KIND=dp) :: sAlpha(nn), sBeta(nn)
 
     IF (.NOT. PRESENT(Harmonic)) THEN
@@ -3059,6 +3082,11 @@ CONTAINS
     nm = CurrentModel % ASolver % Matrix % NumberOfRows
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
+
+    ! DEV-1513: room for the nodal (scalar potential) couplings of the divergence
+    ! cleaning. The gate must match Add_foil_sheet exactly or Circuits_MatrixInit
+    ! aborts on an element-count mismatch.
+    Cleaning = FoilSheetCleaning(CurrentModel % Components(Comp % ComponentId) % Values)
 
     CALL GetFlatWireLocalFields(.TRUE., Element, nn, sAlpha, sBeta)
 
@@ -3084,6 +3112,20 @@ CONTAINS
             CALL CountMatElement(Rows, Cnts, q, 1, harm)
           END IF
         END DO
+
+        IF (Cleaning) THEN
+          DO ni=1,nn
+            qn = PS(Indexes(ni))
+            IF (harm) qn = ReIndex(qn)
+            IF (PRESENT(Cols)) THEN
+              CALL CreateMatElement(Rows, Cols, Cnts, dofId+nm, qn, harm)
+              CALL CreateMatElement(Rows, Cols, Cnts, qn, dofId+nm, harm)
+            ELSE
+              CALL CountMatElement(Rows, Cnts, dofId+nm, 1, harm)
+              CALL CountMatElement(Rows, Cnts, qn, 1, harm)
+            END IF
+          END DO
+        END IF
       END DO
     END DO
 !------------------------------------------------------------------------------
