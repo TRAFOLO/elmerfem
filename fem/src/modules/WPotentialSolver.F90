@@ -370,7 +370,181 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
       CALL SaveElementWSolution(Element, n, Wnorms(Element%BodyId), RotM, Tcoef, NoRotM)
 
   END DO
+
+  CALL SolveFoilSheetBasis()
+
 CONTAINS
+
+!------------------------------------------------------------------------------
+!> DEV-1513: solenoidal strand basis of a foil sheet winding.
+!>
+!> The strand shape function chi_kj * P grad(W) is piecewise constant over the
+!> strands, so it is divergence free over the block as a whole but not strand by
+!> strand, and the block has no volumetric conductivity to absorb the difference.
+!> Correct it once, here, where the operator and its Dirichlet conditions already
+!> exist: for every strand solve
+!>
+!>   int sigma P grad(phi_kj) . grad(psi_n) = int chi_kj sigma P grad(W) . grad(psi_n)
+!>
+!> over the block, phi = 0 on the Electrode Boundaries and natural elsewhere, and
+!> use t_kj = P (chi_kj grad(W) - grad(phi_kj)) in the kernel. That is discretely
+!> divergence free by construction, carries the same terminal flux (phi vanishes
+!> on the electrodes), is frequency independent, and needs no extra dofs, so the
+!> exact transposition between the strand rows and the a equation is kept.
+!>
+!> The potentials are stored in the elemental variable 'Sheet Phi', one dof per
+!> strand. 'Sheet Solenoidal Basis = Logical False' falls back to the uncorrected
+!> shape function.
+!------------------------------------------------------------------------------
+  SUBROUTINE SolveFoilSheetBasis()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CP
+    TYPE(Variable_t), POINTER :: PhiVar
+    TYPE(Matrix_t), POINTER :: A
+    TYPE(Element_t), POINTER :: Elem
+    TYPE(Nodes_t), SAVE :: ENodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: rhs(:,:), xs(:), src(:)
+    REAL(KIND=dp), ALLOCATABLE :: EBasis(:), EdBasis(:,:), Wloc(:), sAl(:), sBe(:)
+    REAL(KIND=dp) :: detJ, gradw(3), tv(3), Pm(3,3), Cloc(3,3), ERotM(3,3,27)
+    REAL(KIND=dp) :: PhiNorm, corr, denom, sw
+    INTEGER :: ci, nturns, ncell, nseg, nstr, si, ii, jj, kc, jsg, ne, nn2, gp, nrows
+    LOGICAL :: Fnd, AnyDone
+
+    A => Solver % Matrix
+    nrows = A % NumberOfRows
+    AnyDone = .FALSE.
+
+    DO ci = 1, CurrentModel % NumberOfComponents
+      CP => CurrentModel % Components(ci) % Values
+      IF (.NOT. ASSOCIATED(CP)) CYCLE
+      IF (GetString(CP, 'Coil Type', Fnd) /= 'foil sheet') CYCLE
+      IF (.NOT. Fnd) CYCLE
+      IF (.NOT. GetLogical(CP, 'Sheet Solenoidal Basis', Fnd)) CYCLE
+
+      nturns = NINT(GetConstReal(CP, 'Number of Turns', Fnd))
+      IF (.NOT. Fnd) CYCLE
+      ncell = GetInteger(CP, 'Sheet Cells', Fnd)
+      IF (.NOT. Fnd) ncell = nturns
+      nseg = GetInteger(CP, 'Sheet Segments', Fnd)
+      IF (.NOT. Fnd) nseg = 16
+      nstr = ncell * nseg
+      IF (nstr < 1) CYCLE
+
+      PhiVar => VariableGet(Mesh % Variables, 'Sheet Phi')
+      IF (.NOT. ASSOCIATED(PhiVar)) THEN
+        CALL VariableAddVector(Mesh % Variables, Mesh, Solver, 'Sheet Phi', nstr, &
+            Perm = Solver % Variable % Perm)
+        PhiVar => VariableGet(Mesh % Variables, 'Sheet Phi')
+      END IF
+      IF (.NOT. ASSOCIATED(PhiVar)) CALL Fatal('Wsolve','Could not create "Sheet Phi"!')
+      IF (PhiVar % DOFs /= nstr) CALL Fatal('Wsolve', &
+          'Component '//I2S(ci)//': "Sheet Phi" has '//I2S(PhiVar % DOFs)// &
+          ' dofs, the strand layout needs '//I2S(nstr)//'!')
+
+      ALLOCATE(rhs(nrows, nstr), xs(nrows), src(nstr))
+      rhs = 0._dp; src = 0._dp
+      nn2 = Mesh % MaxElementNodes
+      ALLOCATE(EBasis(nn2), EdBasis(nn2,3), Wloc(nn2), sAl(nn2), sBe(nn2))
+
+      ! One pass over the block: every integration point belongs to exactly one
+      ! strand, so all right hand sides are built together.
+      DO ne = 1, GetNOFActive()
+        Elem => GetActiveElement(ne)
+        IF (.NOT. ASSOCIATED(GetComponentParams(Elem), CP)) CYCLE
+        nn2 = GetElementNOFNodes(Elem)
+        CALL GetElementNodes(ENodes, Elem)
+        CALL GetLocalSolution(Wloc, UElement=Elem)
+        CALL GetFlatWireLocalFields(.TRUE., Elem, nn2, sAl, sBe)
+        CALL GetElementRotM(Elem, ERotM, nn2)
+        ! The system matrix carries the conductivity, so the right hand side has
+        ! to as well: b = int sigma chi P grad(W) . grad(psi). sigma then cancels
+        ! out of phi and out of the reported correction fraction.
+        Cloc(1:3,1:3) = 0._dp
+        Cloc(1:3,1:3) = SUM(GetElectricConductivityTensor(Elem, nn2, 're', .TRUE., &
+            'foil winding'), DIM=3) / nn2
+        IP = GaussPoints(Elem)
+        DO gp = 1, IP % n
+          Fnd = ElementInfo(Elem, ENodes, IP % U(gp), IP % V(gp), IP % W(gp), &
+              detJ, EBasis, EdBasis)
+          gradw = MATMUL(Wloc(1:nn2), EdBasis(1:nn2,:))
+          Pm = FoilSheetProjector(ERotM, EBasis, nn2)
+          tv = MATMUL(Pm, gradw) * Cloc(3,3)
+          CALL FoilSheetStrand(ncell, nseg, SUM(sAl(1:nn2)*EBasis(1:nn2)), &
+              SUM(sBe(1:nn2)*EBasis(1:nn2)), kc, jsg)
+          si = (kc-1)*nseg + jsg
+          sw = IP % s(gp) * detJ
+          src(si) = src(si) + sw * SUM(tv*gradw)
+          DO ii = 1, nn2
+            jj = Solver % Variable % Perm(Elem % NodeIndexes(ii))
+            IF (jj > 0) rhs(jj, si) = rhs(jj, si) + sw * SUM(tv*EdBasis(ii,:))
+          END DO
+        END DO
+      END DO
+
+      corr = 0._dp; denom = SUM(src)
+      DO si = 1, nstr
+        IF (ALLOCATED(A % ConstrainedDOF)) THEN
+          WHERE (A % ConstrainedDOF(1:nrows)) rhs(1:nrows, si) = 0._dp
+        END IF
+        xs = 0._dp
+        CALL SolveLinearSystem(A, rhs(:,si), xs, PhiNorm, 1, Solver)
+        corr = corr + SUM(xs(1:nrows) * rhs(1:nrows, si))
+        DO ii = 1, Mesh % NumberOfNodes
+          jj = Solver % Variable % Perm(ii)
+          IF (jj > 0) PhiVar % Values((jj-1)*nstr + si) = xs(jj)
+        END DO
+      END DO
+
+      ! How local is the correction? If grad(phi_kj) reached only a few strands
+      ! the kernel could assemble it with a bounded stencil; if it is spread over
+      ! the block, every strand couples to every edge dof and the coupling blocks
+      ! become dense. Report the mean fraction of block nodes carrying more than
+      ! 1e-3 of that strand's peak potential.
+      BLOCK
+        REAL(KIND=dp) :: pmax, frac
+        INTEGER :: nblk, cnt
+        frac = 0._dp
+        nblk = COUNT(Solver % Variable % Perm(1:Mesh % NumberOfNodes) > 0)
+        DO si = 1, nstr
+          pmax = 0._dp
+          DO ii = 1, Mesh % NumberOfNodes
+            jj = Solver % Variable % Perm(ii)
+            IF (jj > 0) pmax = MAX(pmax, ABS(PhiVar % Values((jj-1)*nstr + si)))
+          END DO
+          IF (pmax <= 0._dp) CYCLE
+          cnt = 0
+          DO ii = 1, Mesh % NumberOfNodes
+            jj = Solver % Variable % Perm(ii)
+            IF (jj > 0) THEN
+              IF (ABS(PhiVar % Values((jj-1)*nstr + si)) > 1.0d-3*pmax) cnt = cnt + 1
+            END IF
+          END DO
+          frac = frac + REAL(cnt,dp)/MAX(nblk,1)
+        END DO
+        frac = frac / nstr
+        CALL ListAddConstReal(CurrentModel % Simulation, 'res: Sheet basis support', frac)
+        WRITE(Message,'(A,ES12.5)') 'Foil sheet solenoidal basis: mean support fraction ', frac
+        CALL Info('Wsolve', Message, Level=5)
+      END BLOCK
+
+      IF (denom > 0._dp) THEN
+        CALL ListAddConstReal(CurrentModel % Simulation, 'res: Sheet basis correction', corr/denom)
+        WRITE(Message,'(A,ES12.5)') 'Foil sheet solenoidal basis, '//I2S(nstr)// &
+            ' strands, correction energy fraction ', corr/denom
+      ELSE
+        WRITE(Message,'(A)') 'Foil sheet solenoidal basis: empty block!'
+      END IF
+      CALL Info('Wsolve', Message, Level=5)
+      CALL ListAddLogical(CP, 'Foil Sheet Solenoidal', .TRUE.)
+      AnyDone = .TRUE.
+
+      DEALLOCATE(rhs, xs, src, EBasis, EdBasis, Wloc, sAl, sBe)
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE SolveFoilSheetBasis
+!------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
   SUBROUTINE LocalMatrix(  STIFF, FORCE, LOAD, Element, CoilBody, CoilType, Tcoef, RotM, n, nd, NoRotM )
