@@ -612,7 +612,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    INTEGER :: FwStack, FwAcross
    LOGICAL :: FwStackAlongAlpha
    INTEGER :: FsCells, FsSegments, FsK, FsJ, FsDof
-   REAL(KIND=dp) :: FsSigmaRef, FsProj(3,3), FsGvRe(3), FsGvIm(3)
+   REAL(KIND=dp) :: FsSigmaRef
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: R_Z(:), PR(:)
@@ -621,7 +621,6 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: B(2,3), E(2,3), JatIP(2,3), VP_ip(2,3), JXBatIP(2,3), CC_J(2,3), HdotB, LMSol(2)
    REAL(KIND=dp) :: ldetJ,detJ, C_ip, ST(3,3), Omega, ThinLinePower, Power, Energy(3), w_dens
    REAL(KIND=dp) :: HomogPower   ! Im(Nu) proximity loss, a part of Power
-   REAL(KIND=dp) :: CorrPower    ! foil sheet divergence cleaning loss, a part of Power
    REAL(KIND=dp) :: localThickness
    REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ValAtIP
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
@@ -1090,7 +1089,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    C = 0._dp; PR=0._dp
    Magnetization = 0._dp
 
-   Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp; CorrPower = 0._dp
+   Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp
    IF(.NOT. ConstantMassMatrixInUse ) THEN
      CALL DefaultInitialize()
    END IF
@@ -1222,9 +1221,6 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        ! Joule loss) once they are solved for. Limitation: gated on the keyword,
        ! so output for existing (unset) cases is unchanged.
        ConstraintActive = GetLogical(CompParams, 'Activate Constraint', Found)
-       ! DEV-1513: a foil sheet solves the nodal potential when the divergence
-       ! cleaning is on, so -grad v is a genuine part of E in the block.
-       IF (CoilType == 'foil sheet') ConstraintActive = FoilSheetCleaning(CompParams)
      END IF 
  
      !------------------------------------------------------------------------------
@@ -1657,8 +1653,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            ELSE
              wvec = MATMUL(Wbase(1:np), dBasisdx(1:np,:))
            END IF
-           FsProj = FoilSheetProjector(RotM, Basis, n)
-           wvec = MATMUL(FsProj, wvec)
+           wvec = MATMUL(FoilSheetProjector(RotM, Basis, n), wvec)
            ! J = -SigmaRef y_kj t (the circuit sign convention of the flat wire
            ! and foil winding kernels), so E = J/sigma_s.
            IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
@@ -1666,19 +1661,6 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              imag_value = -FsSigmaRef * imag_value / CMat_ip(3,3)
              E(1,:) = E(1,:) + REAL(imag_value) * wvec
              E(2,:) = E(2,:) + AIMAG(imag_value) * wvec
-             ! DEV-1513: the divergence cleaning current -C grad v with
-             ! C = Re(sigma_s) on the foil plane. E gets it divided by sigma_s so
-             ! that J = C_ip E reproduces it, and its own loss is accumulated
-             ! separately as 'res: sheet correction loss'.
-             IF (ConstraintActive .AND. np > 0) THEN
-               FsGvRe = MATMUL(FsProj, MATMUL(SOL(1,1:np), dBasisdx(1:np,:)))
-               FsGvIm = MATMUL(FsProj, MATMUL(SOL(2,1:np), dBasisdx(1:np,:)))
-               imag_value = -REAL(CMat_ip(3,3)) / CMat_ip(3,3)
-               E(1,:) = E(1,:) + REAL(imag_value)*FsGvRe - AIMAG(imag_value)*FsGvIm
-               E(2,:) = E(2,:) + AIMAG(imag_value)*FsGvRe + REAL(imag_value)*FsGvIm
-               CorrPower = CorrPower + HarmPowerCoeff * REAL(CMat_ip(3,3)) * &
-                   ( SUM(FsGvRe**2) + SUM(FsGvIm**2) ) * s
-             END IF
            END IF
            localV(1) = LagrangeVar % Values(VvarId+2*FsK) * CircEqVoltageFactor
            localV(2) = LagrangeVar % Values(VvarId+2*FsK+1) * CircEqVoltageFactor
@@ -1813,17 +1795,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            CALL FoilSheetStrand(FsCells, FsSegments, &
                SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
            FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
-           FsProj = FoilSheetProjector(RotM, Basis, n)
-           wvec = MATMUL(FsProj, MATMUL(Wbase(1:np), dBasisdx(1:np,:)))
-           IF (REAL(CMat_ip(3,3)) /= 0._dp) THEN
-             E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec
-             ! DEV-1513: the divergence cleaning current, C = Re(sigma_s) here.
-             IF (ConstraintActive .AND. np > 0) THEN
-               FsGvRe = MATMUL(FsProj, MATMUL(SOL(1,1:np), dBasisdx(1:np,:)))
-               E(1,:) = E(1,:) - FsGvRe
-               CorrPower = CorrPower + REAL(CMat_ip(3,3)) * SUM(FsGvRe**2) * s
-             END IF
-           END IF
+           wvec = MATMUL(FoilSheetProjector(RotM, Basis, n), MATMUL(Wbase(1:np), dBasisdx(1:np,:)))
+           IF (REAL(CMat_ip(3,3)) /= 0._dp) &
+               E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec
            localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
 
          CASE ('foil winding')
@@ -2886,7 +2860,6 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    IF(Parallel) THEN
      Power = ParallelReduction(Power) / NoSlices
      HomogPower = ParallelReduction(HomogPower) / NoSlices
-     CorrPower = ParallelReduction(CorrPower) / NoSlices
      IF( LayerBC ) SurfPower = ParallelReduction( SurfPower ) / NoSlices
 
      Energy(1) = ParallelReduction(Energy(1)) / NoSlices
@@ -2931,13 +2904,6 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    WRITE(Message,'(A,ES15.6)') 'Homogenization loss: ', HomogPower
    CALL Info( Caller, Message )
    CALL ListAddConstReal( Model % Simulation, 'res: Homogenization loss', HomogPower )
-
-   ! Joule loss of the foil sheet divergence cleaning current C*grad(v). It is
-   ! inside 'res: joule loss'; it is a discretisation diagnostic and should stay
-   ! well under 1 % of the total.
-   WRITE(Message,'(A,ES15.6)') 'Sheet correction loss: ', CorrPower
-   CALL Info( Caller, Message )
-   CALL ListAddConstReal( Model % Simulation, 'res: Sheet correction loss', CorrPower )
 
    IF( LayerBC ) THEN
      WRITE(Message,*) 'Surface current power (the Joule effect): ', SurfPower

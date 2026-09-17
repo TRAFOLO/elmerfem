@@ -496,9 +496,6 @@ CONTAINS
          END IF
          ConstraintActive = GetLogical( CompParams, 'Activate Constraint', Found)
 !        IF(.NOT.Found .AND. CoilType /= 'stranded') ConstraintActive = .TRUE.
-         ! DEV-1513: the foil sheet divergence cleaning needs the nodal scalar
-         ! potential of the block, which is exactly what this branch assembles.
-         IF (CoilType == 'foil sheet') ConstraintActive = FoilSheetCleaning(CompParams)
        END IF
 
        LaminateStack = .FALSE.
@@ -733,13 +730,9 @@ BLOCK
       IF (.NOT. ASSOCIATED(CompParams)) CYCLE
 
       CoilType = GetString(CompParams, 'Coil Type', Found)
-      IF(CoilType/='massive' .AND. CoilType/='foil winding' .AND. CoilType/='flat wire' &
-          .AND. CoilType/='foil sheet') CYCLE
+      IF(CoilType/='massive' .AND. CoilType/='foil winding' .AND. CoilType/='flat wire') CYCLE
 
       ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found )
-      ! DEV-1513: the foil sheet cleaning potential must be pinned on the
-      ! electrodes too, or v floats and the block shorts the coil out.
-      IF (CoilType == 'foil sheet') ConstraintActive = FoilSheetCleaning(CompParams)
       IF( .NOT. ConstraintActive ) CYCLE
 
       AutomaticBC = GetLogical( CompParams, 'Automatic electrode BC', Found )
@@ -1532,13 +1525,10 @@ END BLOCK
             DO j=1,nd-np
               q = j+np
               
-              ! Compute the conductivity term <j * omega * C A,grad v> for
+              ! Compute the conductivity term <j * omega * C A,grad v> for 
               ! stiffness matrix (anisotropy taken into account)
               ! -------------------------------------------
-              ! DEV-1513: not for a foil sheet. Its C exists only to carry the
-              ! divergence cleaning current C*grad(v); the block must not get
-              ! the volumetric eddy current back through i*omega*C*A.
-              IF (CoilType /= 'foil sheet') DAMP(p,q) = DAMP(p,q) + &
+              DAMP(p,q) = DAMP(p,q) + &
                   SUM(MATMUL(C,Wbasis(j,:))*dBasisdx(i,:))*detJ*IP % s(t)
 
               IF(ElectroDynamics) THEN             
@@ -1605,10 +1595,10 @@ END BLOCK
            ! for stiffness matrix (anisotropy taken into account)
            ! ----------------------------------------------------
            ! A foil sheet block carries no physical volumetric eddy current
-           ! either: its C is only there for the divergence cleaning current
-           ! C*grad(v), so i*omega*C*A must not be assembled for it.
-           IF (CoilType /= 'stranded' .AND. CoilType /= 'foil sheet') &
-                DAMP(p,q) = DAMP(p,q) + &
+           ! either, but its C is the small 'Sheet Regularization' tensor of
+           ! FoilSheetConductivity, which has to stay in to keep the curl-curl
+           ! operator of the block regular.
+           IF (CoilType /= 'stranded') DAMP(p,q) = DAMP(p,q) + &
                 SUM(MATMUL(C, WBasis(j,:))*WBasis(i,:))*detJ*IP % s(t)
 
            IF(ElectroDynamics ) THEN

@@ -1384,8 +1384,8 @@ CONTAINS
     TYPE(Matrix_t), POINTER :: CM
     REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s
     REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
-    INTEGER :: nm, j, t, q, ni, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
-    LOGICAL :: stat, PiolaVersion, Found, Cleaning
+    INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    LOGICAL :: stat, PiolaVersion, Found
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
@@ -1428,7 +1428,6 @@ CONTAINS
     CALL GetElementRotM(Element, RotM, nn)
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
-    Cleaning = FoilSheetCleaning(CompParams)
 
     IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
@@ -1477,17 +1476,6 @@ CONTAINS
         val = Comp % SigmaRef * IP % s(t)*detJ*SUM(tvec*Wbasis(j,:))
         CALL AddToMatrixElement(CM, PS(Indexes(q)), sdof+nm, val)
       END DO
-
-      IF (Cleaning) THEN
-        DO ni=1,nn
-          ! Divergence cleaning; see the harmonic Add_foil_sheet.
-          ! ----------------------------------------------------
-          val = Comp % SigmaRef * IP % s(t)*detJ*SUM(tvec*dBasisdx(ni,:))
-          CALL AddToMatrixElement(CM, PS(Indexes(ni)), sdof+nm, val)
-          val = -IP % s(t)*detJ*SUM(dBasisdx(ni,:)*tvec)
-          CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(ni)), val)
-        END DO
-      END IF
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_foil_sheet
@@ -3034,8 +3022,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     TYPE(Matrix_t), POINTER :: CM
     REAL(KIND=dp) :: Basis(nd), DetJ, Omega, g
     REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
-    INTEGER :: nm, j, t, q, ni, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
-    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec, Cleaning
+    INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
@@ -3076,7 +3064,6 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     ncdofs = nd - nn
 
     vvarId = Comp % vvar % ValueId
-    Cleaning = FoilSheetCleaning(CompParams)
 
     IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
@@ -3138,20 +3125,6 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         val = Comp % SigmaRef * IP % s(t)*detJ*SUM(tvec*Wbasis(j,:))
         CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(q))), sdof+nm, REAL(val), AIMAG(val))
       END DO
-
-      IF (Cleaning) THEN
-        DO ni=1,nn
-          ! The strand current in the nodal divergence constraint, so that
-          ! div(c_kj t + C grad v) = 0 and the a equation stays consistent.
-          ! --------------------------------------------------------------
-          val = Comp % SigmaRef * IP % s(t)*detJ*SUM(tvec*dBasisdx(ni,:))
-          CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(ni))), sdof+nm, REAL(val), AIMAG(val))
-          ! -grad v in the strand voltage law, the transpose of the above.
-          ! --------------------------------------------------------------
-          val = -IP % s(t)*detJ*SUM(dBasisdx(ni,:)*tvec)
-          CALL AddToCmplxMatrixElement(CM, sdof+nm, ReIndex(PS(Indexes(ni))), REAL(val), AIMAG(val))
-        END DO
-      END IF
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_foil_sheet

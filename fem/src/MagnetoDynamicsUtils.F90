@@ -155,7 +155,7 @@
 !------------------------------------------------------------------------------
   SUBROUTINE FoilSheetConductivity(Element, n, Tcoef)
 !------------------------------------------------------------------------------
-    USE CircuitUtils, ONLY: GetComponentParams, FoilSheetCleaning
+    USE CircuitUtils, ONLY: GetComponentParams
     IMPLICIT NONE
     TYPE(Element_t), POINTER :: Element
     INTEGER :: n
@@ -168,20 +168,12 @@
     CompParams => GetComponentParams(Element)
     IF (.NOT. ASSOCIATED(CompParams)) RETURN
 
+    eps = GetConstReal(CompParams, 'Sheet Regularization', Found)
+    IF (.NOT. Found) eps = 0._dp
+    IF (eps <= 0._dp) RETURN
+
     sig = GetConstReal(CompParams, 'Sigma 33', Found)
     IF (.NOT. Found) RETURN
-
-    IF (FoilSheetCleaning(CompParams)) THEN
-      ! The divergence cleaning current C grad(v) is a real current in the copper,
-      ! so C is the real part of the sheet conductivity. The i*omega*C*A eddy terms
-      ! are suppressed for this coil type in the AV solvers, so this does not give
-      ! the block back the volumetric eddy current the sheet model exists to remove.
-      eps = 1._dp
-    ELSE
-      eps = GetConstReal(CompParams, 'Sheet Regularization', Found)
-      IF (.NOT. Found) eps = 0._dp
-      IF (eps <= 0._dp) RETURN
-    END IF
 
     ! Local directions: 1 = across the stack (no conduction), 2 and 3 in the foil
     Tcoef(2,2,1:n) = eps * sig
