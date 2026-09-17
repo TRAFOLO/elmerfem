@@ -21,9 +21,9 @@ Simulation 1
    Coordinate Scaling = 0.001
    Simulation Type = Transient
    Timestepping Method = BDF
-   BDF Order = 1
-   Timestep intervals = 3
-   Timestep Sizes = 0.0015
+   BDF Order = 2
+   Timestep intervals = 64   ! 2 periods at 32 steps; steady by period 2
+   Timestep Sizes = 6.25e-4
    Steady State Max Iterations = 1
 End
 Solver 1  !---- DirectionSolver, DirectionSolver
@@ -93,7 +93,7 @@ Solver 6  !---- MagnetoDynamics, WhitneyAVSolver
    Linear System Solver = Iterative
    Linear System Iterative Method = BicgstabL
    Linear System preconditioning = none
-            Linear System Convergence Tolerance = 1.0e-11
+            Linear System Convergence Tolerance = 1.0e-9
    Linear System Abort Not Converged = False
    Linear System Max Iterations = 3000
    Linear System Residual Output = 1000
@@ -193,13 +193,15 @@ Component 1  !---- A1
    Sheet Cells = Integer 8
    Sheet Segments = Integer 4
    Electrode Boundaries(2) = Integer 4 5
+   Electrode Area = Real 0.01
    Sigma 33 = Real 36e6
    ! DC sheet conductivity ff*sigma = 36e6 as before; the transient skin
    ! ladder needs the physics, not the homogenised number.
-   Foil Thickness = Real 0.5e-3
+   ! 12.6 mm foil gives t/delta = 1.5 at 50 Hz, so the strand skin ladder
+   ! and the reluctivity ladder both carry a visible share of the loss.
+   Foil Thickness = Real 12.6e-3
    Fill Factor = Real 0.5
    Sheet Conductivity = Real 72e6
-   ! Both ladders present but inert at 50 Hz with a 0.5 mm foil.
    Homogenization Model = Logical True
    Homogenization Ladder Order = Integer 4
    Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
@@ -250,7 +252,7 @@ Boundary Condition 7  !---- Beta0
    Target Boundaries = $ A1_beta0
    Body 3: Beta = Real 0
 End
-Solver 10 :: Reference Norm = Real 1.16833E-02
-Solver 10 :: Reference Norm Tolerance = Real 1E-03
+Solver 10 :: Reference Norm = Real 2.62969E-02
+Solver 10 :: Reference Norm Tolerance = Real 2E-03
 $fprintf( stderr, "TEST CASE 1\n");
 RUN

@@ -3664,9 +3664,11 @@ END SUBROUTINE LocalConstraintMatrix
     INTEGER, SAVE :: alloc_n = 0, alloc_nd = 0
     REAL(KIND=dp) :: detJ_loc, rml(3,3), curlA_ip(3), wt, elem_volume
     REAL(KIND=dp) :: bbar(3), y0l(3), rl(6,3), Tl(6,3), mki(6,3)
-    REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem
+    REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem, prox_total
     LOGICAL :: dloc(3)
     INTEGER :: nlad, d, k, idx, eperm(3), elem_perm_pl
+
+    prox_total = 0._dp
 
     DO el_idx = 1, GetNOFActive()
       el => GetActiveElement(el_idx)
@@ -3796,23 +3798,31 @@ END SUBROUTINE LocalConstraintMatrix
       END DO
 
       ! Instantaneous dissipation density of the ladder, summed over poles and
-      ! directions: -sum r_k T_k (dxi_k/dt)^2, positive for the physical fit.
-      IF (ASSOCIATED(prox_loss_var) .AND. bdf_dt > 0.0_dp) THEN
-        elem_perm_pl = prox_loss_var % Perm(el % ElementIndex)
-        IF (elem_perm_pl > 0) THEN
-          p_loss_elem = 0._dp
-          DO d = 1, 3
-            IF (.NOT. dloc(d)) CYCLE
-            DO k = 1, nlad
-              xdot = ( bdf_alpha_1 * xinew(k,d) + bdf_alpha_2 * xin(k,d) &
-                     + bdf_alpha_3 * xin1(k,d) ) / bdf_dt
-              p_loss_elem = p_loss_elem - rl(k,d) * Tl(k,d) * xdot**2
-            END DO
+      ! directions: -sum r_k T_k (dxi_k/dt)^2, positive for the physical fit
+      ! (the residues come out negative). Integrated over the block it is the
+      ! proximity loss the terminal power has to contain.
+      IF (bdf_dt > 0.0_dp) THEN
+        p_loss_elem = 0._dp
+        DO d = 1, 3
+          IF (.NOT. dloc(d)) CYCLE
+          DO k = 1, nlad
+            xdot = ( bdf_alpha_1 * xinew(k,d) + bdf_alpha_2 * xin(k,d) &
+                   + bdf_alpha_3 * xin1(k,d) ) / bdf_dt
+            p_loss_elem = p_loss_elem - rl(k,d) * Tl(k,d) * xdot**2
           END DO
-          prox_loss_var % Values(elem_perm_pl) = p_loss_elem
+        END DO
+        prox_total = prox_total + p_loss_elem * elem_volume
+        IF (ASSOCIATED(prox_loss_var)) THEN
+          elem_perm_pl = prox_loss_var % Perm(el % ElementIndex)
+          IF (elem_perm_pl > 0) prox_loss_var % Values(elem_perm_pl) = p_loss_elem
         END IF
       END IF
     END DO
+
+    ! Publish the block total so the circuit side can fold it into the terminal
+    ! power. Each partition holds its own share.
+    prox_total = ParallelReduction(prox_total)
+    CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet proximity loss', prox_total)
 
     ! Record the dt just used, so the next Schur block can form k = dt/dt_prev.
     dt_prev = dt

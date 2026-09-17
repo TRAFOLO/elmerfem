@@ -103,6 +103,12 @@ MODULE TransientHomogCircuitState
     REAL(KIND=dp), ALLOCATABLE :: tau(:), Minv(:)
     REAL(KIND=dp), ALLOCATABLE :: x(:,:), xo(:,:)
     REAL(KIND=dp), ALLOCATABLE :: y(:), yo(:), hist(:)
+    ! w(j) = sum over the strand of gres*SigmaRef^2/sigma_dc, i.e. the DC
+    ! resistance weight, so that the strand dissipation is
+    !   P_j = w(j) * [ y_j^2 + sum_k 2 (y_j - x_kj)^2 ],
+    ! the first term being the DC loss and each ladder stage dissipating in its
+    ! own 2 R_dc resistor. The tail inductance dissipates nothing.
+    REAL(KIND=dp), ALLOCATABLE :: w(:)
   END TYPE FoilSkin_t
 
   TYPE(FoilSkin_t), ALLOCATABLE, SAVE :: FSkin(:)
@@ -160,9 +166,10 @@ CONTAINS
       FSkin(i) % nStrand = ns
       ALLOCATE(FSkin(i) % tau(nn), FSkin(i) % Minv(nn))
       ALLOCATE(FSkin(i) % x(nn,ns), FSkin(i) % xo(nn,ns))
-      ALLOCATE(FSkin(i) % y(ns), FSkin(i) % yo(ns), FSkin(i) % hist(ns))
+      ALLOCATE(FSkin(i) % y(ns), FSkin(i) % yo(ns), FSkin(i) % hist(ns), FSkin(i) % w(ns))
       FSkin(i) % x = 0._dp; FSkin(i) % xo = 0._dp
       FSkin(i) % y = 0._dp; FSkin(i) % yo = 0._dp; FSkin(i) % hist = 0._dp
+      FSkin(i) % w = 0._dp
       FSkin(i) % Minv = 1._dp
 
       rest = PI*PI/6._dp
@@ -265,6 +272,36 @@ CONTAINS
       FSkin(i) % y(j)  = ynew(j)
     END DO
   END SUBROUTINE AdvanceFoilSkin
+
+  !----------------------------------------------------------------------------
+  ! Instantaneous strand dissipation of a component and its DC part. The ladder
+  ! puts the whole strand current through every stage, and stage k dissipates in
+  ! its 2 R_dc resistor, whose current is (y - x_k); the tail inductance
+  ! dissipates nothing. Pdc is what post processing already accounts for from
+  ! the strand current density and the DC conductivity, so the caller adds only
+  ! Ptot - Pdc on top of it.
+  !----------------------------------------------------------------------------
+  SUBROUTINE FoilSkinLoss(i, Ptot, Pdc)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i
+    REAL(KIND=dp), INTENT(OUT) :: Ptot, Pdc
+    INTEGER :: j, k
+    REAL(KIND=dp) :: s
+
+    Ptot = 0._dp; Pdc = 0._dp
+    IF (.NOT. fskin_allocated) RETURN
+    IF (i < 1 .OR. i > SIZE(FSkin)) RETURN
+    IF (.NOT. FSkin(i) % Active) RETURN
+
+    DO j = 1, FSkin(i) % nStrand
+      s = FSkin(i) % y(j)**2
+      Pdc = Pdc + FSkin(i) % w(j) * s
+      DO k = 1, FSkin(i) % N
+        s = s + 2._dp * (FSkin(i) % y(j) - FSkin(i) % x(k,j))**2
+      END DO
+      Ptot = Ptot + FSkin(i) % w(j) * s
+    END DO
+  END SUBROUTINE FoilSkinLoss
 
   !----------------------------------------------------------------------------
   ! BDF order actually used for the ladder: the simulation's, capped at 2, and
@@ -844,6 +881,12 @@ CONTAINS
       Comp % Resistance = 0._dp 
       Comp % Conductance = 0._dp
       IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
+      ! The strand resistance weights are re-accumulated with the matrix.
+      IF (fskin_allocated) THEN
+        IF (Comp % ComponentId >= 1 .AND. Comp % ComponentId <= SIZE(FSkin)) THEN
+          IF (FSkin(Comp % ComponentId) % Active) FSkin(Comp % ComponentId) % w = 0._dp
+        END IF
+      END IF
 
       Cvar => Comp % vvar
       vvarId = Comp % vvar % ValueId + nm
@@ -1719,6 +1762,9 @@ CONTAINS
       IF (SkinLadder) THEN
         CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac * FSkin(CompId) % Gdiag)
         CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + Kfac * FSkin(CompId) % hist(sInd)
+        ! Kfac*SigmaRef = gres SigmaRef^2/sigma_dc is the DC resistance weight of
+        ! this piece, which turns the strand dofs into a dissipation.
+        FSkin(CompId) % w(sInd) = FSkin(CompId) % w(sInd) + Kfac * Comp % SigmaRef
       ELSE
         CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac)
       END IF
@@ -3995,12 +4041,15 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
    IF (Transient .AND. fskin_allocated) THEN
      BLOCK
        INTEGER :: ci, kc, js, vvid, bdf, nce, nse, idx
-       LOGICAL :: gotid
+       LOGICAL :: gotid, gotp, anyskin
        TYPE(ValueList_t), POINTER :: CPar
        REAL(KIND=dp), ALLOCATABLE :: ynew(:)
+       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pexcess, Pprox, Pedd
        bdf = FoilSkinBDFOrder()
+       Pstrand = 0._dp; Pexcess = 0._dp; anyskin = .FALSE.
        DO ci = 1, SIZE(FSkin)
          IF (.NOT. FSkin(ci) % Active) CYCLE
+         anyskin = .TRUE.
          CPar => CurrentModel % Components(ci) % Values
          IF (.NOT. ASSOCIATED(CPar)) CYCLE
          vvid = GetInteger(CPar, 'Circuit Voltage Variable Id', gotid)
@@ -4016,8 +4065,28 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
            END DO
          END DO
          CALL AdvanceFoilSkin(ci, ynew, dt, bdf)
+         CALL FoilSkinLoss(ci, Ptot, Pdc)
+         Pstrand = Pstrand + Ptot
+         Pexcess = Pexcess + (Ptot - Pdc)
          DEALLOCATE(ynew)
        END DO
+
+       ! The weights are partition-local sums, so the losses are too. Together
+       ! the two terms are the whole dissipation of a foil sheet block in
+       ! transient: the strand loss already contains the DC part, and the
+       ! proximity loss is the reluctivity ladder's, integrated by the AV
+       ! solver. They REPLACE 'res: Eddy current power' rather than adding to
+       ! it, because MagnetoDynamicsCalcFields does not produce a usable value
+       ! for this coil type in transient - it reconstructs J from the strand
+       ! dofs against the DC conductivity and overstates the loss by orders of
+       ! magnitude. TRAFOLO reads the transient Rac from this scalar.
+       IF (anyskin) THEN
+         Pstrand = ParallelReduction(Pstrand)
+         Pprox = GetConstReal(Model % Simulation, 'res: sheet proximity loss', gotp)
+         IF (.NOT. gotp) Pprox = 0._dp
+         CALL ListAddConstReal(Model % Simulation, 'res: sheet strand loss', Pstrand)
+         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', Pstrand + Pprox)
+       END IF
      END BLOCK
    END IF
 
