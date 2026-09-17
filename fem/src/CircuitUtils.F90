@@ -735,12 +735,240 @@ CONTAINS
     ! to the quadrature error of the elements cut by a strand interface. It is
     ! the sharpest check that the strand bookkeeping and the direction sign are
     ! right, and it is mesh independent.
-    WRITE(Message,'(A,F10.6,A,F10.6)') 'Foil sheet strand flux / (dAlpha dBeta): min ', &
+    WRITE(Message,'(A,F14.10,A,F14.10)') 'Foil sheet strand flux / (dAlpha dBeta): min ', &
         MINVAL(Comp % StrandWeight) * Comp % nCells * Comp % nSegments, &
         '  max ', MAXVAL(Comp % StrandWeight) * Comp % nCells * Comp % nSegments
     CALL Info('CheckFoilSheetStrands', Message, Level=5)
 !------------------------------------------------------------------------------
   END SUBROUTINE CheckFoilSheetStrands
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Volume of a sub tetrahedron relative to its parent. The sub tet is given by
+!> the barycentric coordinates of its four vertices in the parent, t(bary,vertex),
+!> so the parent itself has the identity and volume 1.
+!------------------------------------------------------------------------------
+  FUNCTION TetVolumeFraction(t) RESULT(vol)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: t(4,4), vol
+    REAL(KIND=dp) :: d1(3), d2(3), d3(3)
+
+    d1 = t(2:4,2) - t(2:4,1)
+    d2 = t(2:4,3) - t(2:4,1)
+    d3 = t(2:4,4) - t(2:4,1)
+    vol = ABS( d1(1)*(d2(2)*d3(3) - d2(3)*d3(2)) &
+             - d1(2)*(d2(1)*d3(3) - d2(3)*d3(1)) &
+             + d1(3)*(d2(1)*d3(2) - d2(2)*d3(1)) )
+!------------------------------------------------------------------------------
+  END FUNCTION TetVolumeFraction
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Clip a list of sub tetrahedra of a common parent by the half space f >= 0,
+!> where f is affine on the parent and given by its four nodal values fNod.
+!> A tet cut by a plane leaves a tet (one vertex inside), a wedge (three inside)
+!> or a wedge (two inside); a wedge splits into three tets, so the result is
+!> again a list of tets and the recursion over several planes stays closed.
+!> Vertices are carried as barycentric coordinates of the parent, which keeps
+!> the cut exact and lets every integrand be evaluated from the parent basis.
+!> A plane through a vertex or an edge produces zero volume pieces, which are
+!> kept here and dropped by the caller on their volume.
+!------------------------------------------------------------------------------
+  SUBROUTINE ClipTetsByHalfSpace(tets, ntet, fNod, MaxTet)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: ntet, MaxTet
+    REAL(KIND=dp) :: tets(4,4,MaxTet), fNod(4)
+
+    REAL(KIND=dp) :: out(4,4,MaxTet), fv(4), tt, a(4,3), b(4,3)
+    INTEGER :: i, v, nout, nin, ins(4), outs(4), nio, noo, p, q, r, s
+
+    nout = 0
+    DO i = 1, ntet
+      DO v = 1, 4
+        fv(v) = SUM( tets(1:4,v,i) * fNod(1:4) )
+      END DO
+
+      nio = 0; noo = 0
+      DO v = 1, 4
+        IF (fv(v) >= 0._dp) THEN
+          nio = nio + 1; ins(nio) = v
+        ELSE
+          noo = noo + 1; outs(noo) = v
+        END IF
+      END DO
+      nin = nio
+
+      SELECT CASE(nin)
+
+      CASE(0)
+        CYCLE
+
+      CASE(4)
+        nout = nout + 1
+        IF (nout > MaxTet) CALL Fatal('ClipTetsByHalfSpace','Too many pieces!')
+        out(:,:,nout) = tets(:,:,i)
+
+      CASE(1)
+        ! One vertex inside: a single corner tet.
+        p = ins(1)
+        nout = nout + 1
+        IF (nout > MaxTet) CALL Fatal('ClipTetsByHalfSpace','Too many pieces!')
+        out(:,1,nout) = tets(:,p,i)
+        DO v = 1, 3
+          q = outs(v)
+          tt = fv(p) / (fv(p) - fv(q))
+          out(:,v+1,nout) = (1._dp - tt) * tets(:,p,i) + tt * tets(:,q,i)
+        END DO
+
+      CASE(3)
+        ! Three vertices inside: the tet minus the corner at the outside vertex,
+        ! i.e. a wedge between the inside triangle and its cut image.
+        s = outs(1)
+        DO v = 1, 3
+          p = ins(v)
+          a(:,v) = tets(:,p,i)
+          tt = fv(p) / (fv(p) - fv(s))
+          b(:,v) = (1._dp - tt) * tets(:,p,i) + tt * tets(:,s,i)
+        END DO
+        CALL EmitWedge(out, nout, MaxTet, a, b)
+
+      CASE(2)
+        ! Two vertices inside: a wedge whose triangular ends sit at the two
+        ! inside vertices.
+        p = ins(1); q = ins(2)
+        r = outs(1); s = outs(2)
+        a(:,1) = tets(:,p,i)
+        tt = fv(p) / (fv(p) - fv(r))
+        a(:,2) = (1._dp - tt) * tets(:,p,i) + tt * tets(:,r,i)
+        tt = fv(p) / (fv(p) - fv(s))
+        a(:,3) = (1._dp - tt) * tets(:,p,i) + tt * tets(:,s,i)
+        b(:,1) = tets(:,q,i)
+        tt = fv(q) / (fv(q) - fv(r))
+        b(:,2) = (1._dp - tt) * tets(:,q,i) + tt * tets(:,r,i)
+        tt = fv(q) / (fv(q) - fv(s))
+        b(:,3) = (1._dp - tt) * tets(:,q,i) + tt * tets(:,s,i)
+        CALL EmitWedge(out, nout, MaxTet, a, b)
+
+      END SELECT
+    END DO
+
+    ntet = nout
+    IF (nout > 0) tets(:,:,1:nout) = out(:,:,1:nout)
+!------------------------------------------------------------------------------
+  END SUBROUTINE ClipTetsByHalfSpace
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Split a triangular wedge with ends a(:,1:3) and b(:,1:3), vertex v of one end
+!> matching vertex v of the other, into three tetrahedra.
+!------------------------------------------------------------------------------
+  SUBROUTINE EmitWedge(out, nout, MaxTet, a, b)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nout, MaxTet
+    REAL(KIND=dp) :: out(4,4,MaxTet), a(4,3), b(4,3)
+
+    IF (nout + 3 > MaxTet) CALL Fatal('EmitWedge','Too many pieces!')
+
+    nout = nout + 1
+    out(:,1,nout) = a(:,1); out(:,2,nout) = a(:,2)
+    out(:,3,nout) = a(:,3); out(:,4,nout) = b(:,3)
+
+    nout = nout + 1
+    out(:,1,nout) = a(:,1); out(:,2,nout) = a(:,2)
+    out(:,3,nout) = b(:,3); out(:,4,nout) = b(:,2)
+
+    nout = nout + 1
+    out(:,1,nout) = a(:,1); out(:,2,nout) = b(:,2)
+    out(:,3,nout) = b(:,3); out(:,4,nout) = b(:,1)
+!------------------------------------------------------------------------------
+  END SUBROUTINE EmitWedge
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Exact decomposition of a linear tetrahedron into its foil sheet strand
+!> pieces. Alpha and Beta are linear inside the tet, so the part of the tet that
+!> belongs to strand (k,j) is the convex polytope cut out by
+!>    alpha_k <= Alpha <= alpha_(k+1),  beta_j <= Beta <= beta_(j+1),
+!> obtained here by clipping against the at most four planes that cross the
+!> element. One piece is returned per strand: its volume fraction of the parent
+!> and the barycentric coordinates of its centroid. Every strand integrand of
+!> the foil sheet kernel is affine on the parent tet - t is constant, the nodal
+!> gradients are constant, the Whitney edge basis is linear - so the value at
+!> the centroid times the volume integrates it exactly, and no quadrature error
+!> is left in the strand volume fractions.
+!>
+!> The outermost cells are open ended on purpose, matching the clamping in
+!> FoilSheetStrand, so nodes that fall slightly outside [0,1] still belong to
+!> the first or last strand instead of being dropped.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetPieces(nCells, nSegments, aNod, bNod, nPiece, pCell, pSeg, pVol, pBary)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSegments, nPiece, pCell(:), pSeg(:)
+    REAL(KIND=dp) :: aNod(4), bNod(4), pVol(:), pBary(:,:)
+
+    INTEGER, PARAMETER :: MaxTet = 96
+    REAL(KIND=dp) :: tets(4,4,MaxTet), da, db, vol, vtot, ctot(4), plane(4)
+    INTEGER :: k, j, kmin, kmax, jmin, jmax, i, v, ntet
+
+    da = 1._dp / nCells
+    db = 1._dp / nSegments
+
+    CALL FoilSheetStrand(nCells, nSegments, MINVAL(aNod), MINVAL(bNod), kmin, jmin)
+    CALL FoilSheetStrand(nCells, nSegments, MAXVAL(aNod), MAXVAL(bNod), kmax, jmax)
+
+    nPiece = 0
+    DO k = kmin, kmax
+      DO j = jmin, jmax
+
+        ntet = 1
+        tets(:,:,1) = 0._dp
+        DO v = 1, 4
+          tets(v,v,1) = 1._dp
+        END DO
+
+        IF (k > 1) THEN
+          plane = aNod - REAL(k-1,dp) * da
+          CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+        END IF
+        IF (ntet > 0 .AND. k < nCells) THEN
+          plane = REAL(k,dp) * da - aNod
+          CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+        END IF
+        IF (ntet > 0 .AND. j > 1) THEN
+          plane = bNod - REAL(j-1,dp) * db
+          CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+        END IF
+        IF (ntet > 0 .AND. j < nSegments) THEN
+          plane = REAL(j,dp) * db - bNod
+          CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+        END IF
+        IF (ntet <= 0) CYCLE
+
+        vtot = 0._dp
+        ctot = 0._dp
+        DO i = 1, ntet
+          vol = TetVolumeFraction(tets(:,:,i))
+          IF (vol <= 0._dp) CYCLE
+          vtot = vtot + vol
+          DO v = 1, 4
+            ctot = ctot + 0.25_dp * vol * tets(:,v,i)
+          END DO
+        END DO
+        IF (vtot <= 1.0d-14) CYCLE
+
+        nPiece = nPiece + 1
+        pCell(nPiece) = k
+        pSeg(nPiece)  = j
+        pVol(nPiece)  = vtot
+        pBary(:,nPiece) = ctot / vtot
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetPieces
 !------------------------------------------------------------------------------
 
 END MODULE CircuitUtils
@@ -2109,13 +2337,47 @@ END FUNCTION isComponentName
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sAlpha(:), sBeta(:), Wloc(:)
+    REAL(KIND=dp), ALLOCATABLE :: dNode(:), aNode(:)
+    LOGICAL, ALLOCATABLE :: inBlk(:), skipn(:)
     REAL(KIND=dp) :: detJ, gw(3), tv(3), flux, sgn
-    INTEGER :: e, n, gp, nmax
+    INTEGER :: e, n, gp, nmax, nno, i, v, gnode, ind, nPiece
+    INTEGER :: pCell(64), pSeg(64)
+    REAL(KIND=dp) :: pVol(64), pBary(4,64), volerr, dmax, amax, cval, contr, Vpar
+    TYPE(Mesh_t), POINTER :: Mesh
     LOGICAL :: stat
 
-    nmax = CurrentModel % Mesh % MaxElementNodes
+    Mesh => CurrentModel % Mesh
+    nmax = Mesh % MaxElementNodes
+    nno = Mesh % NumberOfNodes
     ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sAlpha(nmax), sBeta(nmax), Wloc(nmax))
+    ALLOCATE(dNode(nno), aNode(nno), inBlk(nno), skipn(nno))
+    dNode = 0._dp; aNode = 0._dp; inBlk = .FALSE.; skipn = .FALSE.
     flux = 0._dp
+    volerr = 0._dp
+
+    ! A node is interior to the coil block when every element that carries its
+    ! basis function is a block element, it is not on a mesh boundary, and it is
+    ! not shared with another partition. Only there must the discrete divergence
+    ! of the strand source vanish; on the electrodes and the block surface it
+    ! carries the terminal current and is nonzero by design.
+    DO e = 1, Mesh % NumberOfBulkElements
+      Element => Mesh % Elements(e)
+      n = Element % TYPE % NumberOfNodes
+      IF (ASSOCIATED(GetComponentParams(Element), CompParams)) THEN
+        inBlk(Element % NodeIndexes(1:n)) = .TRUE.
+      ELSE
+        skipn(Element % NodeIndexes(1:n)) = .TRUE.
+      END IF
+    END DO
+    DO e = Mesh % NumberOfBulkElements + 1, &
+           Mesh % NumberOfBulkElements + Mesh % NumberOfBoundaryElements
+      Element => Mesh % Elements(e)
+      n = Element % TYPE % NumberOfNodes
+      skipn(Element % NodeIndexes(1:n)) = .TRUE.
+    END DO
+    IF (ASSOCIATED(Mesh % ParallelInfo % GInterface)) THEN
+      WHERE (Mesh % ParallelInfo % GInterface(1:nno)) skipn = .TRUE.
+    END IF
 
     DO e = 1, GetNOFActive()
       Element => GetActiveElement(e)
@@ -2132,7 +2394,40 @@ END FUNCTION isComponentName
         tv = FoilSheetDirection(sAlpha, sBeta, dBasisdx, n, 1._dp)
         flux = flux + IP % s(gp) * detJ * SUM(gw*tv)
       END DO
+
+      ! Clipping checks (a) and (c): the pieces must fill the element exactly,
+      ! and a strand-wise constant source built on them must have zero discrete
+      ! divergence at every interior node, for an arbitrary set of strand
+      ! currents. The currents are a fixed function of the strand index so that
+      ! every partition uses the same ones.
+      IF (n /= 4 .OR. Element % TYPE % ElementCode /= 504) CYCLE
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sAlpha(1:4), sBeta(1:4), &
+          nPiece, pCell, pSeg, pVol, pBary)
+      volerr = MAX(volerr, ABS(SUM(pVol(1:nPiece)) - 1._dp))
+      stat = ElementInfo(Element, Nodes, 0.25_dp, 0.25_dp, 0.25_dp, detJ, Basis, dBasisdx)
+      tv = FoilSheetDirection(sAlpha, sBeta, dBasisdx, n, 1._dp)
+      Vpar = detJ / 6._dp
+      DO i = 1, nPiece
+        ind = (pCell(i)-1) * Comp % nSegments + pSeg(i)
+        cval = SIN(1.234_dp*ind) + 0.5_dp*COS(2.345_dp*ind)
+        DO v = 1, 4
+          gnode = Element % NodeIndexes(v)
+          contr = cval * SUM(tv*dBasisdx(v,:)) * pVol(i) * Vpar
+          dNode(gnode) = dNode(gnode) + contr
+          aNode(gnode) = aNode(gnode) + ABS(contr)
+        END DO
+      END DO
     END DO
+
+    dmax = 0._dp; amax = 0._dp
+    DO i = 1, nno
+      IF (.NOT. inBlk(i) .OR. skipn(i)) CYCLE
+      dmax = MAX(dmax, ABS(dNode(i)))
+      amax = MAX(amax, aNode(i))
+    END DO
+    dmax = ParallelReduction(dmax, 2)
+    amax = ParallelReduction(amax, 2)
+    volerr = ParallelReduction(volerr, 2)
 
     flux = ParallelReduction(flux)
     sgn = 1._dp
@@ -2140,9 +2435,16 @@ END FUNCTION isComponentName
     CALL ListAddConstReal(CompParams, 'Foil Sheet Direction Sign', sgn)
     WRITE(Message,'(A,F5.1,A,ES12.5)') 'Foil sheet strand direction sign ', sgn, &
         ', int gradW . (gA x gB) = ', flux
-    CALL Info('Circuits_Init', Message, Level=6)
+    CALL Info('Circuits_Init', Message, Level=5)
 
-    DEALLOCATE(Basis, dBasisdx, sAlpha, sBeta, Wloc)
+    WRITE(Message,'(A,ES10.3)') 'Foil sheet clipping, max |sum(piece vol)/V - 1| over block: ', volerr
+    CALL Info('Circuits_Init', Message, Level=5)
+    WRITE(Message,'(A,ES10.3,A,ES10.3,A,ES10.3)') &
+        'Foil sheet source divergence at interior nodes: max ', dmax, &
+        ' of scale ', amax, ', relative ', dmax / MAX(amax, TINY(amax))
+    CALL Info('Circuits_Init', Message, Level=5)
+
+    DEALLOCATE(Basis, dBasisdx, sAlpha, sBeta, Wloc, dNode, aNode, inBlk, skipn)
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeFoilSheetSign
 !------------------------------------------------------------------------------
