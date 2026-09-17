@@ -914,7 +914,7 @@ CONTAINS
             END IF
          CASE ('massive')
             CoilBody = .TRUE.
-         CASE ('foil winding','flat wire')
+         CASE ('foil winding','flat wire','foil sheet')
             CoilBody = .TRUE.
             CALL GetElementRotM(Element, RotM, n)
          CASE DEFAULT
@@ -2641,6 +2641,10 @@ END SUBROUTINE LocalConstraintMatrix
            ! mass matrix (anisotropy taken into account)
            ! This is not used in the case of stranded coil:
            ! ----------------------------------------------
+           ! A foil sheet block carries no physical volumetric eddy current
+           ! either, but its C is the small 'Sheet Regularization' tensor of
+           ! FoilSheetConductivity, which has to stay in to keep the curl-curl
+           ! operator of the block regular.
            IF(ElectroDynamics) THEN
              MASS(p,q) = MASS(p,q) + P_ip*SUM(WBasis(j,:)*WBasis(i,:) )*detJ*IP % s(t)
              IF (CoilType /= 'stranded') THEN

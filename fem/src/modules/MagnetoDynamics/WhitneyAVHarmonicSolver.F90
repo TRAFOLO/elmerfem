@@ -487,7 +487,7 @@ CONTAINS
               END IF
            CASE ('massive')
               CoilBody = .TRUE.
-           CASE ('foil winding','flat wire')
+           CASE ('foil winding','flat wire','foil sheet')
               CoilBody = .TRUE.
               CALL GetElementRotM(Element, RotM, n)
            CASE DEFAULT
@@ -1328,7 +1328,9 @@ END BLOCK
     StrandedHomogenization = .FALSE.
     UseRotM = .FALSE.
     IF(CoilBody) THEN
-      IF (CoilType == 'stranded') THEN 
+      ! 'foil sheet' uses the same homogenized complex reluctivity as 'stranded':
+      ! Nu 11 normal to the foils, Nu 22 / Nu 33 in the foil plane.
+      IF (CoilType == 'stranded' .OR. CoilType == 'foil sheet') THEN
         CompParams => GetComponentParams( Element )
         StrandedHomogenization = GetLogical(CompParams, 'Homogenization Model', Found)
 
@@ -1356,6 +1358,7 @@ END BLOCK
 
           UseRotM = .TRUE.
         END IF
+        IF (CoilType == 'foil sheet') UseRotM = .TRUE.
       ELSE IF( CoilType == 'foil winding' .OR. CoilType == 'flat wire') THEN
         UseRotM = .TRUE.
       END IF
@@ -1591,6 +1594,10 @@ END BLOCK
            ! Compute the conductivity term <j * omega * C A,eta> 
            ! for stiffness matrix (anisotropy taken into account)
            ! ----------------------------------------------------
+           ! A foil sheet block carries no physical volumetric eddy current
+           ! either, but its C is the small 'Sheet Regularization' tensor of
+           ! FoilSheetConductivity, which has to stay in to keep the curl-curl
+           ! operator of the block regular.
            IF (CoilType /= 'stranded') DAMP(p,q) = DAMP(p,q) + &
                 SUM(MATMUL(C, WBasis(j,:))*WBasis(i,:))*detJ*IP % s(t)
 

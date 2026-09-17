@@ -611,6 +611,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), beta(:), NF_ip(:,:)
    INTEGER :: FwStack, FwAcross
    LOGICAL :: FwStackAlongAlpha
+   INTEGER :: FsCells, FsSegments, FsK, FsJ, FsDof
+   REAL(KIND=dp) :: FsSigmaRef
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: R_Z(:), PR(:)
@@ -1033,7 +1035,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    END IF
 
    HomogenizationLoss = ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL)
-   IF (HomogenizationLoss) ALLOCATE( Nu_el(3,3,n) )
+   ALLOCATE( Nu_el(3,3,n) )   ! also used by the foil sheet homogenization
 
    VtuStyle = .FALSE.
    cdofs = 1
@@ -1342,9 +1344,68 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            Tcoef(1:3,1:3,k) = MATMUL(MATMUL(RotM(1:3,1:3,k), Tcoef(1:3,1:3,k)), TRANSPOSE(RotM(1:3,1:3,k)))
          END DO
 
+       CASE ('foil sheet')
+         IF (dim /= 3) CALL Fatal(Caller,'Foil sheet is implemented only in 3D!')
+         CALL GetElementRotM(Element, RotM, n)
+         VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Circuit Voltage Variable Id not found!')
+         FsCells = GetInteger(CompParams, 'Foil Sheet Cells', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Cells not found!')
+         FsSegments = GetInteger(CompParams, 'Foil Sheet Segments', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Segments not found!')
+         FsSigmaRef = GetConstReal(CompParams, 'Foil Sheet Sigma Ref', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Sigma Ref not found!')
+         CALL GetFlatWireLocalFields(.TRUE., Element, n, alpha, beta)
+
+         ! The block has no volumetric conductivity: the strand current density
+         ! c_kj*grad(W) flows with the complex SHEET conductivity, so give the
+         ! post processing an isotropic sigma_s and build E = -c_kj gradW/sigma_s
+         ! below. The Joule density is then |J|^2 Re(1/sigma_s), as it should be.
+         HomogenizationModel = GetLogical(CompParams, 'Homogenization Model', Found)
+         BLOCK
+           REAL(KIND=dp) :: sigma_33(n), sigmaim_33(n)
+           sigma_33 = GetReal(CompParams, 'sigma 33', Found)
+           IF ( .NOT. Found ) sigma_33 = 0._dp
+           sigmaim_33 = GetReal(CompParams, 'sigma 33 im', FoundIm)
+           IF ( .NOT. FoundIm ) sigmaim_33 = 0._dp
+           IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: Sigma 33 not found!')
+           Tcoef = CMPLX(0._dp, 0._dp, KIND=dp)
+           Tcoef(1,1,1:n) = CMPLX(sigma_33, sigmaim_33, KIND=dp)
+           Tcoef(2,2,1:n) = Tcoef(1,1,1:n)
+           Tcoef(3,3,1:n) = Tcoef(1,1,1:n)
+         END BLOCK
+
+         IF (HomogenizationModel) THEN
+           BLOCK
+             REAL(KIND=dp) :: nu_11(n), nuim_11(n), nu_22(n), nuim_22(n), nu_33(n), nuim_33(n)
+             nu_11 = GetReal(CompParams, 'nu 11', Found)
+             nuim_11 = GetReal(CompParams, 'nu 11 im', FoundIm)
+             IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: nu 11 not found!')
+             IF ( .NOT. Found ) nu_11 = 0._dp
+             IF ( .NOT. FoundIm ) nuim_11 = 0._dp
+             nu_22 = GetReal(CompParams, 'nu 22', Found)
+             nuim_22 = GetReal(CompParams, 'nu 22 im', FoundIm)
+             IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: nu 22 not found!')
+             IF ( .NOT. Found ) nu_22 = 0._dp
+             IF ( .NOT. FoundIm ) nuim_22 = 0._dp
+             nu_33 = GetReal(CompParams, 'nu 33', Found)
+             nuim_33 = GetReal(CompParams, 'nu 33 im', FoundIm)
+             IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: nu 33 not found!')
+             IF ( .NOT. Found ) nu_33 = 0._dp
+             IF ( .NOT. FoundIm ) nuim_33 = 0._dp
+             Nu_el = CMPLX(0.0d0, 0.0d0, kind=dp)
+             Nu_el(1,1,1:n) = nu_11(1:n) + im * nuim_11(1:n)
+             Nu_el(2,2,1:n) = nu_22(1:n) + im * nuim_22(1:n)
+             Nu_el(3,3,1:n) = nu_33(1:n) + im * nuim_33(1:n)
+             DO k = 1,n
+               Nu_el(1:3,1:3,k) = MATMUL(MATMUL(RotM(1:3,1:3,k), Nu_el(1:3,1:3,k)), TRANSPOSE(RotM(1:3,1:3,k)))
+             END DO
+           END BLOCK
+         END IF
+
        CASE ('foil winding')
          CALL GetLocalSolution(alpha,'Alpha')
-         
+
          IF (dim == 3) CALL GetElementRotM(Element, RotM, n)
 
          VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
@@ -1517,7 +1578,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        END IF
        
        IF (vDOFs > 1) THEN   ! Complex case (harmonic case)
-         IF (CoilType /= 'stranded') THEN
+         IF (CoilType /= 'stranded' .AND. CoilType /= 'foil sheet') THEN
            ! -j * Omega A
            SELECT CASE(dim)
            CASE(2)
@@ -1582,8 +1643,29 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            E(1,:) = E(1,:)-localV(1) * wvec
            E(2,:) = E(2,:)-localV(2) * wvec
 
+         CASE ('foil sheet')
+           CALL FoilSheetStrand(FsCells, FsSegments, &
+               SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
+           FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+           IF (CoilUseWvec) THEN
+             wvec = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
+           ELSE
+             wvec = MATMUL(Wbase(1:np), dBasisdx(1:np,:))
+           END IF
+           wvec = MATMUL(FoilSheetProjector(RotM, Basis, n), wvec)
+           ! J = -SigmaRef y_kj t (the circuit sign convention of the flat wire
+           ! and foil winding kernels), so E = J/sigma_s.
+           IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
+             imag_value = LagrangeVar % Values(VvarId+FsDof) + im * LagrangeVar % Values(VvarId+FsDof+1)
+             imag_value = -FsSigmaRef * imag_value / CMat_ip(3,3)
+             E(1,:) = E(1,:) + REAL(imag_value) * wvec
+             E(2,:) = E(2,:) + AIMAG(imag_value) * wvec
+           END IF
+           localV(1) = LagrangeVar % Values(VvarId+2*FsK) * CircEqVoltageFactor
+           localV(2) = LagrangeVar % Values(VvarId+2*FsK+1) * CircEqVoltageFactor
+
          CASE ('foil winding')
-           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 
+           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np))
            DO k = 1, VvarDofs-1
              Reindex = 2*k
              Imindex = Reindex+1
@@ -1708,8 +1790,17 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            localV(1) = LagrangeVar % Values(VvarId+k) * CircEqVoltageFactor
            E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
 
+         CASE ('foil sheet')
+           CALL FoilSheetStrand(FsCells, FsSegments, &
+               SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
+           FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+           wvec = MATMUL(FoilSheetProjector(RotM, Basis, n), MATMUL(Wbase(1:np), dBasisdx(1:np,:)))
+           IF (REAL(CMat_ip(3,3)) /= 0._dp) &
+               E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec
+           localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
+
          CASE ('foil winding')
-           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 
+           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np))
            DO k = 1, VvarDofs-1
              localV(1) = localV(1) + LagrangeVar % Values(VvarId+k) * localAlpha**(k-1) * CircEqVoltageFactor
            END DO
@@ -1804,12 +1895,23 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              GaussPoint = j, Rdim=mudim, Rtensor=MuTensor, DummyVals = B(1,:) )             
          Nu(1:3,1:3) = muTensor(1:3,1:3)                           
          w_dens = 0.5*SUM(B(1,:)*MATMUL(REAL(Nu), B(1,:)))
-       ELSE IF (HomogenizationLoss .AND. CoilType == 'stranded' .and. HomogenizationModel) THEN
+       ELSE IF ((HomogenizationLoss .AND. CoilType == 'stranded' .AND. HomogenizationModel) .OR. &
+                (CoilType == 'foil sheet' .AND. HomogenizationModel .AND. .NOT. RealField)) THEN
          DO k=1,3
            DO l=1,3
              Nu(k,l) = SUM( Nu_el(k,l,1:n) * Basis(1:n) )
            END DO
          END DO
+         IF (CoilType == 'foil sheet') THEN
+           ! The homogenized block still stores magnetic energy; without this the
+           ! coil would drop out of 'res: Magnetic Field Energy' (and hence L).
+           IF (RealField) THEN
+             w_dens = 0.5*SUM(B(1,:)*MATMUL(REAL(Nu), B(1,:)))
+           ELSE
+             w_dens = 0.5*( SUM(MATMUL(REAL(Nu), B(1,:)) * B(1,:)) + &
+                 SUM(MATMUL(REAL(Nu), B(2,:)) * B(2,:)) )
+           END IF
+         END IF
        ELSE
          IF (HasTensorReluctivity) THEN
            IF (SIZE(Reluct_Z,2) == 1) THEN
@@ -2193,7 +2295,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END IF
          END IF
 
-         IF ( HomogenizationLoss .AND. CoilType == 'stranded' .and. HomogenizationModel) THEN
+         IF ( (HomogenizationLoss .AND. CoilType == 'stranded' .AND. HomogenizationModel) .OR. &
+              (CoilType == 'foil sheet' .AND. HomogenizationModel .AND. .NOT. RealField) ) THEN
            ! homogenization loss should be real part of im omega b . conj(h)/2
            BLOCK
              COMPLEX(KIND=dp) :: Bloc(3)=0._dp
@@ -2203,6 +2306,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              Hloc = MATMUL(Nu(1:3, 1:3), Bloc)
              Coeff = s * Basis(p) * REAL(im * Omega * SUM(Bloc * CONJG(Hloc))/2._dp)
            END BLOCK
+
+           ! For a foil sheet the Im(Nu) loss is the intra-foil proximity loss of
+           ! the winding: it belongs to 'res: Eddy current power' together with
+           ! the sheet Joule loss, or Re(V/I) and 4P/|I|^2 would disagree.
+           IF (CoilType == 'foil sheet') Power = Power + Coeff
 
            IF ( ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL) ) THEN
              FORCE(p,k+1) = FORCE(p,k+1) + Coeff
@@ -3539,7 +3647,7 @@ CONTAINS
     
     DEALLOCATE( LeftFORCE, RightFORCE, RightMap, LeftMap, AirGapForce )
 
-    IF (HomogenizationLoss) DEALLOCATE (Nu_el)
+    DEALLOCATE (Nu_el)
 !-------------------------------------------------------------------
   END SUBROUTINE CalcBoundaryModels
 !-------------------------------------------------------------------
