@@ -637,7 +637,16 @@ CONTAINS
 !> absorb it, so the curl-curl operator there is singular and the coupled solve
 !> stagnates. The cleaning gives the block its nodal scalar potential v and lets
 !> it carry the redistribution current C*grad(v) that the segments cannot
-!> represent. Default on.
+!> represent.
+!>
+!> Default OFF. It fixes the convergence (1 kHz and 10 kHz reach 1e-9 in 250 and
+!> 303 iterations instead of stagnating around 1e-6), but on the F-G1 acceptance
+!> case it drives large circulating strand currents: the field loss 4P/|I|^2 goes
+!> to 1.61 and 2.99 times the FEMM value at 10 and 100 kHz while the terminal
+!> Re(V/I) stays at 1.04 times it, i.e. the discrete energy balance breaks. See
+!> the E1 report; the nodal pair couples as -1/SigmaRef where the edge pair
+!> couples as -i*omega/SigmaRef, so the exact transposition of the strand rows is
+!> lost. Resolving that is E2 work.
 !------------------------------------------------------------------------------
   FUNCTION FoilSheetCleaning(CompParams) RESULT(on)
 !------------------------------------------------------------------------------
@@ -645,10 +654,10 @@ CONTAINS
     TYPE(ValueList_t), POINTER :: CompParams
     LOGICAL :: on, Found
 
-    on = .TRUE.
+    on = .FALSE.
     IF (.NOT. ASSOCIATED(CompParams)) RETURN
     on = GetLogical(CompParams, 'Sheet Divergence Cleaning', Found)
-    IF (.NOT. Found) on = .TRUE.
+    IF (.NOT. Found) on = .FALSE.
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetCleaning
 !------------------------------------------------------------------------------
