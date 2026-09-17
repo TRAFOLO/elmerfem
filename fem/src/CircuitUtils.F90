@@ -729,6 +729,16 @@ CONTAINS
       CALL Fatal('CheckFoilSheetStrands', &
           'Lower "Sheet Cells" / "Sheet Segments" or refine the coil mesh!')
     END IF
+
+    ! With the Euler potential direction the strand flux is exactly
+    ! Delta(alpha_k)*Delta(beta_j) = 1/(nCells*nSegments), so this ratio is 1 up
+    ! to the quadrature error of the elements cut by a strand interface. It is
+    ! the sharpest check that the strand bookkeeping and the direction sign are
+    ! right, and it is mesh independent.
+    WRITE(Message,'(A,F10.6,A,F10.6)') 'Foil sheet strand flux / (dAlpha dBeta): min ', &
+        MINVAL(Comp % StrandWeight) * Comp % nCells * Comp % nSegments, &
+        '  max ', MAXVAL(Comp % StrandWeight) * Comp % nCells * Comp % nSegments
+    CALL Info('CheckFoilSheetStrands', Message, Level=5)
 !------------------------------------------------------------------------------
   END SUBROUTINE CheckFoilSheetStrands
 !------------------------------------------------------------------------------

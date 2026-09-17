@@ -1434,7 +1434,7 @@ CONTAINS
     ! divergence of the source - carry a quadrature error. 'Sheet Integration
     ! Points' asks for a richer rule in the coil body.
     ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
-    IF (.NOT. Found) ngp = 0
+    IF (.NOT. Found) ngp = 64
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
 
@@ -3081,7 +3081,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     ! divergence of the source - carry a quadrature error. 'Sheet Integration
     ! Points' asks for a richer rule in the coil body.
     ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
-    IF (.NOT. Found) ngp = 0
+    IF (.NOT. Found) ngp = 64
     ncdofs = nd - nn
 
     vvarId = Comp % vvar % ValueId
