@@ -2514,8 +2514,15 @@ END FUNCTION isComponentName
         CALL ListAddConstRealArray(CompParams, 'Nu 22 Taus', nlad, 1, arr(1:nlad,1:1))
         CALL ListAddConstRealArray(CompParams, 'Nu 33 Taus', nlad, 1, arr(1:nlad,1:1))
 
-        WRITE(Message,'(A,I0,A,ES13.6)') 'Foil sheet Nu ladder: order ', nlad, &
-            ', nu_inf = ', nuinf
+        ! Post processing still wants a plain reluctivity; give it the DC value
+        ! of the same ladder, nu(0) = nu_inf + sum r_k, which for a non magnetic
+        ! foil is 1/mu0 whatever the fill factor.
+        CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp/mu0)
+        CALL ListAddConstReal(CompParams, 'Nu 22', nuinf + SUM(rr(1:nlad)))
+        CALL ListAddConstReal(CompParams, 'Nu 33', nuinf + SUM(rr(1:nlad)))
+
+        WRITE(Message,'(A,I0,A,ES13.6,A,ES13.6)') 'Foil sheet Nu ladder: order ', nlad, &
+            ', nu_inf = ', nuinf, ', nu(0) = ', nuinf + SUM(rr(1:nlad))
         CALL Info('Circuits_Init', Message, Level=5)
         DO nlk = 1, nlad
           WRITE(Message,'(A,I0,A,ES13.6,A,ES13.6,A)') '  pole ', nlk, ': r = ', rr(nlk), &

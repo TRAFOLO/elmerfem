@@ -2214,17 +2214,22 @@
                CONTINUE
                
              ELSE IF( Var % TYPE == Variable_on_elements ) THEN
+               ! A multi-component elemental field cannot be initialized from a
+               ! scalar initial condition. Only refuse when one was actually
+               ! asked for; merely having such a field is not an error, and
+               ! solvers do use them for per-element state vectors.
                IF( Var % DOFs > 1 ) THEN
-                 CALL Fatal('InitCond','Initialization only for scalar elements fields!')
+                 IF( ListCheckPresent( IC, Var % Name ) ) CALL Fatal('InitCond', &
+                     'Initialization only for scalar elements fields: '//TRIM(Var % Name))
+               ELSE
+                 Work(1:n) = GetReal( IC, Var % Name, GotIt )
+                 IF ( GotIt ) THEN
+                   k1 = Element % ElementIndex
+                   IF ( ASSOCIATED(Var % Perm) ) k1 = Var % Perm(k1)
+                   IF ( k1>0 ) Var % Values(k1) = SUM( Work(1:n) ) / n
+                 END IF
                END IF
-               
-               Work(1:n) = GetReal( IC, Var % Name, GotIt )
-               IF ( GotIt ) THEN
-                 k1 = Element % ElementIndex 
-                 IF ( ASSOCIATED(Var % Perm) ) k1 = Var % Perm(k1)
-                 IF ( k1>0 ) Var % Values(k1) = SUM( Work(1:n) ) / n
-               END IF               
-               
+
              ELSE IF( Var % TYPE == Variable_on_gauss_points ) THEN
                ! We do this elsewhere in a more efficient manner
                CONTINUE
