@@ -326,18 +326,6 @@ CONTAINS
                                              y0_sigma(i), alpha_sigma(i), SigmaMat)
       sigma_sigma(i)     = SigmaMat(1, 1)
       has_skin_ladder(i) = .TRUE.
-
-      ! G_skin is used as an instantaneous conductivity inside a reciprocal,
-      ! R = N_j^2 int w.w / G_skin, but the Foster form it comes from is a sum
-      ! in the CONDUCTANCE. The two agree only when the ladder has no pole. With
-      ! a pole the model also needs the history term v_hist_coeff * xi_S, and
-      ! there is no consistent way to add a conductance history to a resistance
-      ! without solving for the current density, which the circuit form does not
-      ! do. Refuse rather than return a silently wrong answer; every shipped
-      ! case sets alpha = 0, so nothing in the suite is affected.
-      IF (ABS(alpha_sigma(i)) > 0._dp) CALL Fatal('InitSkinLadderState', &
-          'Transient stranded homogenization: a non-zero "Sigma 33 alpha" needs the '// &
-          'skin ladder history term, which is not implemented for the reciprocal form.')
     END DO
 
     state_allocated = .TRUE.
@@ -4092,12 +4080,9 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
          Current = crt(Comp % ivar % ValueId)
          IF ( Circuits(p) % Harmonic ) Current = Current + im * crt(Comp % ivar % ImValueId)
 
-         ! The skin ladder state is part of the model whenever the Sigma ladder
-         ! has a pole, so advance it here, where the component current of this
-         ! timestep is known. It used to be left frozen, which is invisible only
-         ! because every shipped case sets 'Sigma 33 alpha' to zero; see the
-         ! guard in InitSkinLadderState.
-         IF (Transient) CALL AdvanceXiS(Comp % ComponentId, REAL(Current, KIND=dp), dt)
+         ! Slice 2 (n=1 conductivity-form): nothing to advance per-step.
+         ! xi_S would only be needed for n>1 ladder OR an impedance-form fit;
+         ! see TransientHomogCircuitState comments and plan section 7.
 
          CompParams => CurrentModel % Components (Comp % ComponentId) % Values
          IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal ('CircuitsOutput', &
