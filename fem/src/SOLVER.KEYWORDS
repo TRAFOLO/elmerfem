@@ -1658,6 +1658,15 @@ Component:Real:      'Nu 22 Sigma'
 Component:Real:      'Sigma 33 y0'
 Component:Real:      'Sigma 33 alpha'
 Component:Real:      'Sigma 33 Sigma'
+! Foster form of the same ladders (DEV-1513 E2-B): y0 + sum_k r_k/(1 + s T_k).
+! Accepted alongside the alpha/Sigma triplet, which stays valid for order 1.
+Component:Real:      'Nu 33 y0'
+Component:Real:      'Nu 11 Residues'
+Component:Real:      'Nu 11 Taus'
+Component:Real:      'Nu 22 Residues'
+Component:Real:      'Nu 22 Taus'
+Component:Real:      'Nu 33 Residues'
+Component:Real:      'Nu 33 Taus'
 ! Nodal scalar potential of the AV solver inside a coil component. Required for
 ! DC / low-frequency foil and flat wire runs (auto-enabled at zero frequency).
 Component:Logical:   'Activate Constraint'

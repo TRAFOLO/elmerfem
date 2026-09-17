@@ -524,6 +524,183 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Foster form of a homogenisation ladder: y(s) = y0 + sum_k r_k/(1 + s T_k).
+!> Reads '<name> Residues(N)' and '<name> Taus(N)'. For N = 1 it also accepts the
+!> older triplet '<name> alpha' / '<name> Sigma(1,1)', which is the same thing
+!> with r_1 = alpha and T_1 = Sigma(1,1), so existing SIFs keep working bit for
+!> bit. '<name> y0' is required in both forms.
+!------------------------------------------------------------------------------
+  SUBROUTINE GetFosterLadder(CompParams, name, n_ladder, y0, res, taus)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    CHARACTER(*), INTENT(IN)   :: name
+    INTEGER, INTENT(IN)        :: n_ladder
+    REAL(KIND=dp), INTENT(OUT) :: y0
+    REAL(KIND=dp), INTENT(OUT) :: res(n_ladder), taus(n_ladder)
+
+    LOGICAL :: Found, FoundR, FoundT
+    INTEGER :: k, DummyNodeIdx(1)
+    REAL(KIND=dp), POINTER :: Hwrk(:,:,:)
+    REAL(KIND=dp) :: SigmaMat(1,1), alpha
+    CHARACTER(LEN=:), ALLOCATABLE :: key
+!------------------------------------------------------------------------------
+    IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal('GetFosterLadder', &
+        'Component parameters not associated when reading "' // TRIM(name) // '"')
+    IF (n_ladder < 1 .OR. n_ladder > 6) CALL Fatal('GetFosterLadder', &
+        'Homogenization Ladder Order must be between 1 and 6')
+
+    key = TRIM(name) // ' y0'
+    y0 = GetConstReal(CompParams, key, Found)
+    IF (.NOT. Found) CALL Fatal('GetFosterLadder', 'Missing keyword "' // key // '" on Component')
+
+    res  = 0._dp
+    taus = 1._dp
+
+    key = TRIM(name) // ' Residues'
+    Hwrk => NULL(); DummyNodeIdx = 1
+    CALL ListGetRealArray(CompParams, key, Hwrk, 1, DummyNodeIdx, FoundR)
+    IF (FoundR) THEN
+      IF (SIZE(Hwrk,1)*SIZE(Hwrk,2) /= n_ladder) CALL Fatal('GetFosterLadder', &
+          '"' // key // '" does not have Homogenization Ladder Order entries')
+      DO k = 1, n_ladder
+        IF (SIZE(Hwrk,1) >= k) THEN
+          res(k) = Hwrk(k,1,1)
+        ELSE
+          res(k) = Hwrk(1,k,1)
+        END IF
+      END DO
+      DEALLOCATE(Hwrk)
+    END IF
+
+    key = TRIM(name) // ' Taus'
+    Hwrk => NULL()
+    CALL ListGetRealArray(CompParams, key, Hwrk, 1, DummyNodeIdx, FoundT)
+    IF (FoundT) THEN
+      IF (SIZE(Hwrk,1)*SIZE(Hwrk,2) /= n_ladder) CALL Fatal('GetFosterLadder', &
+          '"' // key // '" does not have Homogenization Ladder Order entries')
+      DO k = 1, n_ladder
+        IF (SIZE(Hwrk,1) >= k) THEN
+          taus(k) = Hwrk(k,1,1)
+        ELSE
+          taus(k) = Hwrk(1,k,1)
+        END IF
+      END DO
+      DEALLOCATE(Hwrk)
+    END IF
+
+    IF (FoundR .AND. FoundT) RETURN
+
+    IF (n_ladder /= 1) CALL Fatal('GetFosterLadder', &
+        'Missing "' // TRIM(name) // ' Residues(N)" / "' // TRIM(name) // &
+        ' Taus(N)"; the alpha/Sigma triplet is only accepted for order 1')
+
+    ! Order 1 fallback: the original triplet.
+    CALL GetTransientHomogenizationLadder(CompParams, name, 1, y0, alpha, SigmaMat)
+    res(1)  = alpha
+    taus(1) = SigmaMat(1,1)
+!------------------------------------------------------------------------------
+  END SUBROUTINE GetFosterLadder
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Foster coefficients of the foil sheet in-plane reluctivity, computed from the
+!> physics instead of read from the SIF, so that harmonic and transient share one
+!> source of truth.
+!>
+!>   mu_e(s)/mu0 = (1-ff) + ff [ sum_{n<=N} c_n/(1+s tau_n) + tail ],
+!>   c_n = 2/((n-1/2)pi)^2,  tau_n = tau0/((n-1/2)pi)^2,  tail = 1 - sum c_n.
+!>
+!> The truncation remainder is folded into the constant so that mu_e is exact at
+!> DC; the price is that the s -> infinity "fully excluded" limit becomes
+!> approximate, which is outside the band of interest, exactly as for the tail
+!> inductance of the strand skin ladder. nu_e = 1/mu_e is then rational of
+!> degree N: its poles are the roots of the numerator of mu_e and its residues
+!> follow analytically, r_k = T_k D(s_k)/(mu0 Nm'(s_k)).
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetNuFoster(tau0, ff, n_ladder, nu_inf, res, taus)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN)  :: tau0, ff
+    INTEGER, INTENT(IN)        :: n_ladder
+    REAL(KIND=dp), INTENT(OUT) :: nu_inf, res(n_ladder), taus(n_ladder)
+
+    INTEGER, PARAMETER :: MAXN = 6
+    REAL(KIND=dp) :: c(MAXN), tau(MAXN), den(0:MAXN), num(0:MAXN), prod(0:MAXN)
+    REAL(KIND=dp) :: cmat(MAXN,MAXN), wr(MAXN), wi(MAXN), vdum(1,1), work(8*MAXN)
+    REAL(KIND=dp) :: mu0, cst, sk, dval, dnum, leadD, leadN
+    INTEGER :: n, k, i, j, info
+
+    IF (n_ladder < 1 .OR. n_ladder > MAXN) &
+        CALL Fatal('FoilSheetNuFoster','Ladder order must be between 1 and 6')
+    mu0 = 4.0d-7 * PI
+
+    DO n = 1, n_ladder
+      c(n)   = 2._dp / (((REAL(n,dp) - 0.5_dp)*PI)**2)
+      tau(n) = tau0  / (((REAL(n,dp) - 0.5_dp)*PI)**2)
+    END DO
+    cst = (1._dp - ff) + ff * (1._dp - SUM(c(1:n_ladder)))
+
+    ! den(s) = prod (1 + s tau_n), ascending coefficients.
+    den = 0._dp; den(0) = 1._dp
+    DO n = 1, n_ladder
+      DO i = n, 1, -1
+        den(i) = den(i) + tau(n)*den(i-1)
+      END DO
+    END DO
+
+    ! num(s) = cst*den + ff * sum_n c_n * prod_{m/=n} (1 + s tau_m)
+    num = cst * den
+    DO n = 1, n_ladder
+      prod = 0._dp; prod(0) = 1._dp
+      j = 0
+      DO i = 1, n_ladder
+        IF (i == n) CYCLE
+        j = j + 1
+        DO k = j, 1, -1
+          prod(k) = prod(k) + tau(i)*prod(k-1)
+        END DO
+      END DO
+      num(0:n_ladder) = num(0:n_ladder) + ff*c(n)*prod(0:n_ladder)
+    END DO
+
+    leadD = den(n_ladder)
+    leadN = num(n_ladder)
+    IF (ABS(leadN) <= 0._dp) CALL Fatal('FoilSheetNuFoster','Degenerate reluctivity polynomial')
+    nu_inf = (leadD/leadN)/mu0
+
+    ! Roots of num via the companion matrix of its monic form.
+    cmat = 0._dp
+    DO j = 1, n_ladder
+      cmat(1,j) = -num(n_ladder-j)/leadN
+    END DO
+    DO i = 2, n_ladder
+      cmat(i,i-1) = 1._dp
+    END DO
+    CALL DGEEV('N','N', n_ladder, cmat, MAXN, wr, wi, vdum, 1, vdum, 1, work, 8*MAXN, info)
+    IF (info /= 0) CALL Fatal('FoilSheetNuFoster','DGEEV failed on the reluctivity polynomial')
+
+    DO k = 1, n_ladder
+      IF (ABS(wi(k)) > 1.0d-8*MAX(ABS(wr(k)),1._dp)) &
+          CALL Fatal('FoilSheetNuFoster','Complex pole in the reluctivity ladder')
+      sk = wr(k)
+      IF (sk >= 0._dp) CALL Fatal('FoilSheetNuFoster','Non-negative pole in the reluctivity ladder')
+      taus(k) = -1._dp/sk
+      dval = 0._dp
+      DO i = n_ladder, 0, -1
+        dval = dval*sk + den(i)
+      END DO
+      dnum = 0._dp
+      DO i = n_ladder, 1, -1
+        dnum = dnum*sk + REAL(i,dp)*num(i)
+      END DO
+      res(k) = taus(k) * dval / (mu0 * dnum)
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetNuFoster
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
   FUNCTION FindSolverWithKey(key) RESULT (Solver)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
@@ -2282,6 +2459,8 @@ END FUNCTION isComponentName
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
     REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, omega, mu0
+    REAL(KIND=dp) :: nuinf, rr(6), tt(6), arr(6,1)
+    INTEGER :: nlad, nlk
     COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
     LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
@@ -2312,6 +2491,38 @@ END FUNCTION isComponentName
     IF (Transient) THEN
       IF (.NOT. HavePhys) CALL Fatal('Circuits_Init', &
           'Foil sheet transient needs "Foil Thickness", "Fill Factor" and "Sheet Conductivity"!')
+
+      ! In transient the in-plane reluctivity becomes a Foster ladder. Derive it
+      ! here from the same physics the harmonic closed form uses and publish it
+      ! as the ordinary ladder keywords, so the AV solver reads one uniform form
+      ! whoever wrote it. An explicit 'Nu 22 Residues' in the SIF wins.
+      Homog = GetLogical(CompParams, 'Homogenization Model', Found)
+      IF (.NOT. Found) Homog = .FALSE.
+      IF (Homog .AND. .NOT. ListCheckPresent(CompParams,'Nu 22 Residues')) THEN
+        nlad = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
+        IF (.NOT. Found) nlad = 4
+        CALL FoilSheetNuFoster(tau0, ff, nlad, nuinf, rr(1:nlad), tt(1:nlad))
+
+        CALL ListAddConstReal(CompParams, 'Nu 11 y0', 1._dp/mu0)
+        CALL ListAddConstReal(CompParams, 'Nu 22 y0', nuinf)
+        CALL ListAddConstReal(CompParams, 'Nu 33 y0', nuinf)
+        arr = 0._dp
+        arr(1:nlad,1) = rr(1:nlad)
+        CALL ListAddConstRealArray(CompParams, 'Nu 22 Residues', nlad, 1, arr(1:nlad,1:1))
+        CALL ListAddConstRealArray(CompParams, 'Nu 33 Residues', nlad, 1, arr(1:nlad,1:1))
+        arr(1:nlad,1) = tt(1:nlad)
+        CALL ListAddConstRealArray(CompParams, 'Nu 22 Taus', nlad, 1, arr(1:nlad,1:1))
+        CALL ListAddConstRealArray(CompParams, 'Nu 33 Taus', nlad, 1, arr(1:nlad,1:1))
+
+        WRITE(Message,'(A,I0,A,ES13.6)') 'Foil sheet Nu ladder: order ', nlad, &
+            ', nu_inf = ', nuinf
+        CALL Info('Circuits_Init', Message, Level=5)
+        DO nlk = 1, nlad
+          WRITE(Message,'(A,I0,A,ES13.6,A,ES13.6,A)') '  pole ', nlk, ': r = ', rr(nlk), &
+              ', T = ', tt(nlk), ' s'
+          CALL Info('Circuits_Init', Message, Level=5)
+        END DO
+      END IF
       RETURN
     END IF
 
