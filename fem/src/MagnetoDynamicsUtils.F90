@@ -93,6 +93,8 @@
         Tcoef(1,1,1:n) = 0._dp
       CASE ('flat wire')
         CALL FlatWireConductivity(Element, n, Tcoef)
+      CASE ('foil sheet')
+        CALL FoilSheetConductivity(Element, n, Tcoef)
       END SELECT
     END IF
  
@@ -136,6 +138,48 @@
     Tcoef(3,3,1:n) = f * Tcoef(3,3,1:n)
 !------------------------------------------------------------------------------
   END SUBROUTINE FlatWireConductivity
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Foil sheet: the block carries no physical volumetric eddy current. Its
+!> conduction is in the circuit coupling (the complex sheet conductivity
+!> Sigma 33) and its intra-foil proximity loss in Nu 22 / Nu 33, so the material
+!> 'Electric Conductivity' is deliberately ignored here.
+!>
+!> 'Sheet Regularization' (default 0) adds back an in-plane conductivity of that
+!> fraction of Sigma 33. It is a knob for the known E1 limitation that the strand
+!> source is piecewise constant over the strands and hence not exactly divergence
+!> free, which leaves the coupled solve stagnating around 1e-6 for more than one
+!> cell. Measured on circuits_harmonic_foilsheet: 1e-4 does not help and 1e-1 and
+!> above short the coil out, so the default is off; kept for experiments.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetConductivity(Element, n, Tcoef)
+!------------------------------------------------------------------------------
+    USE CircuitUtils, ONLY: GetComponentParams
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: n
+    REAL(KIND=dp) :: Tcoef(3,3,n)
+    TYPE(ValueList_t), POINTER :: CompParams
+    REAL(KIND=dp) :: eps, sig
+    LOGICAL :: Found
+
+    Tcoef = 0._dp
+    CompParams => GetComponentParams(Element)
+    IF (.NOT. ASSOCIATED(CompParams)) RETURN
+
+    eps = GetConstReal(CompParams, 'Sheet Regularization', Found)
+    IF (.NOT. Found) eps = 0._dp
+    IF (eps <= 0._dp) RETURN
+
+    sig = GetConstReal(CompParams, 'Sigma 33', Found)
+    IF (.NOT. Found) RETURN
+
+    ! Local directions: 1 = across the stack (no conduction), 2 and 3 in the foil
+    Tcoef(2,2,1:n) = eps * sig
+    Tcoef(3,3,1:n) = eps * sig
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetConductivity
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------ 

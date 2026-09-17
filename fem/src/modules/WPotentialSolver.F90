@@ -201,7 +201,7 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
   TYPE(ValueList_t), POINTER :: CompParams
   REAL(KIND=dp), ALLOCATABLE :: STIFF(:,:), LOAD(:), FORCE(:), &
                                 RotM(:,:,:), Tcoef(:,:,:)
-  CHARACTER(LEN=MAX_NAME_LEN):: CoilType
+  CHARACTER(LEN=MAX_NAME_LEN):: CoilType, WCoilType
   LOGICAL :: CoilBody
 
 
@@ -256,6 +256,7 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
        CoilType = GetString(CompParams, 'Coil Type', Found)
        IF (Found) CoilBody = .TRUE.
      END IF 
+     WCoilType = CoilType
 
       IF (CoilBody) THEN
         SELECT CASE (CoilType)
@@ -268,13 +269,20 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
         CASE ('foil winding','flat wire')
           CoilBody = .True.
           CALL GetElementRotM(Element, RotM, n)
+        CASE ('foil sheet')
+          ! The AV assembly sees no volumetric conductivity for a foil sheet,
+          ! but the W potential still has to follow the foils: solve it with the
+          ! foil winding tensor (no conduction across the stack).
+          CoilBody = .True.
+          CALL GetElementRotM(Element, RotM, n)
+          WCoilType = 'foil winding'
         CASE DEFAULT
           CALL Fatal ('Wsolve', 'Non existent Coil Type Chosen!')
         END SELECT
       END IF
 
       Tcoef = 0.0d0
-      Tcoef = GetElectricConductivityTensor(Element,n,'re',CoilBody,CoilType)
+      Tcoef = GetElectricConductivityTensor(Element,n,'re',CoilBody,WCoilType)
 
       !Get element local matrix and rhs vector:
       !----------------------------------------
@@ -332,6 +340,7 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
        CoilType = GetString(CompParams, 'Coil Type', Found)
        IF (Found) CoilBody = .TRUE.
      END IF 
+     WCoilType = CoilType
 
       IF (CoilBody) THEN
         SELECT CASE (CoilType)
@@ -344,13 +353,20 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
         CASE ('foil winding','flat wire')
           CoilBody = .True.
           CALL GetElementRotM(Element, RotM, n)
+        CASE ('foil sheet')
+          ! The AV assembly sees no volumetric conductivity for a foil sheet,
+          ! but the W potential still has to follow the foils: solve it with the
+          ! foil winding tensor (no conduction across the stack).
+          CoilBody = .True.
+          CALL GetElementRotM(Element, RotM, n)
+          WCoilType = 'foil winding'
         CASE DEFAULT
           CALL Fatal ('Wsolve', 'Non existent Coil Type Chosen!')
         END SELECT
       END IF
 
       Tcoef = 0.0d0
-      Tcoef = GetElectricConductivityTensor(Element,n,'re',CoilBody,CoilType)
+      Tcoef = GetElectricConductivityTensor(Element,n,'re',CoilBody,WCoilType)
       CALL SaveElementWSolution(Element, n, Wnorms(Element%BodyId), RotM, Tcoef, NoRotM)
 
   END DO
@@ -365,7 +381,7 @@ CONTAINS
 !------------------------------------------------------------------------------
     REAL(KIND=dp) :: Basis(nd),dBasisdx(nd,3),DetJ,LoadAtIP, C(3,3), &
                      RotMLoc(3,3), RotM(3,3,n)
-    CHARACTER(LEN=MAX_NAME_LEN):: CoilType
+    CHARACTER(LEN=MAX_NAME_LEN):: CoilType, WCoilType
     LOGICAL :: Stat, CoilBody, NoRotM
     INTEGER :: i,j,t
     TYPE(GaussIntegrationPoints_t) :: IP
@@ -610,7 +626,7 @@ CONTAINS
     INTEGER :: Active, t, n, i
     TYPE(Element_t),POINTER :: Element
     LOGICAL :: CoilBody, Found, stat
-    CHARACTER(LEN=MAX_NAME_LEN):: CoilType
+    CHARACTER(LEN=MAX_NAME_LEN):: CoilType, WCoilType
     TYPE(ValueList_t), POINTER :: CompParams
 
     Wnorms = 0._dp

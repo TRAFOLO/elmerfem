@@ -399,7 +399,7 @@ CONTAINS
       SELECT CASE (CoilType)
       CASE ('stranded')
         VarName = 'Circuit Current Variable Id'
-      CASE ('massive','foil winding','flat wire')
+      CASE ('massive','foil winding','flat wire','foil sheet')
         VarName = 'Circuit Voltage Variable Id'
       CASE DEFAULT
         CYCLE
@@ -598,6 +598,105 @@ CONTAINS
     k = (ks-1) * nAcross + ka
 !------------------------------------------------------------------------------
   END FUNCTION FlatWireCellIndex
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Foil sheet: 1-based cell index (along Alpha) and segment index (along Beta)
+!> of a point with normalized coordinates in [0,1].
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetStrand(nCells, nSegments, sAlpha, sBeta, k, j)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSegments, k, j
+    REAL(KIND=dp) :: sAlpha, sBeta
+
+    k = MIN(nCells,    MAX(1, FLOOR(sAlpha * nCells)    + 1))
+    j = MIN(nSegments, MAX(1, FLOOR(sBeta  * nSegments) + 1))
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetStrand
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Offset of the strand (k,j) current dof c_kj inside the foil sheet voltage
+!> variable. Layout: 0 = V, 1..nCells = V_k, then the strands cell by cell.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetStrandDof(nCells, nSegments, k, j) RESULT(ind)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSegments, k, j, ind
+
+    ind = nCells + (k-1) * nSegments + j
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetStrandDof
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Projector on the foil plane (local directions Beta and Gamma) at an
+!> integration point. The foil sheet current follows the foils, so its shape
+!> function is t = P grad(W): this is the same component the foil winding
+!> conductivity tensor keeps with Tcoef(1,1) = 0, and it is what makes the
+!> strand source divergence free.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetProjector(RotM, Basis, n) RESULT(P)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: RotM(:,:,:), Basis(:), P(3,3)
+    INTEGER :: n
+    REAL(KIND=dp) :: RotMLoc(3,3)
+    REAL(KIND=dp), PARAMETER :: FoilPlane(3,3) = RESHAPE([0._dp,0._dp,0._dp, &
+        0._dp,1._dp,0._dp, 0._dp,0._dp,1._dp],[3,3])
+    INTEGER :: i, j
+
+    DO i=1,3
+      DO j=1,3
+        RotMLoc(i,j) = SUM( RotM(i,j,1:n) * Basis(1:n) )
+      END DO
+    END DO
+    P = MATMUL(MATMUL(RotMLoc, FoilPlane), TRANSPOSE(RotMLoc))
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetProjector
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> A foil sheet strand with no integration point of its own would leave a zero
+!> row in the circuit matrix. Fail early and say which (cell, segment) is empty.
+!------------------------------------------------------------------------------
+  SUBROUTINE CheckFoilSheetStrands(Comp)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    REAL(KIND=dp) :: w, wmax
+    INTEGER :: k, j, ind, nempty
+
+    IF (.NOT. ALLOCATED(Comp % StrandWeight)) RETURN
+
+    wmax = 0._dp
+    DO ind = 1, SIZE(Comp % StrandWeight)
+      Comp % StrandWeight(ind) = ParallelReduction(Comp % StrandWeight(ind))
+      wmax = MAX(wmax, Comp % StrandWeight(ind))
+    END DO
+    IF (wmax <= 0._dp) RETURN
+
+    nempty = 0
+    DO k = 1, Comp % nCells
+      DO j = 1, Comp % nSegments
+        ind = (k-1) * Comp % nSegments + j
+        w = Comp % StrandWeight(ind)
+        IF (w > 1.0d-8 * wmax) CYCLE
+        nempty = nempty + 1
+        IF (nempty <= 20) CALL Error('CheckFoilSheetStrands', &
+            'Foil sheet strand (cell '//I2S(k)//', segment '//I2S(j)//') has no element!')
+      END DO
+    END DO
+
+    IF (nempty > 0) THEN
+      CALL Error('CheckFoilSheetStrands','Component '//I2S(Comp % ComponentId)//': '// &
+          I2S(nempty)//' of '//I2S(Comp % nCells * Comp % nSegments)//' strands are empty.')
+      CALL Fatal('CheckFoilSheetStrands', &
+          'Lower "Sheet Cells" / "Sheet Segments" or refine the coil mesh!')
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE CheckFoilSheetStrands
 !------------------------------------------------------------------------------
 
 END MODULE CircuitUtils
@@ -1118,6 +1217,9 @@ END FUNCTION isComponentName
 
         CASE ('flat wire')
           CALL InitFlatWireComponent(Comp, CompParams, CompInd, ExtMaster)
+
+        CASE ('foil sheet')
+          CALL InitFoilSheetComponent(Comp, CompParams, CompInd, ExtMaster)
         END SELECT
       END IF
 
@@ -1854,6 +1956,99 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Foil sheet winding: the foil stack is modelled as conducting SHEETS, not as a
+!> conducting continuum. The block is split into nCells cells along Alpha (the
+!> stacking normal) and each cell into nSegments strands along Beta (the foil
+!> width). Cell k lumps foilsPerCell = N/nCells foils; strand (k,j) carries a
+!> uniform current density c_kj*grad(W). The intra-foil skin effect is in the
+!> complex sheet conductivity (Sigma 33 / Sigma 33 im) and the intra-foil
+!> proximity effect in the complex reluctivity (Nu 11/22/33), so the block
+!> itself carries no volumetric eddy current.
+!>
+!> Component keywords:
+!>   Number of Turns        number of foils N, must be an integer
+!>   Sheet Cells            cells along Alpha (default N), must divide N
+!>   Sheet Segments         strands along Beta per cell (default 16)
+!>   Electrode Area         or Electrode Boundaries, as for foil winding
+!>   Sigma 33 [im]          complex sheet conductivity (harmonic)
+!>   Homogenization Model + Nu 11/22/33 [im]   complex reluctivity via RotM
+!>
+!> Circuit dofs: vvar = V, V_1..V_nCells, then c_kj cell by cell.
+!------------------------------------------------------------------------------
+  SUBROUTINE InitFoilSheetComponent(Comp, CompParams, CompInd, ExtMaster)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: CompInd, ExtMaster
+    INTEGER :: nfoils
+    LOGICAL :: Found
+
+    IF (CoordinateSystemDimension() /= 3) &
+        CALL Fatal('Circuits_Init','Foil sheet coil type is implemented only in 3D!')
+
+    Comp % nofturns = GetConstReal(CompParams, 'Number of Turns', Found)
+    IF (.NOT. Found) CALL Fatal('Circuits_Init','Foil sheet: Number of Turns not found!')
+    nfoils = NINT(Comp % nofturns)
+    IF (nfoils < 1 .OR. ABS(Comp % nofturns - nfoils) > 1.0d-8) &
+        CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be a positive integer!')
+
+    Comp % nCells = GetInteger(CompParams, 'Sheet Cells', Found)
+    IF (.NOT. Found) Comp % nCells = nfoils
+    IF (Comp % nCells < 1 .OR. MOD(nfoils, Comp % nCells) /= 0) &
+        CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be divisible by Sheet Cells!')
+    Comp % foilsPerCell = nfoils / Comp % nCells
+
+    Comp % nSegments = GetInteger(CompParams, 'Sheet Segments', Found)
+    IF (.NOT. Found) Comp % nSegments = 16
+    IF (Comp % nSegments < 1) &
+        CALL Fatal('Circuits_Init','Foil sheet: Sheet Segments must be positive!')
+
+    IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Alpha'))) &
+        CALL Fatal('Circuits_Init','Foil sheet needs the direction field "Alpha"!')
+    IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Beta'))) &
+        CALL Fatal('Circuits_Init','Foil sheet needs the direction field "Beta"!')
+
+    ! dofs: V, V_1..V_nCells, c_11..c_(nCells)(nSegments)
+    Comp % ivar % dofs = 1
+    Comp % ivar % pdofs = 0
+    Comp % vvar % dofs = 1 + Comp % nCells * (1 + Comp % nSegments)
+    Comp % vvar % pdofs = Comp % nCells * (1 + Comp % nSegments)
+
+    Comp % coilthickness = 1._dp
+
+    Comp % ElArea = GetConstReal(CompParams, 'Electrode Area', Found)
+    IF (.NOT. Found) THEN
+      CALL ComputeElectrodeArea(Comp, CompParams, ExtMaster)
+      WRITE(Message,'(A,ES12.5)') 'Component '//I2S(CompInd)//' "Electrode Area" is ',Comp % ElArea
+      CALL Info('Circuits_Init',Message,Level=10)
+    END IF
+    Comp % N_j = Comp % nofturns / Comp % ElArea
+
+    IF (ALLOCATED(Comp % StrandWeight)) DEALLOCATE(Comp % StrandWeight)
+    ALLOCATE(Comp % StrandWeight(Comp % nCells * Comp % nSegments))
+    Comp % StrandWeight = 0._dp
+
+    ! Scale of the strand dofs: with c_kj = SigmaRef * y_kj the unknown y_kj is a
+    ! voltage (y_kj = f V_k at DC), so the circuit block is as well conditioned
+    ! as the flat wire one. Without it the strand dofs are sigma times larger
+    ! than the cell voltages and the coupled solve stagnates around 1e-6.
+    Comp % SigmaRef = GetConstReal(CompParams, 'Sigma 33', Found)
+    IF (.NOT. Found .OR. Comp % SigmaRef <= 0._dp) Comp % SigmaRef = 1._dp
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma Ref', Comp % SigmaRef)
+
+    CALL ListAddInteger(CompParams, 'Foil Sheet Cells', Comp % nCells)
+    CALL ListAddInteger(CompParams, 'Foil Sheet Segments', Comp % nSegments)
+    CALL ListAddInteger(CompParams, 'Foil Sheet Foils Per Cell', Comp % foilsPerCell)
+
+    WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Component '//I2S(CompInd)//' foil sheet: ', &
+        Comp % nCells,' cells x ',Comp % nSegments,' segments (',Comp % foilsPerCell,' foils per cell)'
+    CALL Info('Circuits_Init',Message,Level=6)
+!------------------------------------------------------------------------------
+  END SUBROUTINE InitFoilSheetComponent
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Geometric fill factor f = nStack*t_c/L_stack [* nAcross*w_c/L_across]. The
 !> block lengths follow from the normalized direction fields, L = V/int|grad s|.
 !------------------------------------------------------------------------------
@@ -2273,6 +2468,17 @@ CONTAINS
             DO j=1, Cvar % pdofs
               CALL CountMatElement(Rows, Cnts, RowId + AddIndex(j), 2)
             END DO
+          CASE('foil sheet')
+            ! V - sum_k m_k V_k = 0
+            CALL CountMatElement(Rows, Cnts, RowId, 1 + Comp % nCells)
+            DO j=1, Comp % nCells
+              ! cell row: (V_k, I) and (V_k, c_kj) for every segment
+              CALL CountMatElement(Rows, Cnts, RowId + AddIndex(j), 1 + Comp % nSegments)
+            END DO
+            DO j=Comp % nCells + 1, Cvar % pdofs
+              ! strand row: (c_kj, c_kj) and (c_kj, V_k)
+              CALL CountMatElement(Rows, Cnts, RowId + AddIndex(j), 2)
+            END DO
           END SELECT
         END IF
 
@@ -2298,6 +2504,7 @@ CONTAINS
 !------------------------------------------------------------------------------
    SUBROUTINE CreateComponentEquations(Rows, Cols, Cnts, Done, dofsdone)
 !------------------------------------------------------------------------------
+    USE CircuitUtils
     IMPLICIT NONE
     TYPE(Circuit_t), POINTER :: Circuits(:)
     TYPE(CircuitVariable_t), POINTER :: Cvar
@@ -2357,6 +2564,19 @@ CONTAINS
               CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), IvarId)
               CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), VvarId + AddIndex(j))
             END DO
+          CASE('foil sheet')
+            CALL CreateMatElement(Rows, Cols, Cnts, VvarId, VvarId)
+            DO j=1, Comp % nCells
+              CALL CreateMatElement(Rows, Cols, Cnts, VvarId, VvarId + AddIndex(j))
+              CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), IvarId)
+              DO jj=1, Comp % nSegments
+                i = FoilSheetStrandDof(Comp % nCells, Comp % nSegments, j, jj)
+                ! cell current balance and the strand equation
+                CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), VvarId + AddIndex(i))
+                CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(i), VvarId + AddIndex(j))
+                CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(i), VvarId + AddIndex(i))
+              END DO
+            END DO
           END SELECT
         END IF
 
@@ -2412,6 +2632,10 @@ CONTAINS
         IF (HasSupport(Element,nn)) THEN
           CALL CountAndCreateFlatWire(Element,nn,nd,Comp,Cnts,Done,Rows)
         END IF
+     CASE('foil sheet')
+        IF (HasSupport(Element,nn)) THEN
+          CALL CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Done,Rows)
+        END IF
       END SELECT
     END IF
 !------------------------------------------------------------------------------
@@ -2448,6 +2672,10 @@ CONTAINS
      CASE('flat wire')
         IF (HasSupport(Element,nn)) THEN
           CALL CountAndCreateFlatWire(Element,nn,nd,Comp,Cnts,Done,Rows,Cols=Cols)
+        END IF
+     CASE('foil sheet')
+        IF (HasSupport(Element,nn)) THEN
+          CALL CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Done,Rows,Cols=Cols)
         END IF
       END SELECT
     END IF
@@ -2793,6 +3021,73 @@ CONTAINS
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE CountAndCreateFlatWire
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Matrix structure of the foil sheet couplings: every strand current row c_kj
+!> the element can touch couples with the edge dofs of the element and vice
+!> versa. The circuit-internal couplings (c_kj with V_k and with itself) are
+!> created once per component in CreateComponentEquations.
+!------------------------------------------------------------------------------
+  SUBROUTINE CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Done,Rows,Cols,Harmonic)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Component_t), POINTER :: Comp
+    INTEGER :: nn, nd
+    OPTIONAL :: Cols
+    INTEGER :: Rows(:), Cols(:), Cnts(:)
+    INTEGER :: Indexes(nd)
+    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs
+    INTEGER, POINTER :: PS(:)
+    LOGICAL*1 :: Done(:)
+    LOGICAL, OPTIONAL :: Harmonic
+    LOGICAL :: harm
+    REAL(KIND=dp) :: sAlpha(nn), sBeta(nn)
+
+    IF (.NOT. PRESENT(Harmonic)) THEN
+      harm = CurrentModel % HarmonicCircuits
+    ELSE
+      harm = Harmonic
+    END IF
+
+    IF (.NOT. ASSOCIATED(CurrentModel % ASolver) ) CALL Fatal ('CountAndCreateFoilSheet','ASolver not found!')
+    IF (CoordinateSystemDimension() /= 3) CALL Fatal('CountAndCreateFoilSheet','Foil sheet is implemented only in 3D!')
+    PS => CurrentModel % Asolver % Variable % Perm
+    nd = GetElementDOFs(Indexes,Element,CurrentModel % ASolver)
+    nm = CurrentModel % ASolver % Matrix % NumberOfRows
+    ncdofs = nd - nn
+    vvarId = Comp % vvar % ValueId
+
+    CALL GetFlatWireLocalFields(.TRUE., Element, nn, sAlpha, sBeta)
+
+    ! Strands the element can touch: the nodal range plus one cell of margin
+    ! for higher order elements and strand borders cutting through elements.
+    ks1 = MAX(1, FLOOR(MINVAL(sAlpha) * Comp % nCells))
+    ks2 = MIN(Comp % nCells, FLOOR(MAXVAL(sAlpha) * Comp % nCells) + 2)
+    ka1 = MAX(1, FLOOR(MINVAL(sBeta) * Comp % nSegments))
+    ka2 = MIN(Comp % nSegments, FLOOR(MAXVAL(sBeta) * Comp % nSegments) + 2)
+
+    DO ks = ks1, ks2
+      DO ka = ka1, ka2
+        k = FoilSheetStrandDof(Comp % nCells, Comp % nSegments, ks, ka)
+        dofId = AddIndex(k, harm) + vvarId
+        DO j=1,ncdofs
+          q = PS(Indexes(j+nn))
+          IF (harm) q = ReIndex(q)
+          IF (PRESENT(Cols)) THEN
+            CALL CreateMatElement(Rows, Cols, Cnts, dofId+nm, q, harm)
+            CALL CreateMatElement(Rows, Cols, Cnts, q, dofId+nm, harm)
+          ELSE
+            CALL CountMatElement(Rows, Cnts, dofId+nm, 1, harm)
+            CALL CountMatElement(Rows, Cnts, q, 1, harm)
+          END IF
+        END DO
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE CountAndCreateFoilSheet
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------

@@ -632,7 +632,8 @@ CONTAINS
       Comp => Circuit % Components(CompInd)
 
       Comp % Resistance = 0._dp 
-      Comp % Conductance = 0._dp 
+      Comp % Conductance = 0._dp
+      IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
 
       Cvar => Comp % vvar
       vvarId = Comp % vvar % ValueId + nm
@@ -703,6 +704,17 @@ CONTAINS
               ! -----------------------------------------------------------------
               CALL AddToMatrixElement(CM, j + VvarId, IvarId, -1._dp)
             END DO
+          CASE('foil sheet')
+            ! Foil sheet voltage: V - sum_k m_k V_k = 0, m_k foils in cell k
+            ! -------------------------------------------------------------
+            CALL AddToMatrixElement(CM, VvarId, VvarId, 1._dp)
+            val = -REAL(Comp % foilsPerCell, dp)
+            DO j = 1, Comp % nCells
+              CALL AddToMatrixElement(CM, VvarId, j + VvarId, val)
+              ! Cell k: sum_j (t, grad W)_kj y_kj - m_k I / SigmaRef = 0
+              ! -------------------------------------------------------
+              CALL AddToMatrixElement(CM, j + VvarId, IvarId, val / Comp % SigmaRef)
+            END DO
           END SELECT
         END IF
       END IF
@@ -745,11 +757,16 @@ CONTAINS
           CASE ('flat wire')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
             CALL Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt,CompParams)
+          CASE ('foil sheet')
+            IF (.NOT. HasSupport(Element,nn)) CYCLE
+            CALL Add_foil_sheet(Element,Comp,nn,nd,dt,CompParams)
           CASE DEFAULT
             CALL Fatal ('AddComponentEquationsAndCouplings', 'Non-existent Coil Type Chosen!')
           END SELECT
         END IF
       END DO
+
+      IF (Comp % CoilType == 'foil sheet') CALL CheckFoilSheetStrands(Comp)
 
       ! Slice 2 (n=1, conductivity convention): no v_hist RHS term.
       ! The (y0, alpha, sigma) triplet is fitted as a frequency-dependent
@@ -1340,6 +1357,128 @@ CONTAINS
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_flat_wire
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Foil sheet winding, transient version. Stage E1 uses the DC value of
+!> 'Sigma 33' as the sheet conductivity; the skin ladder of stage E2 will
+!> replace 1/sigma_s by a per-strand conductance with a history term.
+!> Rows, per strand (k,j) of cell k (see the harmonic version for the model):
+!>   (1/sigma_s)(t,gradW) c_kj - f (t,gradW) V_k - (da/dt, t) = 0
+!>   sum_j (t,gradW) c_kj - m_k I = 0
+!> and the a equation gets the source + c_kj (t, a'), with t = P grad(W) the
+!> foil-plane projection of grad(W).
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_foil_sheet(Element,Comp,nn,nd,dt,CompParams)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
+    REAL(KIND=dp) :: dt
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s
+    REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
+    INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    LOGICAL :: stat, PiolaVersion, Found
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
+    REAL(KIND=dp) :: RotM(3,3,nn)
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_foil_sheet','Foil sheet is implemented only in 3D!')
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    sigma_s = GetConstReal(CompParams, 'Sigma 33', Found)
+    IF (.NOT. Found) CALL Fatal('Add_foil_sheet','Foil sheet needs "Sigma 33" (DC sheet conductivity)!')
+    IF (sigma_s <= 0._dp) CALL Fatal('Add_foil_sheet','Foil sheet "Sigma 33" must be positive!')
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(.TRUE., Element, nn, sAlpha, sBeta)
+
+    CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
+    IF(Solver % Order<2.OR.GetTimeStep()<=2) THEN
+      tscl=1.0_dp
+    ELSE
+      tscl=1.5_dp
+      CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
+      pPot = 2*pPOT - 0.5_dp*ppPOT
+    END IF
+
+    CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    CALL GetElementRotM(Element, RotM, nn)
+    ncdofs = nd - nn
+    vvarId = Comp % vvar % ValueId
+
+    IF (PiolaVersion) THEN
+      IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
+    ELSE
+      IP = GaussPoints(Element)
+    END IF
+
+    DO t=1,IP % n
+      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+      ! Project grad W on the foil plane; see the harmonic Add_foil_sheet.
+      tvec = MATMUL(FoilSheetProjector(RotM, Basis, nn), gradv)
+
+      CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, &
+          SUM(sAlpha(1:nn)*Basis(1:nn)), SUM(sBeta(1:nn)*Basis(1:nn)), kc, js)
+      sInd = (kc-1) * Comp % nSegments + js
+      sdof = vvarId + FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
+      vdof = vvarId + kc
+
+      g = IP % s(t)*detJ*SUM(tvec*gradv)
+      Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
+
+      ! I * R, where R = (1/sigma_s * js,js):
+      ! -------------------------------------
+      Comp % Resistance = Comp % Resistance + &
+          Comp % N_j**2 * IP % s(t)*detJ/sigma_s/Comp % VoltageFactor
+
+      ! Strand equation and cell current balance
+      ! ----------------------------------------
+      CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, g * Comp % SigmaRef / sigma_s)
+      CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor)
+      CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g)
+
+      DO j=1,ncdofs
+        q = j + nn
+        IF ( TransientSimulation ) THEN
+          ! -(d/dt a, t) in the strand equation
+          ! -----------------------------------
+          val = -IP % s(t)*detJ*SUM(Wbasis(j,:)*tvec)/dt
+          CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(q)), tscl * val)
+          CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + pPOT(q) * val
+        END IF
+        ! Source of the a equation: SigmaRef y_kj (t, a')
+        ! -----------------------------------------------
+        val = Comp % SigmaRef * IP % s(t)*detJ*SUM(tvec*Wbasis(j,:))
+        CALL AddToMatrixElement(CM, PS(Indexes(q)), sdof+nm, val)
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_foil_sheet
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -2045,7 +2184,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       Comp => Circuit % Components(CompInd)
 
       Comp % Resistance = 0._dp 
-      Comp % Conductance = 0._dp 
+      Comp % Conductance = 0._dp
+      IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
 
       Cvar => Comp % vvar
       vvarId = Comp % vvar % ValueId + nm
@@ -2121,6 +2261,20 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
             CALL AddToCmplxMatrixElement(CM, 2*j + VvarId, IvarId, &
                -REAL(i_multiplier), -AIMAG(i_multiplier))
           END DO
+        CASE('foil sheet')
+          ! Foil sheet voltage: V - sum_k m_k V_k = 0, m_k foils in cell k
+          ! -------------------------------------------------------------
+          i_multiplier = Comp % i_multiplier_re + im * Comp % i_multiplier_im
+          IF (i_multiplier == 0_dp) i_multiplier = 1.0_dp
+          CALL AddToCmplxMatrixElement(CM, VvarId, VvarId, 1._dp, 0._dp)
+          cmplx_val = -REAL(Comp % foilsPerCell, dp) * i_multiplier / Comp % SigmaRef
+          DO j = 1, Comp % nCells
+            CALL AddToCmplxMatrixElement(CM, VvarId, 2*j + VvarId, -REAL(Comp % foilsPerCell, dp), 0._dp)
+            ! Cell k: sum_j (t, grad W)_kj y_kj - m_k I / SigmaRef = 0
+            ! -------------------------------------------------------
+            CALL AddToCmplxMatrixElement(CM, 2*j + VvarId, IvarId, &
+               REAL(cmplx_val), AIMAG(cmplx_val))
+          END DO
         END SELECT
       END IF
 
@@ -2135,6 +2289,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         CALL AddComponentElementContributions(Element, Comp, Tcoef, &
                                               sigma_33, sigmaim_33, .True.)
       END DO
+
+      IF (Comp % CoilType == 'foil sheet') CALL CheckFoilSheetStrands(Comp)
     END DO
 
     IF( Circuit % Parallel ) THEN
@@ -2230,6 +2386,20 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         IF (HasSupport(Element,nn_elem)) THEN
           Tcoef = GetCMPLXElectricConductivityTensor(Element, nn_elem, .TRUE., CoilType)
           CALL Add_flat_wire(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
+        END IF
+      CASE ('foil sheet')
+        IF (HasSupport(Element,nn_elem)) THEN
+          ! The block has no volumetric conductivity; the strands conduct with
+          ! the complex sheet conductivity sigma_s = Sigma 33 + i Sigma 33 im.
+          sigma_33 = GetReal(CompParams, 'sigma 33', Found)
+          IF ( .NOT. Found ) sigma_33 = 0._dp
+          sigmaim_33 = GetReal(CompParams, 'sigma 33 im', FoundIm)
+          IF ( .NOT. FoundIm ) sigmaim_33 = 0._dp
+          IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal ('AddComponentElementContributions', &
+              'Foil sheet: Sigma 33 not found!')
+          Tcoef = CMPLX(0._dp, 0._dp, KIND=dp)
+          Tcoef(3,3,1:nn_elem) = CMPLX(sigma_33, sigmaim_33, KIND=dp)
+          CALL Add_foil_sheet(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
         END IF
       CASE DEFAULT
         CALL Fatal ('AddComponentEquationsAndCouplings', 'Non existent Coil Type Chosen!')
@@ -2818,6 +2988,146 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     END DO
 !------------------------------------------------------------------------------
    END SUBROUTINE Add_flat_wire
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Foil sheet winding, harmonic version. The block is split into nCells cells
+!> along Alpha (the stacking normal) and each cell into nSegments strands along
+!> Beta (the foil width). Strand (k,j) carries the uniform current density
+!> c_kj*t, where t = P grad(W) is grad(W) projected on the foil plane, with the
+!> complex sheet conductivity sigma_s = Tcoef(3,3). The block itself has no
+!> volumetric eddy current.
+!> Rows (f = Circuit Equation Voltage Factor, m_k = foils per cell):
+!>   (R1) strand: (1/sigma_s)(t,gradW) c_kj - f (t,gradW) V_k
+!>                                          - i w (a, t) = 0
+!>   (R2) cell:   sum_j (t,gradW)_kj c_kj - m_k I = 0
+!>   (R3) comp.:  V - sum_k m_k V_k = 0   (in AddComponentEquationsAndCouplings)
+!> and the a equation gets the source + c_kj (t, a'), exactly as the flat wire
+!> kernel does for sigma*f*V_k. At DC (R1) gives c_kj = sigma_s f V_k, so the
+!> strand current is proportional to the segment width: a uniform sheet current
+!> and the exact ring Rdc.
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_foil_sheet(Element,Tcoef,Comp,nn,nd,CompParams)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    COMPLEX(KIND=dp) :: Tcoef(3,3,nn), sigma_s, val
+    TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, Omega, g
+    REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
+    INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname
+    TYPE(VariableHandle_t), SAVE :: Wvec_h
+    REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
+    REAL(KIND=dp) :: RotM(3,3,nn)
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE., CoilUseWvec0 = .FALSE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_foil_sheet','Foil sheet is implemented only in 3D!')
+      CoilUseWvec0 = GetLogical(CurrentModel % Solver % Values, 'Coil Use W Vector', Found)
+      CoilWVecVarName = GetString(CurrentModel % Solver % Values,'W Vector Variable Name', Found)
+      IF (.NOT. Found) CoilWVecVarname = 'W Vector E'
+      CALL ListInitElementVariable(Wvec_h, CoilWVecVarname)
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+    Omega = GetAngularFrequency()
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(.TRUE., Element, nn, sAlpha, sBeta)
+
+    CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
+    IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
+    IF (.NOT. CoilUseWvec) CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    CALL GetElementRotM(Element, RotM, nn)
+    ncdofs = nd - nn
+
+    vvarId = Comp % vvar % ValueId
+
+    IF (PiolaVersion) THEN
+      IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
+    ELSE
+      IP = GaussPoints(Element)
+    END IF
+
+    DO t=1,IP % n
+      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      IF (CoilUseWvec) THEN
+        gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = 3 )
+      ELSE
+        gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+      END IF
+
+      ! The strand current follows the foils: project grad W on the foil plane
+      ! (local directions Beta and Gamma). Without this the source would have a
+      ! component across the stack and would not be divergence free -- exactly
+      ! the component the foil winding tensor removes with Tcoef(1,1) = 0.
+      tvec = MATMUL(FoilSheetProjector(RotM, Basis, nn), gradv)
+
+      sigma_s = SUM( Tcoef(3,3,1:nn) * Basis(1:nn) )
+      IF (sigma_s == CMPLX(0._dp,0._dp,KIND=dp)) &
+          CALL Fatal('Add_foil_sheet','Foil sheet conductivity "Sigma 33" is zero!')
+
+      CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, &
+          SUM(sAlpha(1:nn)*Basis(1:nn)), SUM(sBeta(1:nn)*Basis(1:nn)), kc, js)
+      sInd = (kc-1) * Comp % nSegments + js
+      sdof = vvarId + 2*FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
+      vdof = vvarId + 2*kc
+
+      g = IP % s(t)*detJ*SUM(tvec*gradv)
+      Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
+
+      ! I * R, where R = (1/sigma_s * js,js):
+      ! -------------------------------------
+      Comp % Resistance = Comp % Resistance + &
+          REAL(Comp % N_j**2 * IP % s(t)*detJ/sigma_s/Comp % VoltageFactor, KIND=dp)
+
+      ! (R1) strand equation
+      ! --------------------
+      val = g * Comp % SigmaRef / sigma_s
+      CALL AddToCmplxMatrixElement(CM, sdof+nm, sdof+nm, REAL(val), AIMAG(val))
+      CALL AddToCmplxMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor, 0._dp)
+
+      ! (R2) cell current balance
+      ! -------------------------
+      CALL AddToCmplxMatrixElement(CM, vdof+nm, sdof+nm, g, 0._dp)
+
+      DO j=1,ncdofs
+        q = j + nn
+        ! -(i omega a, t) in the strand equation
+        ! --------------------------------------
+        val = -im * Omega * IP % s(t)*detJ*SUM(Wbasis(j,:)*tvec)
+        CALL AddToCmplxMatrixElement(CM, sdof+nm, ReIndex(PS(Indexes(q))), REAL(val), AIMAG(val))
+        ! Source of the a equation: SigmaRef y_kj (t, a')
+        ! -----------------------------------------------
+        val = Comp % SigmaRef * IP % s(t)*detJ*SUM(tvec*Wbasis(j,:))
+        CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(q))), sdof+nm, REAL(val), AIMAG(val))
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_foil_sheet
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
