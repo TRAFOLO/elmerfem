@@ -2496,6 +2496,11 @@ END FUNCTION isComponentName
       ! here from the same physics the harmonic closed form uses and publish it
       ! as the ordinary ladder keywords, so the AV solver reads one uniform form
       ! whoever wrote it. An explicit 'Nu 22 Residues' in the SIF wins.
+      ! Post processing wants a conductivity; in transient that is the DC one,
+      ! since the skin correction is carried by the strand ladder.
+      IF (.NOT. ListCheckPresent(CompParams,'Sigma 33')) &
+          CALL ListAddConstReal(CompParams, 'Sigma 33', sdc)
+
       Homog = GetLogical(CompParams, 'Homogenization Model', Found)
       IF (.NOT. Found) Homog = .FALSE.
       IF (Homog .AND. .NOT. ListCheckPresent(CompParams,'Nu 22 Residues')) THEN
