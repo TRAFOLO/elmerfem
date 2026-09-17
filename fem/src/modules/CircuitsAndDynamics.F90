@@ -1385,7 +1385,7 @@ CONTAINS
     REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s
     REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
     INTEGER :: nm, j, t, q, ni, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
-    LOGICAL :: stat, PiolaVersion, Found, Cleaning, Feedback
+    LOGICAL :: stat, PiolaVersion, Found, Cleaning
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
@@ -1429,8 +1429,6 @@ CONTAINS
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
     Cleaning = FoilSheetCleaning(CompParams)
-    Feedback = GetLogical(CompParams, 'Sheet Cleaning Feedback', Found)
-    IF (.NOT. Found) Feedback = .TRUE.
 
     IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
@@ -1486,10 +1484,8 @@ CONTAINS
           ! ----------------------------------------------------
           val = Comp % SigmaRef * IP % s(t)*detJ*SUM(tvec*dBasisdx(ni,:))
           CALL AddToMatrixElement(CM, PS(Indexes(ni)), sdof+nm, val)
-          IF (Feedback) THEN
-            val = -IP % s(t)*detJ*SUM(dBasisdx(ni,:)*tvec)
-            CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(ni)), val)
-          END IF
+          val = -IP % s(t)*detJ*SUM(dBasisdx(ni,:)*tvec)
+          CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(ni)), val)
         END DO
       END IF
     END DO
@@ -3039,7 +3035,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     REAL(KIND=dp) :: Basis(nd), DetJ, Omega, g
     REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
     INTEGER :: nm, j, t, q, ni, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
-    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec, Cleaning, Feedback
+    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec, Cleaning
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
@@ -3081,8 +3077,6 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     vvarId = Comp % vvar % ValueId
     Cleaning = FoilSheetCleaning(CompParams)
-    Feedback = GetLogical(CompParams, 'Sheet Cleaning Feedback', Found)
-    IF (.NOT. Found) Feedback = .TRUE.
 
     IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
@@ -3154,10 +3148,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
           CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(ni))), sdof+nm, REAL(val), AIMAG(val))
           ! -grad v in the strand voltage law, the transpose of the above.
           ! --------------------------------------------------------------
-          IF (Feedback) THEN
-            val = -IP % s(t)*detJ*SUM(dBasisdx(ni,:)*tvec)
-            CALL AddToCmplxMatrixElement(CM, sdof+nm, ReIndex(PS(Indexes(ni))), REAL(val), AIMAG(val))
-          END IF
+          val = -IP % s(t)*detJ*SUM(dBasisdx(ni,:)*tvec)
+          CALL AddToCmplxMatrixElement(CM, sdof+nm, ReIndex(PS(Indexes(ni))), REAL(val), AIMAG(val))
         END DO
       END IF
     END DO
