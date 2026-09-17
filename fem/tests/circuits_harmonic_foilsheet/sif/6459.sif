@@ -97,7 +97,7 @@ Solver 6  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
    Linear System Solver = Iterative
    Linear System Iterative Method = BicgstabL
    Linear System preconditioning = Circuit
-            Linear System Convergence Tolerance = 5.0e-6
+            Linear System Convergence Tolerance = 1.0e-11
    Linear System Abort Not Converged = False
    Linear System Max Iterations = 5000
    Linear System Residual Output = 1000
@@ -137,10 +137,10 @@ Solver 9  !---- ResultOutputSolve, ResultOutputSolver
 End
 Solver 10  !---- SaveData, SaveScalars
    Exec Solver = Always
-   Exec Solver = Never
    Equation = "sv"
    Procedure = "SaveData" "SaveScalars"
    Filename = 6459/dat/6459.dat
+   Show Norm Index = Integer 1
 End
 Equation 1
    Active Solvers(2) = 6 7
@@ -251,7 +251,7 @@ Boundary Condition 7  !---- Beta0
    Target Boundaries = $ A1_beta0
    Body 3: Beta = Real 0
 End
-Solver 6 :: Reference Norm = Real 1.54756E-05
-Solver 6 :: Reference Norm Tolerance = Real 2E-3
+Solver 10 :: Reference Norm = Real 8.46205E-05
+Solver 10 :: Reference Norm Tolerance = Real 1E-04
 $fprintf( stderr, "TEST CASE 1\n");
 RUN
