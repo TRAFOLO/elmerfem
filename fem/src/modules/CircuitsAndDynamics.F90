@@ -75,7 +75,211 @@ MODULE TransientHomogCircuitState
   REAL(KIND=dp), SAVE :: cached_dt = -1.0_dp
   LOGICAL, SAVE       :: state_allocated = .FALSE.
 
+  !----------------------------------------------------------------------------
+  ! DEV-1513 E2: foil sheet strand skin ladder.
+  !
+  ! The strand impedance is R_dc * u coth u with u^2 = s tau0, tau0 = mu0 sigma
+  ! t^2 / 4. Its exact partial fraction expansion is
+  !     u coth u = 1 + sum_{n>=1} 2 s tau_n / (1 + s tau_n),  tau_n = tau0/(n pi)^2
+  ! so each term is one first order state per strand,
+  !     tau_n dx_n/dt + x_n = y      and      2 s tau_n/(1+s tau_n) y = 2 (y - x_n).
+  ! The series is truncated at N and the remainder, which behaves like
+  ! s * 2 tau0/pi^2 * sum_{n>N} 1/n^2, is kept as a series inductance L_tail.
+  ! Without it the imaginary part is ~14 % low at N = 4; with it N = 4 matches
+  ! u coth u to 0.05 % in the real part and 0.00 % in the imaginary part at
+  ! 100 kHz for a 0.5 mm foil.
+  !
+  ! Discretely, with c = 1/dt for BDF-1 and 3/(2 dt) for BDF-2, a_n = c tau_n
+  ! and M_n = 1 + a_n, the Schur elimination of the states gives a diagonal
+  ! factor and a history term that only involve stored quantities:
+  !     Gdiag = 1 + sum_n 2 a_n/M_n + c L_tail
+  !     hist  = sum_n 2 hx_n/M_n + hy
+  ! with hx_n and hy the BDF history of x_n and y.
+  !----------------------------------------------------------------------------
+  TYPE FoilSkin_t
+    LOGICAL :: Active = .FALSE.
+    INTEGER :: N = 0, nStrand = 0, nCells = 0, nSegments = 0
+    REAL(KIND=dp) :: Ltail = 0._dp, Gdiag = 1._dp
+    REAL(KIND=dp), ALLOCATABLE :: tau(:), Minv(:)
+    REAL(KIND=dp), ALLOCATABLE :: x(:,:), xo(:,:)
+    REAL(KIND=dp), ALLOCATABLE :: y(:), yo(:), hist(:)
+  END TYPE FoilSkin_t
+
+  TYPE(FoilSkin_t), ALLOCATABLE, SAVE :: FSkin(:)
+  LOGICAL, SAVE :: fskin_allocated = .FALSE.
+
 CONTAINS
+
+  !----------------------------------------------------------------------------
+  ! Allocate the ladder state and compute the time constants. Called once, after
+  ! the Components exist, from the same First block as InitSkinLadderState.
+  !----------------------------------------------------------------------------
+  SUBROUTINE InitFoilSkinLadder()
+    IMPLICIT NONE
+    INTEGER :: i, n_comp, nn, ns, k
+    TYPE(ValueList_t), POINTER :: CompParams
+    LOGICAL :: found
+    CHARACTER(LEN=MAX_NAME_LEN) :: ctype
+    REAL(KIND=dp) :: tau0, rest
+
+    IF (fskin_allocated) RETURN
+    n_comp = CurrentModel % NumberOfComponents
+    IF (n_comp <= 0) RETURN
+    ALLOCATE(FSkin(n_comp))
+    fskin_allocated = .TRUE.
+
+    DO i = 1, n_comp
+      CompParams => CurrentModel % Components(i) % Values
+      IF (.NOT. ASSOCIATED(CompParams)) CYCLE
+      ctype = ListGetString(CompParams, 'Coil Type', found)
+      IF (.NOT. found) CYCLE
+      IF (TRIM(ctype) /= 'foil sheet') CYCLE
+
+      ! On by default in transient; the keyword only switches it off.
+      IF (ListCheckPresent(CompParams,'Sheet Skin Ladder')) THEN
+        IF (.NOT. GetLogical(CompParams,'Sheet Skin Ladder', found)) CYCLE
+      END IF
+
+      tau0 = GetConstReal(CompParams, 'Foil Sheet Tau0', found)
+      IF (.NOT. found .OR. tau0 <= 0._dp) CYCLE
+
+      nn = GetInteger(CompParams, 'Sheet Skin Ladder Order', found)
+      IF (.NOT. found) nn = 4
+      IF (nn < 1 .OR. nn > 16) &
+          CALL Fatal('InitFoilSkinLadder','"Sheet Skin Ladder Order" must be between 1 and 16!')
+
+      FSkin(i) % nCells    = GetInteger(CompParams, 'Foil Sheet Cells', found)
+      IF (.NOT. found) CYCLE
+      FSkin(i) % nSegments = GetInteger(CompParams, 'Foil Sheet Segments', found)
+      IF (.NOT. found) CYCLE
+      ns = FSkin(i) % nCells * FSkin(i) % nSegments
+      IF (ns < 1) CYCLE
+
+      FSkin(i) % Active  = .TRUE.
+      FSkin(i) % N       = nn
+      FSkin(i) % nStrand = ns
+      ALLOCATE(FSkin(i) % tau(nn), FSkin(i) % Minv(nn))
+      ALLOCATE(FSkin(i) % x(nn,ns), FSkin(i) % xo(nn,ns))
+      ALLOCATE(FSkin(i) % y(ns), FSkin(i) % yo(ns), FSkin(i) % hist(ns))
+      FSkin(i) % x = 0._dp; FSkin(i) % xo = 0._dp
+      FSkin(i) % y = 0._dp; FSkin(i) % yo = 0._dp; FSkin(i) % hist = 0._dp
+      FSkin(i) % Minv = 1._dp
+
+      rest = PI*PI/6._dp
+      DO k = 1, nn
+        FSkin(i) % tau(k) = tau0 / (REAL(k,dp)*PI)**2
+        rest = rest - 1._dp/REAL(k*k,dp)
+      END DO
+      FSkin(i) % Ltail = 2._dp * tau0 / (PI*PI) * rest
+
+      WRITE(Message,'(A,I0,A,I0,A,ES12.5)') 'Foil sheet skin ladder: order ', nn, &
+          ', ', ns, ' strands, tail inductance ', FSkin(i) % Ltail
+      CALL Info('InitFoilSkinLadder', Message, Level=5)
+      DO k = 1, nn
+        WRITE(Message,'(A,I0,A,ES12.5,A)') '  stage ', k, ': tau = ', FSkin(i) % tau(k), ' s'
+        CALL Info('InitFoilSkinLadder', Message, Level=5)
+      END DO
+    END DO
+  END SUBROUTINE InitFoilSkinLadder
+
+  !----------------------------------------------------------------------------
+  ! Start of a timestep: Schur factors for this dt and the history of every
+  ! strand. Must run before the assembly of the step.
+  !----------------------------------------------------------------------------
+  SUBROUTINE PrepareFoilSkinStep(dt, bdf)
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: dt
+    INTEGER, INTENT(IN) :: bdf
+    INTEGER :: i, k, j
+    REAL(KIND=dp) :: c, a, hx, h
+
+    IF (.NOT. fskin_allocated) RETURN
+    IF (dt <= 0._dp) RETURN
+
+    IF (bdf >= 2) THEN
+      c = 1.5_dp/dt
+    ELSE
+      c = 1._dp/dt
+    END IF
+
+    DO i = 1, SIZE(FSkin)
+      IF (.NOT. FSkin(i) % Active) CYCLE
+      FSkin(i) % Gdiag = 1._dp + FSkin(i) % Ltail * c
+      DO k = 1, FSkin(i) % N
+        a = FSkin(i) % tau(k) * c
+        FSkin(i) % Minv(k) = 1._dp/(1._dp + a)
+        FSkin(i) % Gdiag = FSkin(i) % Gdiag + 2._dp * a * FSkin(i) % Minv(k)
+      END DO
+
+      DO j = 1, FSkin(i) % nStrand
+        IF (bdf >= 2) THEN
+          h = FSkin(i) % Ltail * (4._dp*FSkin(i) % y(j) - FSkin(i) % yo(j)) / (2._dp*dt)
+        ELSE
+          h = FSkin(i) % Ltail * FSkin(i) % y(j) / dt
+        END IF
+        DO k = 1, FSkin(i) % N
+          IF (bdf >= 2) THEN
+            hx = FSkin(i) % tau(k) * (4._dp*FSkin(i) % x(k,j) - FSkin(i) % xo(k,j)) / (2._dp*dt)
+          ELSE
+            hx = FSkin(i) % tau(k) * FSkin(i) % x(k,j) / dt
+          END IF
+          h = h + 2._dp * hx * FSkin(i) % Minv(k)
+        END DO
+        FSkin(i) % hist(j) = h
+      END DO
+
+      WRITE(Message,'(A,I0,A,ES12.5,A,ES12.5,A,ES12.5)') 'Foil skin ladder comp ', i, &
+          ': Gdiag = ', FSkin(i) % Gdiag, ', hist(1) = ', FSkin(i) % hist(1), &
+          ', y(1) = ', FSkin(i) % y(1)
+      CALL Info('PrepareFoilSkinStep', Message, Level=7)
+    END DO
+  END SUBROUTINE PrepareFoilSkinStep
+
+  !----------------------------------------------------------------------------
+  ! End of a timestep: x_n^{k+1} = (y^{k+1} + hx_n)/M_n, then shift the history.
+  !----------------------------------------------------------------------------
+  SUBROUTINE AdvanceFoilSkin(i, ynew, dt, bdf)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i, bdf
+    REAL(KIND=dp), INTENT(IN) :: ynew(:), dt
+    INTEGER :: k, j
+    REAL(KIND=dp) :: hx, xnew
+
+    IF (.NOT. fskin_allocated) RETURN
+    IF (i < 1 .OR. i > SIZE(FSkin)) RETURN
+    IF (.NOT. FSkin(i) % Active) RETURN
+    IF (dt <= 0._dp) RETURN
+
+    DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
+      DO k = 1, FSkin(i) % N
+        IF (bdf >= 2) THEN
+          hx = FSkin(i) % tau(k) * (4._dp*FSkin(i) % x(k,j) - FSkin(i) % xo(k,j)) / (2._dp*dt)
+        ELSE
+          hx = FSkin(i) % tau(k) * FSkin(i) % x(k,j) / dt
+        END IF
+        xnew = (ynew(j) + hx) * FSkin(i) % Minv(k)
+        FSkin(i) % xo(k,j) = FSkin(i) % x(k,j)
+        FSkin(i) % x(k,j)  = xnew
+      END DO
+      FSkin(i) % yo(j) = FSkin(i) % y(j)
+      FSkin(i) % y(j)  = ynew(j)
+    END DO
+  END SUBROUTINE AdvanceFoilSkin
+
+  !----------------------------------------------------------------------------
+  ! BDF order actually used for the ladder: the simulation's, capped at 2, and
+  ! 1 on the first step because BDF-2 has no history there.
+  !----------------------------------------------------------------------------
+  FUNCTION FoilSkinBDFOrder() RESULT(bdf)
+    IMPLICIT NONE
+    INTEGER :: bdf
+    LOGICAL :: found
+
+    bdf = ListGetInteger(CurrentModel % Simulation, 'BDF Order', found)
+    IF (.NOT. found) bdf = 1
+    bdf = MAX(1, MIN(2, bdf))
+    IF (GetTimestep() <= 1) bdf = 1
+  END FUNCTION FoilSkinBDFOrder
 
   !----------------------------------------------------------------------------
   ! One-time allocation + per-Component SIF triplet read. Called from
@@ -371,6 +575,9 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     ! the rest as has_skin_ladder = False. Hard-fail on missing keywords.
     CALL InitSkinLadderState()
 
+    ! DEV-1513 E2: the foil sheet strand skin ladder, N states per strand.
+    CALL InitFoilSkinLadder()
+
     ! Create CRS matrix structures for the circuit equations:
     ! ------------------------------------------------------
     CALL Circuits_MatrixInit()
@@ -405,6 +612,9 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
       CALL RecomputeSkinLadderForDt(dt)
       cached_dt = dt
     END IF
+
+    ! The foil sheet ladder history changes every step, not only when dt does.
+    IF (TransientSimulation) CALL PrepareFoilSkinStep(dt, FoilSkinBDFOrder())
 
     ! Circuit variable values from previous timestep:
     ! -----------------------------------------------
@@ -1395,6 +1605,9 @@ CONTAINS
     INTEGER :: nItem, pCell(MaxPiece), pSeg(MaxPiece)
     REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), wgt, uu, vv, ww
     LOGICAL :: Exact
+    INTEGER :: CompId
+    LOGICAL :: SkinLadder
+    REAL(KIND=dp) :: Kfac
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     LOGICAL, SAVE :: First = .TRUE.
 
@@ -1443,6 +1656,12 @@ CONTAINS
     IF (.NOT. Found) ngp = 0
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
+
+    CompId = Comp % ComponentId
+    SkinLadder = .FALSE.
+    IF (fskin_allocated .AND. CompId >= 1) THEN
+      IF (CompId <= SIZE(FSkin)) SkinLadder = FSkin(CompId) % Active
+    END IF
 
     Exact = (ngp <= 0)
     IF (Exact) THEN
@@ -1493,7 +1712,16 @@ CONTAINS
 
       ! Strand equation and cell current balance
       ! ----------------------------------------
-      CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, gres * Comp % SigmaRef / sigma_s)
+      ! With the skin ladder the strand impedance is the DC resistance times
+      ! Gdiag, the Schur eliminated u coth u of this timestep, and the ladder
+      ! history moves to the right hand side with the same weight.
+      Kfac = gres * Comp % SigmaRef / sigma_s
+      IF (SkinLadder) THEN
+        CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac * FSkin(CompId) % Gdiag)
+        CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + Kfac * FSkin(CompId) % hist(sInd)
+      ELSE
+        CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac)
+      END IF
       CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor)
       CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g)
 
@@ -3757,10 +3985,42 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
      END IF
    END IF
 
-   !IF( ListGetLogical( Solver % Values,'Store Cyclic System',Found ) ) THEN 
-   !  Solver % Variable => LagrangeVar 
+   !IF( ListGetLogical( Solver % Values,'Store Cyclic System',Found ) ) THEN
+   !  Solver % Variable => LagrangeVar
    !END IF
-   
+
+   ! DEV-1513 E2: advance the foil sheet strand skin ladder now that the strand
+   ! currents of this timestep are known. crt is already reduced over the
+   ! partitions, so every partition advances the same states.
+   IF (Transient .AND. fskin_allocated) THEN
+     BLOCK
+       INTEGER :: ci, kc, js, vvid, bdf, nce, nse, idx
+       LOGICAL :: gotid
+       TYPE(ValueList_t), POINTER :: CPar
+       REAL(KIND=dp), ALLOCATABLE :: ynew(:)
+       bdf = FoilSkinBDFOrder()
+       DO ci = 1, SIZE(FSkin)
+         IF (.NOT. FSkin(ci) % Active) CYCLE
+         CPar => CurrentModel % Components(ci) % Values
+         IF (.NOT. ASSOCIATED(CPar)) CYCLE
+         vvid = GetInteger(CPar, 'Circuit Voltage Variable Id', gotid)
+         IF (.NOT. gotid) CYCLE
+         nce = FSkin(ci) % nCells
+         nse = FSkin(ci) % nSegments
+         ALLOCATE(ynew(FSkin(ci) % nStrand))
+         ynew = 0._dp
+         DO kc = 1, nce
+           DO js = 1, nse
+             idx = vvid + FoilSheetStrandDof(nce, nse, kc, js)
+             IF (idx >= 1 .AND. idx <= circuit_tot_n) ynew((kc-1)*nse + js) = crt(idx)
+           END DO
+         END DO
+         CALL AdvanceFoilSkin(ci, ynew, dt, bdf)
+         DEALLOCATE(ynew)
+       END DO
+     END BLOCK
+   END IF
+
    ! Export circuit & dynamic variables for "SaveScalars":
    ! -----------------------------------------------------
 
