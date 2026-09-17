@@ -971,6 +971,7 @@ CONTAINS
   END SUBROUTINE FoilSheetPieces
 !------------------------------------------------------------------------------
 
+
 END MODULE CircuitUtils
 
 
@@ -2265,21 +2266,26 @@ END FUNCTION isComponentName
     IF (nfoils < 1 .OR. ABS(Comp % nofturns - nfoils) > 1.0d-8) &
         CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be a positive integer!')
 
+    ! 0 asks the kernel to pick the layout from the block geometry and the mesh.
     Comp % nCells = GetInteger(CompParams, 'Sheet Cells', Found)
     IF (.NOT. Found) Comp % nCells = nfoils
-    IF (Comp % nCells < 1 .OR. MOD(nfoils, Comp % nCells) /= 0) &
-        CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be divisible by Sheet Cells!')
-    Comp % foilsPerCell = nfoils / Comp % nCells
-
     Comp % nSegments = GetInteger(CompParams, 'Sheet Segments', Found)
     IF (.NOT. Found) Comp % nSegments = 16
-    IF (Comp % nSegments < 1) &
-        CALL Fatal('Circuits_Init','Foil sheet: Sheet Segments must be positive!')
 
     IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Alpha'))) &
         CALL Fatal('Circuits_Init','Foil sheet needs the direction field "Alpha"!')
     IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Beta'))) &
         CALL Fatal('Circuits_Init','Foil sheet needs the direction field "Beta"!')
+
+    IF (Comp % nCells <= 0 .OR. Comp % nSegments <= 0) &
+        CALL FoilSheetAutoLayout(Comp, CompParams, nfoils)
+
+    IF (Comp % nCells < 1 .OR. MOD(nfoils, Comp % nCells) /= 0) &
+        CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be divisible by Sheet Cells!')
+    Comp % foilsPerCell = nfoils / Comp % nCells
+
+    IF (Comp % nSegments < 1) &
+        CALL Fatal('Circuits_Init','Foil sheet: Sheet Segments must be positive!')
 
     ! dofs: V, V_1..V_nCells, c_11..c_(nCells)(nSegments)
     Comp % ivar % dofs = 1
@@ -2326,6 +2332,95 @@ END FUNCTION isComponentName
 !> Orientation of the Euler potential strand direction: grad(Alpha) x grad(Beta)
 !> points along grad(W) or against it depending on how Alpha and Beta are laid
 !> out, so fix the sign once per component from int grad(W) . (gA x gB) dV.
+!------------------------------------------------------------------------------
+!> Choose the strand layout from the block geometry and the mesh, for
+!> 'Sheet Cells' or 'Sheet Segments' given as 0. The SIF writer knows the coil
+!> but not the element size, while the kernel can measure both: Alpha and Beta
+!> run from 0 to 1 across the block, so the block thickness and width are the
+!> inverses of the mean magnitudes of their gradients, and the mean element size
+!> is the cube root of the mean element volume. A strand narrower than about one
+!> and a half elements cannot be resolved, which sets the cap.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetAutoLayout(Comp, CompParams, nfoils)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: nfoils
+
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sAlpha(:), sBeta(:)
+    REAL(KIND=dp) :: detJ, ga(3), gb(3), wgp, vol, sga, sgb, sh, ve, blkT, blkH, elemH
+    INTEGER :: e, n, gp, nmax, nel, nCellAuto, nSegAuto
+    LOGICAL :: stat
+
+    nmax = CurrentModel % Mesh % MaxElementNodes
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sAlpha(nmax), sBeta(nmax))
+    vol = 0._dp; sga = 0._dp; sgb = 0._dp; sh = 0._dp; nel = 0
+
+    DO e = 1, GetNOFActive()
+      Element => GetActiveElement(e)
+      IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+      n = GetElementNOFNodes(Element)
+      CALL GetElementNodes(Nodes, Element)
+      CALL GetFlatWireLocalFields(.TRUE., Element, n, sAlpha, sBeta)
+      IP = GaussPoints(Element)
+      ve = 0._dp
+      DO gp = 1, IP % n
+        stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
+            detJ, Basis, dBasisdx)
+        wgp = IP % s(gp) * detJ
+        ga = MATMUL(sAlpha(1:n), dBasisdx(1:n,:))
+        gb = MATMUL(sBeta(1:n), dBasisdx(1:n,:))
+        sga = sga + wgp * SQRT(SUM(ga*ga))
+        sgb = sgb + wgp * SQRT(SUM(gb*gb))
+        ve = ve + wgp
+      END DO
+      vol = vol + ve
+      sh = sh + ve**(1._dp/3._dp)
+      nel = nel + 1
+    END DO
+
+    vol = ParallelReduction(vol)
+    sga = ParallelReduction(sga)
+    sgb = ParallelReduction(sgb)
+    sh  = ParallelReduction(sh)
+    nel = ParallelReduction(nel)
+
+    IF (vol <= 0._dp .OR. sga <= 0._dp .OR. sgb <= 0._dp .OR. nel < 1) &
+        CALL Fatal('Circuits_Init','Foil sheet automatic layout: the coil block is empty!')
+
+    blkT = vol / sga
+    blkH = vol / sgb
+    elemH = sh / nel
+
+    IF (Comp % nCells <= 0) THEN
+      nCellAuto = MIN(nfoils, MAX(1, FLOOR(blkT / (1.5_dp * elemH))))
+      DO WHILE (nCellAuto > 1 .AND. MOD(nfoils, nCellAuto) /= 0)
+        nCellAuto = nCellAuto - 1
+      END DO
+      Comp % nCells = nCellAuto
+    END IF
+
+    IF (Comp % nSegments <= 0) THEN
+      nSegAuto = FLOOR(blkH / (1.5_dp * elemH))
+      Comp % nSegments = MIN(40, MAX(4, nSegAuto))
+    END IF
+
+    WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES11.4)') 'Foil sheet block: thickness ', blkT, &
+        ', width ', blkH, ', mean element size ', elemH
+    CALL Info('Circuits_Init', Message, Level=3)
+    WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Foil sheet automatic layout: Sheet Cells = ', &
+        Comp % nCells, ', Sheet Segments = ', Comp % nSegments, ' (', nel, ' block elements)'
+    CALL Info('Circuits_Init', Message, Level=3)
+
+    DEALLOCATE(Basis, dBasisdx, sAlpha, sBeta)
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetAutoLayout
+!------------------------------------------------------------------------------
 !------------------------------------------------------------------------------
   SUBROUTINE ComputeFoilSheetSign(Comp, CompParams)
 !------------------------------------------------------------------------------
