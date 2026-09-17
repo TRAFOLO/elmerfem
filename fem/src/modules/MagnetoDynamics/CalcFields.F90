@@ -620,6 +620,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: s,Norm, Mult
    REAL(KIND=dp) :: B(2,3), E(2,3), JatIP(2,3), VP_ip(2,3), JXBatIP(2,3), CC_J(2,3), HdotB, LMSol(2)
    REAL(KIND=dp) :: ldetJ,detJ, C_ip, ST(3,3), Omega, ThinLinePower, Power, Energy(3), w_dens
+   REAL(KIND=dp) :: HomogPower   ! Im(Nu) proximity loss, a part of Power
    REAL(KIND=dp) :: localThickness
    REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ValAtIP
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
@@ -1088,7 +1089,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    C = 0._dp; PR=0._dp
    Magnetization = 0._dp
 
-   Power = 0._dp; Energy = 0._dp
+   Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp
    IF(.NOT. ConstantMassMatrixInUse ) THEN
      CALL DefaultInitialize()
    END IF
@@ -2310,7 +2311,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            ! For a foil sheet the Im(Nu) loss is the intra-foil proximity loss of
            ! the winding: it belongs to 'res: Eddy current power' together with
            ! the sheet Joule loss, or Re(V/I) and 4P/|I|^2 would disagree.
-           IF (CoilType == 'foil sheet') Power = Power + Coeff
+           IF (CoilType == 'foil sheet') THEN
+             Power = Power + Coeff
+             HomogPower = HomogPower + Coeff
+           END IF
 
            IF ( ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL) ) THEN
              FORCE(p,k+1) = FORCE(p,k+1) + Coeff
@@ -2855,6 +2859,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    ! Perform parallel reductions 
    IF(Parallel) THEN
      Power = ParallelReduction(Power) / NoSlices
+     HomogPower = ParallelReduction(HomogPower) / NoSlices
      IF( LayerBC ) SurfPower = ParallelReduction( SurfPower ) / NoSlices
 
      Energy(1) = ParallelReduction(Energy(1)) / NoSlices
@@ -2892,6 +2897,13 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    WRITE(Message,'(A,ES15.6)') 'Eddy current power: ', Power
    CALL Info( Caller, Message )
    CALL ListAddConstReal( Model % Simulation, 'res: Eddy current power', Power )
+
+   ! The Im(Nu) homogenization loss of foil sheet blocks. It is already inside
+   ! 'res: Eddy current power'; this splits it out so that the strand Joule loss
+   ! can be read off as the difference.
+   WRITE(Message,'(A,ES15.6)') 'Homogenization loss: ', HomogPower
+   CALL Info( Caller, Message )
+   CALL ListAddConstReal( Model % Simulation, 'res: Homogenization loss', HomogPower )
 
    IF( LayerBC ) THEN
      WRITE(Message,*) 'Surface current power (the Joule effect): ', SurfPower
