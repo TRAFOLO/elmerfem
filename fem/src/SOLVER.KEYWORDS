@@ -1672,6 +1672,7 @@ Component:Real:      'Conductor Width'
 ! Foil sheet winding (DEV-1513): conducting sheets, not a conducting continuum.
 Component:Integer:   'Sheet Cells'
 Component:Integer:   'Sheet Segments'
+Component:Integer:   'Sheet Integration Points'
 Component:Real:      'Sheet Regularization'
 Component:Logical:   'Homogenization Model'
 Component:Real:      'Nu 11'

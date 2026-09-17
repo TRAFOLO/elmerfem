@@ -1389,7 +1389,8 @@ CONTAINS
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: RotM(3,3,nn)
+    REAL(KIND=dp) :: RotM(3,3,nn), gres, DirSign
+    INTEGER :: ngp
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     LOGICAL, SAVE :: First = .TRUE.
 
@@ -1426,10 +1427,20 @@ CONTAINS
 
     CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
     CALL GetElementRotM(Element, RotM, nn)
+    DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
+    IF (.NOT. Found) DirSign = 1._dp
+    ! Elements cut by a strand interface are integrated with a rule that does not
+    ! resolve the cut, so the strand volume fractions - and with them the discrete
+    ! divergence of the source - carry a quadrature error. 'Sheet Integration
+    ! Points' asks for a richer rule in the coil body.
+    ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
+    IF (.NOT. Found) ngp = 0
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
 
-    IF (PiolaVersion) THEN
+    IF (ngp > 0) THEN
+      IP = GaussPoints(Element, np=ngp)
+    ELSE IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
     ELSE
       IP = GaussPoints(Element)
@@ -1439,8 +1450,8 @@ CONTAINS
       stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
           detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
       gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
-      ! Project grad W on the foil plane; see the harmonic Add_foil_sheet.
-      tvec = MATMUL(FoilSheetProjector(RotM, Basis, nn), gradv)
+      ! Euler potential strand direction; see the harmonic Add_foil_sheet.
+      tvec = FoilSheetDirection(sAlpha, sBeta, dBasisdx, nn, DirSign)
 
       CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, &
           SUM(sAlpha(1:nn)*Basis(1:nn)), SUM(sBeta(1:nn)*Basis(1:nn)), kc, js)
@@ -1449,6 +1460,7 @@ CONTAINS
       vdof = vvarId + kc
 
       g = IP % s(t)*detJ*SUM(tvec*gradv)
+      gres = IP % s(t)*detJ*SUM(tvec*tvec)
       Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
 
       ! I * R, where R = (1/sigma_s * js,js):
@@ -1458,7 +1470,7 @@ CONTAINS
 
       ! Strand equation and cell current balance
       ! ----------------------------------------
-      CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, g * Comp % SigmaRef / sigma_s)
+      CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, gres * Comp % SigmaRef / sigma_s)
       CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor)
       CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g)
 
@@ -3030,7 +3042,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname
     TYPE(VariableHandle_t), SAVE :: Wvec_h
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: RotM(3,3,nn)
+    REAL(KIND=dp) :: RotM(3,3,nn), gres, DirSign
+    INTEGER :: ngp
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     LOGICAL, SAVE :: First = .TRUE., CoilUseWvec0 = .FALSE.
 
@@ -3061,11 +3074,21 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
     IF (.NOT. CoilUseWvec) CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
     CALL GetElementRotM(Element, RotM, nn)
+    DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
+    IF (.NOT. Found) DirSign = 1._dp
+    ! Elements cut by a strand interface are integrated with a rule that does not
+    ! resolve the cut, so the strand volume fractions - and with them the discrete
+    ! divergence of the source - carry a quadrature error. 'Sheet Integration
+    ! Points' asks for a richer rule in the coil body.
+    ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
+    IF (.NOT. Found) ngp = 0
     ncdofs = nd - nn
 
     vvarId = Comp % vvar % ValueId
 
-    IF (PiolaVersion) THEN
+    IF (ngp > 0) THEN
+      IP = GaussPoints(Element, np=ngp)
+    ELSE IF (PiolaVersion) THEN
       IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
     ELSE
       IP = GaussPoints(Element)
@@ -3080,11 +3103,10 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
       END IF
 
-      ! The strand current follows the foils: project grad W on the foil plane
-      ! (local directions Beta and Gamma). Without this the source would have a
-      ! component across the stack and would not be divergence free -- exactly
-      ! the component the foil winding tensor removes with Tcoef(1,1) = 0.
-      tvec = MATMUL(FoilSheetProjector(RotM, Basis, nn), gradv)
+      ! Euler potential strand direction: exactly solenoidal and exactly
+      ! tangential to the strand interfaces, which are iso-surfaces of Alpha and
+      ! Beta. See FoilSheetDirection.
+      tvec = FoilSheetDirection(sAlpha, sBeta, dBasisdx, nn, DirSign)
 
       sigma_s = SUM( Tcoef(3,3,1:nn) * Basis(1:nn) )
       IF (sigma_s == CMPLX(0._dp,0._dp,KIND=dp)) &
@@ -3096,7 +3118,11 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       sdof = vvarId + 2*FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
       vdof = vvarId + 2*kc
 
+      ! g pairs the strand with grad W and is the strand's flux for c = 1; it is
+      ! the SAME number in R1 and R2, which keeps the transposition exact. gres
+      ! is the resistive weight int |t|^2.
       g = IP % s(t)*detJ*SUM(tvec*gradv)
+      gres = IP % s(t)*detJ*SUM(tvec*tvec)
       Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
 
       ! I * R, where R = (1/sigma_s * js,js):
@@ -3106,7 +3132,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
       ! (R1) strand equation
       ! --------------------
-      val = g * Comp % SigmaRef / sigma_s
+      val = gres * Comp % SigmaRef / sigma_s
       CALL AddToCmplxMatrixElement(CM, sdof+nm, sdof+nm, REAL(val), AIMAG(val))
       CALL AddToCmplxMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor, 0._dp)
 

@@ -631,6 +631,40 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Euler potential form of the foil sheet strand direction at an integration
+!> point: t = s * grad(Alpha) x grad(Beta), with s = +-1 fixed once per component
+!> so that t points along grad(W).
+!>
+!> This field is exactly solenoidal in the discrete weak sense - it is a cross
+!> product of two gradients, so div t vanishes identically and its normal
+!> component is continuous across element faces, because it only involves the
+!> tangential gradients of the two continuous nodal fields. It is also exactly
+!> tangential to every iso-surface of Alpha and of Beta, which are precisely the
+!> strand interfaces, so a strand-wise constant current density c_kj * t carries
+!> no current across them: div(c t) = grad(c) . t = 0 because grad(c) is a
+!> combination of grad(Alpha) and grad(Beta), both perpendicular to t. That is
+!> what makes the piecewise constant strand source consistent, provided the
+!> strand index is taken at the integration point (FoilSheetStrand on the
+!> interpolated Alpha and Beta), not once per element.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetDirection(sAlpha, sBeta, dBasisdx, n, sgn) RESULT(t)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: sAlpha(:), sBeta(:), dBasisdx(:,:), sgn, t(3)
+    INTEGER :: n
+    REAL(KIND=dp) :: ga(3), gb(3)
+
+    ga = MATMUL(sAlpha(1:n), dBasisdx(1:n,:))
+    gb = MATMUL(sBeta(1:n), dBasisdx(1:n,:))
+    t(1) = ga(2)*gb(3) - ga(3)*gb(2)
+    t(2) = ga(3)*gb(1) - ga(1)*gb(3)
+    t(3) = ga(1)*gb(2) - ga(2)*gb(1)
+    t = sgn * t
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetDirection
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Projector on the foil plane (local directions Beta and Gamma) at an
 !> integration point. The foil sheet current follows the foils, so its shape
 !> function is t = P grad(W): this is the same component the foil winding
@@ -2037,6 +2071,8 @@ END FUNCTION isComponentName
     IF (.NOT. Found .OR. Comp % SigmaRef <= 0._dp) Comp % SigmaRef = 1._dp
     CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma Ref', Comp % SigmaRef)
 
+    CALL ComputeFoilSheetSign(Comp, CompParams)
+
     CALL ListAddInteger(CompParams, 'Foil Sheet Cells', Comp % nCells)
     CALL ListAddInteger(CompParams, 'Foil Sheet Segments', Comp % nSegments)
     CALL ListAddInteger(CompParams, 'Foil Sheet Foils Per Cell', Comp % foilsPerCell)
@@ -2046,6 +2082,59 @@ END FUNCTION isComponentName
     CALL Info('Circuits_Init',Message,Level=6)
 !------------------------------------------------------------------------------
   END SUBROUTINE InitFoilSheetComponent
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Orientation of the Euler potential strand direction: grad(Alpha) x grad(Beta)
+!> points along grad(W) or against it depending on how Alpha and Beta are laid
+!> out, so fix the sign once per component from int grad(W) . (gA x gB) dV.
+!------------------------------------------------------------------------------
+  SUBROUTINE ComputeFoilSheetSign(Comp, CompParams)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sAlpha(:), sBeta(:), Wloc(:)
+    REAL(KIND=dp) :: detJ, gw(3), tv(3), flux, sgn
+    INTEGER :: e, n, gp, nmax
+    LOGICAL :: stat
+
+    nmax = CurrentModel % Mesh % MaxElementNodes
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sAlpha(nmax), sBeta(nmax), Wloc(nmax))
+    flux = 0._dp
+
+    DO e = 1, GetNOFActive()
+      Element => GetActiveElement(e)
+      IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+      n = GetElementNOFNodes(Element)
+      CALL GetElementNodes(Nodes, Element)
+      CALL GetFlatWireLocalFields(.TRUE., Element, n, sAlpha, sBeta)
+      CALL GetScalarLocalSolution(Wloc, 'W', UElement=Element)
+      IP = GaussPoints(Element)
+      DO gp = 1, IP % n
+        stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
+            detJ, Basis, dBasisdx)
+        gw = MATMUL(Wloc(1:n), dBasisdx(1:n,:))
+        tv = FoilSheetDirection(sAlpha, sBeta, dBasisdx, n, 1._dp)
+        flux = flux + IP % s(gp) * detJ * SUM(gw*tv)
+      END DO
+    END DO
+
+    flux = ParallelReduction(flux)
+    sgn = 1._dp
+    IF (flux < 0._dp) sgn = -1._dp
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Direction Sign', sgn)
+    WRITE(Message,'(A,F5.1,A,ES12.5)') 'Foil sheet strand direction sign ', sgn, &
+        ', int gradW . (gA x gB) = ', flux
+    CALL Info('Circuits_Init', Message, Level=6)
+
+    DEALLOCATE(Basis, dBasisdx, sAlpha, sBeta, Wloc)
+!------------------------------------------------------------------------------
+  END SUBROUTINE ComputeFoilSheetSign
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------

@@ -612,7 +612,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    INTEGER :: FwStack, FwAcross
    LOGICAL :: FwStackAlongAlpha
    INTEGER :: FsCells, FsSegments, FsK, FsJ, FsDof
-   REAL(KIND=dp) :: FsSigmaRef
+   REAL(KIND=dp) :: FsSigmaRef, FsSign
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: R_Z(:), PR(:)
@@ -1356,6 +1356,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Segments not found!')
          FsSigmaRef = GetConstReal(CompParams, 'Foil Sheet Sigma Ref', Found)
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Sigma Ref not found!')
+         FsSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
+         IF (.NOT. Found) FsSign = 1._dp
          CALL GetFlatWireLocalFields(.TRUE., Element, n, alpha, beta)
 
          ! The block has no volumetric conductivity: the strand current density
@@ -1653,7 +1655,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            ELSE
              wvec = MATMUL(Wbase(1:np), dBasisdx(1:np,:))
            END IF
-           wvec = MATMUL(FoilSheetProjector(RotM, Basis, n), wvec)
+           wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
            ! J = -SigmaRef y_kj t (the circuit sign convention of the flat wire
            ! and foil winding kernels), so E = J/sigma_s.
            IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
@@ -1795,7 +1797,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            CALL FoilSheetStrand(FsCells, FsSegments, &
                SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
            FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
-           wvec = MATMUL(FoilSheetProjector(RotM, Basis, n), MATMUL(Wbase(1:np), dBasisdx(1:np,:)))
+           wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
            IF (REAL(CMat_ip(3,3)) /= 0._dp) &
                E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec
            localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
