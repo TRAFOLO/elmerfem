@@ -744,6 +744,26 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> tanh(u)/u for complex u, the one transcendental the foil sheet homogenisation
+!> needs: the sheet conductivity is ff*sigma*tanh(u)/u and the in-plane
+!> permeability is mu0[(1-ff) + ff tanh(u)/u], with u = (1+i) t/(2 delta).
+!> The series keeps it accurate as u -> 0, where tanh(u)/u is 0/0.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetTanhOverU(u) RESULT(v)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    COMPLEX(KIND=dp) :: u, v
+
+    IF (ABS(u) < 1.0d-4) THEN
+      v = 1._dp - u*u/3._dp
+    ELSE
+      v = TANH(u)/u
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetTanhOverU
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Volume of a sub tetrahedron relative to its parent. The sub tet is given by
 !> the barycentric coordinates of its four vertices in the parent, t(bary,vertex),
 !> so the parent itself has the identity and volume 1.
@@ -2248,6 +2268,87 @@ END FUNCTION isComponentName
 !>
 !> Circuit dofs: vvar = V, V_1..V_nCells, then c_kj cell by cell.
 !------------------------------------------------------------------------------
+!> Derive everything the foil sheet needs from the three physical keywords
+!> 'Foil Thickness', 'Fill Factor' and 'Sheet Conductivity', so that the SIF
+!> writer supplies physics and Elmer owns the homogenisation formulas. tau0 and
+!> the DC sheet conductivity are stored for the transient ladders. In harmonic
+!> mode the complex sheet conductivity and in-plane reluctivity are filled in
+!> here, but only where the SIF did not give them explicitly: an explicit
+!> 'Sigma 33' or 'Nu 22' always wins, which keeps hand written SIFs valid.
+!------------------------------------------------------------------------------
+  SUBROUTINE InitFoilSheetMaterial(CompParams)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, omega, mu0
+    COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
+    LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient
+    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
+
+    mu0 = 4.0d-7 * PI
+    tfoil = GetConstReal(CompParams, 'Foil Thickness', FoundT)
+    ff    = GetConstReal(CompParams, 'Fill Factor', FoundF)
+    sgm   = GetConstReal(CompParams, 'Sheet Conductivity', FoundS)
+    HavePhys = FoundT .AND. FoundF .AND. FoundS
+
+    IF (HavePhys) THEN
+      IF (tfoil <= 0._dp) CALL Fatal('Circuits_Init','Foil sheet: "Foil Thickness" must be positive!')
+      IF (ff <= 0._dp .OR. ff > 1._dp) CALL Fatal('Circuits_Init','Foil sheet: "Fill Factor" must be in (0,1]!')
+      IF (sgm <= 0._dp) CALL Fatal('Circuits_Init','Foil sheet: "Sheet Conductivity" must be positive!')
+      tau0 = mu0 * sgm * tfoil**2 / 4._dp
+      sdc  = ff * sgm
+      CALL ListAddConstReal(CompParams, 'Foil Sheet Tau0', tau0)
+      CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma DC', sdc)
+      WRITE(Message,'(A,ES12.5,A,ES12.5,A,ES12.5)') 'Foil sheet physics: t = ', tfoil, &
+          ', ff = ', ff, ', sigma = ', sgm
+      CALL Info('Circuits_Init', Message, Level=3)
+      WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Foil sheet derived: tau0 = ', tau0, &
+          ' s, DC sheet conductivity = ', sdc
+      CALL Info('Circuits_Init', Message, Level=3)
+    END IF
+
+    Transient = (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient')
+    IF (Transient) THEN
+      IF (.NOT. HavePhys) CALL Fatal('Circuits_Init', &
+          'Foil sheet transient needs "Foil Thickness", "Fill Factor" and "Sheet Conductivity"!')
+      RETURN
+    END IF
+
+    IF (.NOT. HavePhys) RETURN
+    omega = GetAngularFrequency()
+    IF (omega <= 0._dp) RETURN
+    u  = SQRT(im * omega * tau0)
+    th = FoilSheetTanhOverU(u)
+
+    IF (.NOT. ListCheckPresent(CompParams,'Sigma 33')) THEN
+      sigs = ff * sgm * th
+      CALL ListAddConstReal(CompParams, 'Sigma 33', REAL(sigs, KIND=dp))
+      CALL ListAddConstReal(CompParams, 'Sigma 33 im', AIMAG(sigs))
+      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Sigma 33 = ', &
+          REAL(sigs, KIND=dp), AIMAG(sigs), ' i'
+      CALL Info('Circuits_Init', Message, Level=3)
+    END IF
+
+    Homog = GetLogical(CompParams, 'Homogenization Model', Found)
+    IF (.NOT. Found) Homog = .FALSE.
+    IF (Homog .AND. .NOT. ListCheckPresent(CompParams,'Nu 22')) THEN
+      mue = mu0 * ((1._dp - ff) + ff * th)
+      nue = 1._dp / mue
+      CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp / mu0)
+      CALL ListAddConstReal(CompParams, 'Nu 22', REAL(nue, KIND=dp))
+      CALL ListAddConstReal(CompParams, 'Nu 22 im', AIMAG(nue))
+      CALL ListAddConstReal(CompParams, 'Nu 33', REAL(nue, KIND=dp))
+      CALL ListAddConstReal(CompParams, 'Nu 33 im', AIMAG(nue))
+      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Nu 22 = Nu 33 = ', &
+          REAL(nue, KIND=dp), AIMAG(nue), ' i'
+      CALL Info('Circuits_Init', Message, Level=3)
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE InitFoilSheetMaterial
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
   SUBROUTINE InitFoilSheetComponent(Comp, CompParams, CompInd, ExtMaster)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
@@ -2259,6 +2360,8 @@ END FUNCTION isComponentName
 
     IF (CoordinateSystemDimension() /= 3) &
         CALL Fatal('Circuits_Init','Foil sheet coil type is implemented only in 3D!')
+
+    CALL InitFoilSheetMaterial(CompParams)
 
     Comp % nofturns = GetConstReal(CompParams, 'Number of Turns', Found)
     IF (.NOT. Found) CALL Fatal('Circuits_Init','Foil sheet: Number of Turns not found!')
@@ -2311,7 +2414,10 @@ END FUNCTION isComponentName
     ! voltage (y_kj = f V_k at DC), so the circuit block is as well conditioned
     ! as the flat wire one. Without it the strand dofs are sigma times larger
     ! than the cell voltages and the coupled solve stagnates around 1e-6.
-    Comp % SigmaRef = GetConstReal(CompParams, 'Sigma 33', Found)
+    ! The DC sheet conductivity scales the strand dofs. In transient it comes
+    ! from the physics keywords; 'Sigma 33' is not read there.
+    Comp % SigmaRef = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
+    IF (.NOT. Found) Comp % SigmaRef = GetConstReal(CompParams, 'Sigma 33', Found)
     IF (.NOT. Found .OR. Comp % SigmaRef <= 0._dp) Comp % SigmaRef = 1._dp
     CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma Ref', Comp % SigmaRef)
 
@@ -2405,8 +2511,10 @@ END FUNCTION isComponentName
       Comp % nCells = nCellAuto
     END IF
 
+    ! V_e^(1/3) is about half a tetrahedron's edge length, so 3 V_e^(1/3) is
+    ! about one and a half element edges: the narrowest strand the mesh resolves.
     IF (Comp % nSegments <= 0) THEN
-      nSegAuto = FLOOR(blkH / (1.5_dp * elemH))
+      nSegAuto = NINT(blkH / (3._dp * elemH))
       Comp % nSegments = MIN(40, MAX(4, nSegAuto))
     END IF
 

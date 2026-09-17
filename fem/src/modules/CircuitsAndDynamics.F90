@@ -1404,9 +1404,13 @@ CONTAINS
       CALL GetWPotentialVar(Wpot)
     END IF
 
-    sigma_s = GetConstReal(CompParams, 'Sigma 33', Found)
-    IF (.NOT. Found) CALL Fatal('Add_foil_sheet','Foil sheet needs "Sigma 33" (DC sheet conductivity)!')
-    IF (sigma_s <= 0._dp) CALL Fatal('Add_foil_sheet','Foil sheet "Sigma 33" must be positive!')
+    ! In transient the strand resistance is the DC one; the frequency dependence
+    ! of the skin effect is carried by the ladder, not by the conductivity.
+    sigma_s = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
+    IF (.NOT. Found) sigma_s = GetConstReal(CompParams, 'Sigma 33', Found)
+    IF (.NOT. Found) CALL Fatal('Add_foil_sheet', &
+        'Foil sheet needs "Sheet Conductivity" with "Fill Factor", or "Sigma 33"!')
+    IF (sigma_s <= 0._dp) CALL Fatal('Add_foil_sheet','Foil sheet DC sheet conductivity must be positive!')
 
     ASolver => CurrentModel % Asolver
     IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')

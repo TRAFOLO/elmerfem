@@ -1674,6 +1674,15 @@ Component:Integer:   'Sheet Cells'
 Component:Integer:   'Sheet Segments'
 Component:Integer:   'Sheet Integration Points'
 Component:Real:      'Sheet Regularization'
+! Physics the SIF writer supplies; Elmer derives tau0, the sheet conductivity
+! and the in-plane reluctivity from these.
+Component:Real:      'Foil Thickness'
+Component:Real:      'Sheet Conductivity'
+Component:Real:      'Foil Sheet Tau0'
+Component:Real:      'Foil Sheet Sigma DC'
+! Transient strand skin ladder (DEV-1513 E2).
+Component:Logical:   'Sheet Skin Ladder'
+Component:Integer:   'Sheet Skin Ladder Order'
 Component:Logical:   'Homogenization Model'
 Component:Real:      'Nu 11'
 Component:Real:      'Nu 11 im'
