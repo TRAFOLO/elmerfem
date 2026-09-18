@@ -102,6 +102,11 @@ MODULE TransientHomogCircuitState
     LOGICAL :: Active = .FALSE., Alloc = .FALSE.
     INTEGER :: N = 0, nStrand = 0, nCells = 0, nSegments = 0
     REAL(KIND=dp) :: Ltail = 0._dp, Gdiag = 1._dp
+    ! Similarity transform of the strand dof, transient only. The AV<-y and
+    ! y<-a border blocks differ by SigmaRef*dt/a1 (~600 at 1 kHz), which makes
+    ! the bordered system violently non-symmetric. Solving for y' = DofScale*y
+    ! with the R1 row scaled by DofScale makes both blocks equal; D is invariant.
+    REAL(KIND=dp) :: DofScale = 1._dp
     REAL(KIND=dp), ALLOCATABLE :: tau(:), Minv(:)
     REAL(KIND=dp), ALLOCATABLE :: x(:,:), xo(:,:)
     REAL(KIND=dp), ALLOCATABLE :: y(:), yo(:), hist(:)
@@ -1672,6 +1677,7 @@ CONTAINS
     INTEGER :: CompId
     LOGICAL :: SkinLadder, HaveSkinState
     REAL(KIND=dp) :: Kfac
+    REAL(KIND=dp) :: sdofscl
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     LOGICAL, SAVE :: First = .TRUE.
 
@@ -1729,6 +1735,11 @@ CONTAINS
         SkinLadder    = FSkin(CompId) % Active
         HaveSkinState = FSkin(CompId) % Alloc
       END IF
+
+    sdofscl = 1._dp
+    IF (TransientSimulation .AND. dt > 0._dp) &
+        sdofscl = SQRT(Comp % SigmaRef * dt / tscl)
+    IF (HaveSkinState) FSkin(CompId) % DofScale = sdofscl
     END IF
 
     Exact = (ngp <= 0)
@@ -1786,7 +1797,7 @@ CONTAINS
       Kfac = gres * Comp % SigmaRef / sigma_s
       IF (SkinLadder) THEN
         CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac * FSkin(CompId) % Gdiag)
-        CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + Kfac * FSkin(CompId) % hist(sInd)
+        CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + sdofscl * Kfac * FSkin(CompId) % hist(sInd)
       ELSE
         CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac)
       END IF
@@ -1794,8 +1805,8 @@ CONTAINS
       ! this piece, which turns the strand dofs into a dissipation. Accumulated
       ! whether or not the ladder is on, so that the loss is reported either way.
       IF (HaveSkinState) FSkin(CompId) % w(sInd) = FSkin(CompId) % w(sInd) + Kfac * Comp % SigmaRef
-      CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor)
-      CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g)
+      CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -sdofscl * g * Comp % VoltageFactor)
+      CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g / sdofscl)
 
       DO j=1,ncdofs
         q = j + nn
@@ -1803,13 +1814,13 @@ CONTAINS
           ! -(d/dt a, t) in the strand equation
           ! -----------------------------------
           val = -wgt*SUM(Wbasis(j,:)*tvec)/dt
-          CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(q)), tscl * val)
-          CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + pPOT(q) * val
+          CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(q)), sdofscl * tscl * val)
+          CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + sdofscl * pPOT(q) * val
         END IF
         ! Source of the a equation: SigmaRef y_kj (t, a')
         ! -----------------------------------------------
         val = Comp % SigmaRef * wgt*SUM(tvec*Wbasis(j,:))
-        CALL AddToMatrixElement(CM, PS(Indexes(q)), sdof+nm, val)
+        CALL AddToMatrixElement(CM, PS(Indexes(q)), sdof+nm, val / sdofscl)
       END DO
     END DO
 !------------------------------------------------------------------------------
@@ -4087,7 +4098,7 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
          DO kc = 1, nce
            DO js = 1, nse
              idx = vvid + FoilSheetStrandDof(nce, nse, kc, js)
-             IF (idx >= 1 .AND. idx <= circuit_tot_n) ynew((kc-1)*nse + js) = crt(idx)
+             IF (idx >= 1 .AND. idx <= circuit_tot_n) ynew((kc-1)*nse + js) = crt(idx) / FSkin(ci) % DofScale
            END DO
          END DO
          CALL AdvanceFoilSkin(ci, ynew, dt, bdf)
