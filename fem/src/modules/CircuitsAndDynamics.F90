@@ -2190,6 +2190,7 @@ END SUBROUTINE CircuitsAndDynamicsHarmonic_init
 SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
   USE CircuitUtils
+  USE CircuitsMod
   USE CircMatInitMod
   USE MGDynMaterialUtils
   IMPLICIT NONE
@@ -2210,6 +2211,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
   TYPE(Circuit_t), POINTER :: Circuits(:)  
   LOGICAL :: Parallel, Found, EigenSystem
   REAL(KIND=dp), POINTER :: px(:)
+  TYPE(ValueList_t), POINTER :: CompParams
+  CHARACTER(LEN=MAX_NAME_LEN) :: CoilType
   CHARACTER(LEN=MAX_NAME_LEN) :: sname
   CHARACTER(*), PARAMETER :: Caller = 'CircuitsAndDynamicsHarmonic'
   
@@ -2329,6 +2332,19 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
   CM % RHS = 0._dp
   IF(ASSOCIATED(CM % Values)) CM % Values = 0._dp
 
+  ! DEV-1513: 'Sheet Conductivity' may be a function of Temperature, and a
+  ! thermal iteration calls this solver again with an updated temperature field,
+  ! so the derived sheet material has to be re-evaluated here rather than once
+  ! at init. A constant keyword makes this a no-op.
+  DO i=1,Model % NumberOfComponents
+    CompParams => Model % Components(i) % Values
+    IF(.NOT. ASSOCIATED(CompParams)) CYCLE
+    CoilType = ListGetString(CompParams,'Coil Type',Found)
+    IF(.NOT. Found) CYCLE
+    IF(CoilType /= 'foil sheet') CYCLE
+    CALL UpdateFoilSheetMaterial(CompParams)
+  END DO
+
   ! Write Circuit equations:
   ! ------------------------
   DO p = 1,n_Circuits
@@ -2393,6 +2409,13 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
       CoilType = ListGetString(CompParams,'Coil Type',FoundType)
       IF(.NOT. FoundType) CYCLE
+      ! DEV-1513: 'foil sheet' is deliberately NOT here. Its source is a set of
+      ! strand currents along the Euler direction t = s grad(Alpha) x grad(Beta),
+      ! which is exactly solenoidal and exactly tangential to the strand
+      ! interfaces, so it is discretely solenoidal at DC as well and the edge
+      ! only system stays consistent. Measured: the 1.0 mm acceptance case at
+      ! 0 Hz converges below 100 iterations to 1.8e-8 without the constraint,
+      ! and the sheet kernel has no nodal couplings to give it if it were on.
       IF(CoilType /= 'foil winding' .AND. CoilType /= 'flat wire') CYCLE
 
       FlagValue = ListGetLogical(CompParams,'Activate Constraint',FoundFlag)

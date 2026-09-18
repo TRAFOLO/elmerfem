@@ -2445,6 +2445,265 @@ END FUNCTION isComponentName
 !>
 !> Circuit dofs: vvar = V, V_1..V_nCells, then c_kj cell by cell.
 !------------------------------------------------------------------------------
+!> True when every independent variable a keyword depends on can be resolved.
+!> ListGetReal Fatals on a missing one, and 'Sheet Conductivity' is written as a
+!> function of Temperature by a SIF that may also be run without any temperature
+!> field, so the dependency must be checked before the first evaluation. The
+!> accepted forms mirror ListParseStrToVars: a variable, 'coordinate',
+!> 'prev <var>', a plain number, or another keyword of the same list.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetDepsResolved(ptr, CompParams, Missing) RESULT(Ok)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueListEntry_t), POINTER :: ptr
+    TYPE(ValueList_t), POINTER :: CompParams
+    CHARACTER(LEN=MAX_NAME_LEN) :: Missing
+    LOGICAL :: Ok
+    TYPE(ValueListEntry_t), POINTER :: kptr
+    TYPE(Variable_t), POINTER :: Var
+    LOGICAL :: Found
+    INTEGER :: l0, l1, slen
+
+    Ok = .TRUE.
+    Missing = ' '
+    slen = ptr % DepNameLen
+    IF (slen <= 0) RETURN
+
+    l0 = 1
+    DO WHILE (.TRUE.)
+      DO WHILE (ptr % DependName(l0:l0) == ' ')
+        l0 = l0 + 1
+        IF (l0 > slen) EXIT
+      END DO
+      IF (l0 > slen) EXIT
+
+      l1 = INDEX(ptr % DependName(l0:slen), ',')
+      IF (l1 > 0) THEN
+        l1 = l0 + l1 - 2
+      ELSE
+        l1 = slen
+      END IF
+
+      IF (ptr % DependName(l0:l1) /= 'coordinate') THEN
+        Var => VariableGet(CurrentModel % Variables, TRIM(ptr % DependName(l0:l1)))
+        IF (.NOT. ASSOCIATED(Var) .AND. l1-l0 > 5) THEN
+          IF (ptr % DependName(l0:l0+4) == 'prev ') &
+              Var => VariableGet(CurrentModel % Variables, TRIM(ptr % DependName(l0+5:l1)))
+        END IF
+        IF (.NOT. ASSOCIATED(Var)) THEN
+          IF (VERIFY(ptr % DependName(l0:l1),'-.0123456789eE') /= 0) THEN
+            kptr => ListFind(CompParams, ptr % DependName(l0:l1), Found)
+            IF (.NOT. Found) THEN
+              Ok = .FALSE.
+              Missing = ptr % DependName(l0:l1)
+              RETURN
+            END IF
+          END IF
+        END IF
+      END IF
+
+      l0 = l1 + 2
+      IF (l0 > slen) EXIT
+    END DO
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetDepsResolved
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> 'Sheet Conductivity' as one number for the whole component. A constant takes
+!> the plain path and stays bit identical. A Real function -- TRAFOLO writes the
+!> winding conductivity as sigma(Temperature) and re-solves the electromagnetic
+!> problem inside a thermal iteration -- is evaluated at the nodes of the block
+!> elements and averaged over the block volume, MPI reduced so that every
+!> partition derives exactly the same material. 'Varies' reports the function
+!> case, which is what makes the value worth recomputing on every solver call.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetBlockConductivity(CompParams, Found, Varies) RESULT(sgm)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    LOGICAL :: Found, Varies
+    REAL(KIND=dp) :: sgm
+    TYPE(ValueListEntry_t), POINTER :: ptr
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    TYPE(Mesh_t), POINTER :: Mesh
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sNod(:)
+    REAL(KIND=dp), POINTER :: sPtr(:)
+    REAL(KIND=dp) :: sInt, vol, detJ, smin, smax
+    CHARACTER(LEN=MAX_NAME_LEN) :: Missing
+    INTEGER :: e, n, gp, nmax
+    LOGICAL :: stat, Found2
+
+    sgm = 0._dp
+    Varies = .FALSE.
+    ptr => ListFind(CompParams, 'Sheet Conductivity', Found)
+    IF (.NOT. Found) RETURN
+
+    IF (ptr % TYPE == LIST_TYPE_CONSTANT_SCALAR .OR. &
+        ptr % TYPE == LIST_TYPE_CONSTANT_SCALAR_STR) THEN
+      sgm = ListGetConstReal(CompParams, 'Sheet Conductivity', Found)
+      RETURN
+    END IF
+
+    ! The keyword is a function. Without its argument there is nothing to
+    ! evaluate, so say so and let the caller keep the value it already has
+    ! rather than Fatal deep inside the list machinery.
+    IF (.NOT. FoilSheetDepsResolved(ptr, CompParams, Missing)) THEN
+      CALL Warn('Circuits_Init','Foil sheet "Sheet Conductivity" depends on ['// &
+          TRIM(Missing)//'], which does not exist; keeping the previous value')
+      Found = .FALSE.
+      RETURN
+    END IF
+
+    Varies = .TRUE.
+    Mesh => CurrentModel % Mesh
+    nmax = Mesh % MaxElementNodes
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sNod(nmax))
+    sInt = 0._dp
+    vol = 0._dp
+    smin = HUGE(1._dp)
+    smax = -HUGE(1._dp)
+
+    DO e = 1, GetNOFActive()
+      Element => GetActiveElement(e)
+      IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+      n = GetElementNOFNodes(Element)
+      sPtr => GetReal(CompParams, 'Sheet Conductivity', Found2, Element)
+      IF (.NOT. Found2) CYCLE
+      sNod(1:n) = sPtr(1:n)
+      smin = MIN(smin, MINVAL(sNod(1:n)))
+      smax = MAX(smax, MAXVAL(sNod(1:n)))
+      CALL GetElementNodes(Nodes, Element)
+      IP = GaussPoints(Element)
+      DO gp = 1, IP % n
+        stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
+            detJ, Basis, dBasisdx)
+        sInt = sInt + IP % s(gp) * detJ * SUM(sNod(1:n)*Basis(1:n))
+        vol  = vol  + IP % s(gp) * detJ
+      END DO
+    END DO
+    DEALLOCATE(Basis, dBasisdx, sNod)
+
+    sInt = ParallelReduction(sInt)
+    vol  = ParallelReduction(vol)
+    smin = ParallelReduction(smin, 1)
+    smax = ParallelReduction(smax, 2)
+    IF (vol <= 0._dp) THEN
+      CALL Warn('Circuits_Init','Foil sheet block has no volume, cannot average "Sheet Conductivity"')
+      Found = .FALSE.
+      RETURN
+    END IF
+
+    ! A function that happens to be uniform over the block -- a sigma(T) written
+    ! with a zero temperature coefficient, or a uniform temperature -- must give
+    ! back exactly the number it evaluates to, so that it is bit identical to
+    ! the same value written as a constant. sInt/vol is only equal to it to
+    ! rounding.
+    IF (smax == smin) THEN
+      sgm = smin
+    ELSE
+      sgm = sInt / vol
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetBlockConductivity
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Harmonic sheet material from the physics: the complex sheet conductivity and
+!> the complex in-plane reluctivity at the current angular frequency, written
+!> only where the SIF did not give them (the ownership is decided once, in
+!> InitFoilSheetMaterial, before anything is written). Shared by the init and by
+!> the per-call refresh of a temperature dependent 'Sheet Conductivity'.
+!------------------------------------------------------------------------------
+  SUBROUTINE SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    REAL(KIND=dp) :: tfoil, ff, sgm
+    REAL(KIND=dp) :: tau0, sdc, omega, mu0
+    COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
+    LOGICAL :: Homog, Found, FoundFreq
+    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
+
+    mu0 = 4.0d-7 * PI
+    tau0 = mu0 * sgm * tfoil**2 / 4._dp
+    sdc  = ff * sgm
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Tau0', tau0)
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma DC', sdc)
+
+    omega = GetAngularFrequency(Found = FoundFreq)
+    IF (.NOT. FoundFreq) omega = 0._dp
+    IF (omega < 0._dp) RETURN
+
+    ! DEV-1513: TRAFOLO drives the harmonic solver at Frequency = 0 for the DC
+    ! resistance and inductance points, so omega = 0 has to be an ordinary case.
+    ! FoilSheetTanhOverU is 1 there, which leaves the real DC sheet conductivity
+    ! ff*sigma and the plain air reluctivity -- the exact DC limit. Before, this
+    ! path returned without ever writing 'Sigma 33' and the assembly Fataled
+    ! with "Foil sheet: Sigma 33 not found!".
+    u  = SQRT(im * omega * tau0)
+    th = FoilSheetTanhOverU(u)
+
+    IF (GetLogical(CompParams, 'Foil Sheet Derive Sigma 33', Found)) THEN
+      sigs = ff * sgm * th
+      CALL ListAddConstReal(CompParams, 'Sigma 33', REAL(sigs, KIND=dp))
+      CALL ListAddConstReal(CompParams, 'Sigma 33 im', AIMAG(sigs))
+      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Sigma 33 = ', &
+          REAL(sigs, KIND=dp), AIMAG(sigs), ' i'
+      CALL Info('Circuits_Init', Message, Level=3)
+    END IF
+
+    Homog = GetLogical(CompParams, 'Homogenization Model', Found)
+    IF (.NOT. Found) Homog = .FALSE.
+    IF (Homog .AND. GetLogical(CompParams, 'Foil Sheet Derive Nu', Found)) THEN
+      mue = mu0 * ((1._dp - ff) + ff * th)
+      nue = 1._dp / mue
+      CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp / mu0)
+      CALL ListAddConstReal(CompParams, 'Nu 22', REAL(nue, KIND=dp))
+      CALL ListAddConstReal(CompParams, 'Nu 22 im', AIMAG(nue))
+      CALL ListAddConstReal(CompParams, 'Nu 33', REAL(nue, KIND=dp))
+      CALL ListAddConstReal(CompParams, 'Nu 33 im', AIMAG(nue))
+      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Nu 22 = Nu 33 = ', &
+          REAL(nue, KIND=dp), AIMAG(nue), ' i'
+      CALL Info('Circuits_Init', Message, Level=3)
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE SetFoilSheetHarmonicMaterial
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Refresh the harmonic sheet material from a temperature dependent
+!> 'Sheet Conductivity'. Called on every harmonic circuits solver call, so a
+!> thermal iteration that updates the temperature field also updates the coil
+!> material. A constant keyword, an explicit 'Sigma 33' or a transient run all
+!> leave this a no-op.
+!------------------------------------------------------------------------------
+  SUBROUTINE UpdateFoilSheetMaterial(CompParams)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    REAL(KIND=dp) :: tfoil, ff, sgm
+    LOGICAL :: FoundT, FoundF, FoundS, Found, Varies
+
+    IF (.NOT. GetLogical(CompParams, 'Foil Sheet Sigma Varies', Found)) RETURN
+
+    tfoil = GetConstReal(CompParams, 'Foil Thickness', FoundT)
+    ff    = GetConstReal(CompParams, 'Fill Factor', FoundF)
+    sgm   = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
+    IF (.NOT. (FoundT .AND. FoundF .AND. FoundS)) RETURN
+
+    WRITE(Message,'(A,ES12.5)') 'Foil sheet mean sheet conductivity = ', sgm
+    CALL Info('Circuits_Init', Message, Level=3)
+    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm)
+!------------------------------------------------------------------------------
+  END SUBROUTINE UpdateFoilSheetMaterial
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Derive everything the foil sheet needs from the three physical keywords
 !> 'Foil Thickness', 'Fill Factor' and 'Sheet Conductivity', so that the SIF
 !> writer supplies physics and Elmer owns the homogenisation formulas. tau0 and
@@ -2458,18 +2717,27 @@ END FUNCTION isComponentName
     USE CircuitUtils
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
-    REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, omega, mu0
+    REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, mu0
     REAL(KIND=dp) :: nuinf, rr(6), tt(6), arr(6,1)
     INTEGER :: nlad, nlk
-    COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
     LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient, NuLadder
-    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
+    LOGICAL :: SigmaVaries
 
     mu0 = 4.0d-7 * PI
     tfoil = GetConstReal(CompParams, 'Foil Thickness', FoundT)
     ff    = GetConstReal(CompParams, 'Fill Factor', FoundF)
-    sgm   = GetConstReal(CompParams, 'Sheet Conductivity', FoundS)
+    sgm   = FoilSheetBlockConductivity(CompParams, FoundS, SigmaVaries)
     HavePhys = FoundT .AND. FoundF .AND. FoundS
+
+    ! Who owns the derived material has to be decided here, before anything is
+    ! written: an explicit 'Sigma 33' or 'Nu 22' in the SIF always wins, and
+    ! after the first derivation both keywords are present whoever wrote them.
+    CALL ListAddLogical(CompParams, 'Foil Sheet Derive Sigma 33', &
+        HavePhys .AND. .NOT. ListCheckPresent(CompParams,'Sigma 33'))
+    CALL ListAddLogical(CompParams, 'Foil Sheet Derive Nu', &
+        HavePhys .AND. .NOT. ListCheckPresent(CompParams,'Nu 22'))
+    ! Only worth refreshing when the derivation actually uses it.
+    CALL ListAddLogical(CompParams, 'Foil Sheet Sigma Varies', SigmaVaries .AND. HavePhys)
 
     IF (HavePhys) THEN
       IF (tfoil <= 0._dp) CALL Fatal('Circuits_Init','Foil sheet: "Foil Thickness" must be positive!')
@@ -2565,34 +2833,7 @@ END FUNCTION isComponentName
     END IF
 
     IF (.NOT. HavePhys) RETURN
-    omega = GetAngularFrequency()
-    IF (omega <= 0._dp) RETURN
-    u  = SQRT(im * omega * tau0)
-    th = FoilSheetTanhOverU(u)
-
-    IF (.NOT. ListCheckPresent(CompParams,'Sigma 33')) THEN
-      sigs = ff * sgm * th
-      CALL ListAddConstReal(CompParams, 'Sigma 33', REAL(sigs, KIND=dp))
-      CALL ListAddConstReal(CompParams, 'Sigma 33 im', AIMAG(sigs))
-      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Sigma 33 = ', &
-          REAL(sigs, KIND=dp), AIMAG(sigs), ' i'
-      CALL Info('Circuits_Init', Message, Level=3)
-    END IF
-
-    Homog = GetLogical(CompParams, 'Homogenization Model', Found)
-    IF (.NOT. Found) Homog = .FALSE.
-    IF (Homog .AND. .NOT. ListCheckPresent(CompParams,'Nu 22')) THEN
-      mue = mu0 * ((1._dp - ff) + ff * th)
-      nue = 1._dp / mue
-      CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp / mu0)
-      CALL ListAddConstReal(CompParams, 'Nu 22', REAL(nue, KIND=dp))
-      CALL ListAddConstReal(CompParams, 'Nu 22 im', AIMAG(nue))
-      CALL ListAddConstReal(CompParams, 'Nu 33', REAL(nue, KIND=dp))
-      CALL ListAddConstReal(CompParams, 'Nu 33 im', AIMAG(nue))
-      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Nu 22 = Nu 33 = ', &
-          REAL(nue, KIND=dp), AIMAG(nue), ' i'
-      CALL Info('Circuits_Init', Message, Level=3)
-    END IF
+    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm)
 !------------------------------------------------------------------------------
   END SUBROUTINE InitFoilSheetMaterial
 !------------------------------------------------------------------------------
