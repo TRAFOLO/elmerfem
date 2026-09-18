@@ -97,7 +97,9 @@ MODULE TransientHomogCircuitState
   ! with hx_n and hy the BDF history of x_n and y.
   !----------------------------------------------------------------------------
   TYPE FoilSkin_t
-    LOGICAL :: Active = .FALSE.
+    ! Alloc says the per strand state exists, Active says the ladder maths is
+    ! switched on. The loss bookkeeping needs the first, not the second.
+    LOGICAL :: Active = .FALSE., Alloc = .FALSE.
     INTEGER :: N = 0, nStrand = 0, nCells = 0, nSegments = 0
     REAL(KIND=dp) :: Ltail = 0._dp, Gdiag = 1._dp
     REAL(KIND=dp), ALLOCATABLE :: tau(:), Minv(:)
@@ -126,6 +128,7 @@ CONTAINS
     TYPE(ValueList_t), POINTER :: CompParams
     LOGICAL :: found
     CHARACTER(LEN=MAX_NAME_LEN) :: ctype
+    LOGICAL :: ladderon
     REAL(KIND=dp) :: tau0, rest
 
     IF (fskin_allocated) RETURN
@@ -141,13 +144,18 @@ CONTAINS
       IF (.NOT. found) CYCLE
       IF (TRIM(ctype) /= 'foil sheet') CYCLE
 
-      ! On by default in transient; the keyword only switches it off.
-      IF (ListCheckPresent(CompParams,'Sheet Skin Ladder')) THEN
-        IF (.NOT. GetLogical(CompParams,'Sheet Skin Ladder', found)) CYCLE
-      END IF
+      ! On by default in transient; the keyword only switches the ladder maths
+      ! off. The per strand state is allocated either way, because the loss
+      ! bookkeeping uses its resistance weights.
+      ladderon = .TRUE.
+      IF (ListCheckPresent(CompParams,'Sheet Skin Ladder')) &
+          ladderon = GetLogical(CompParams,'Sheet Skin Ladder', found)
 
       tau0 = GetConstReal(CompParams, 'Foil Sheet Tau0', found)
-      IF (.NOT. found .OR. tau0 <= 0._dp) CYCLE
+      IF (.NOT. found .OR. tau0 <= 0._dp) THEN
+        ladderon = .FALSE.
+        tau0 = 1._dp
+      END IF
 
       nn = GetInteger(CompParams, 'Sheet Skin Ladder Order', found)
       IF (.NOT. found) nn = 4
@@ -161,7 +169,8 @@ CONTAINS
       ns = FSkin(i) % nCells * FSkin(i) % nSegments
       IF (ns < 1) CYCLE
 
-      FSkin(i) % Active  = .TRUE.
+      FSkin(i) % Active  = ladderon
+      FSkin(i) % Alloc   = .TRUE.
       FSkin(i) % N       = nn
       FSkin(i) % nStrand = ns
       ALLOCATE(FSkin(i) % tau(nn), FSkin(i) % Minv(nn))
@@ -254,8 +263,18 @@ CONTAINS
 
     IF (.NOT. fskin_allocated) RETURN
     IF (i < 1 .OR. i > SIZE(FSkin)) RETURN
-    IF (.NOT. FSkin(i) % Active) RETURN
+    IF (.NOT. FSkin(i) % Alloc) RETURN
     IF (dt <= 0._dp) RETURN
+
+    ! The strand currents are recorded whether or not the ladder is on, because
+    ! the loss bookkeeping needs them; only the stage states are advanced.
+    IF (.NOT. FSkin(i) % Active) THEN
+      DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
+        FSkin(i) % yo(j) = FSkin(i) % y(j)
+        FSkin(i) % y(j)  = ynew(j)
+      END DO
+      RETURN
+    END IF
 
     DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
       DO k = 1, FSkin(i) % N
@@ -291,14 +310,16 @@ CONTAINS
     Ptot = 0._dp; Pdc = 0._dp
     IF (.NOT. fskin_allocated) RETURN
     IF (i < 1 .OR. i > SIZE(FSkin)) RETURN
-    IF (.NOT. FSkin(i) % Active) RETURN
+    IF (.NOT. FSkin(i) % Alloc) RETURN
 
     DO j = 1, FSkin(i) % nStrand
       s = FSkin(i) % y(j)**2
       Pdc = Pdc + FSkin(i) % w(j) * s
-      DO k = 1, FSkin(i) % N
-        s = s + 2._dp * (FSkin(i) % y(j) - FSkin(i) % x(k,j))**2
-      END DO
+      IF (FSkin(i) % Active) THEN
+        DO k = 1, FSkin(i) % N
+          s = s + 2._dp * (FSkin(i) % y(j) - FSkin(i) % x(k,j))**2
+        END DO
+      END IF
       Ptot = Ptot + FSkin(i) % w(j) * s
     END DO
   END SUBROUTINE FoilSkinLoss
@@ -884,7 +905,7 @@ CONTAINS
       ! The strand resistance weights are re-accumulated with the matrix.
       IF (fskin_allocated) THEN
         IF (Comp % ComponentId >= 1 .AND. Comp % ComponentId <= SIZE(FSkin)) THEN
-          IF (FSkin(Comp % ComponentId) % Active) FSkin(Comp % ComponentId) % w = 0._dp
+          IF (FSkin(Comp % ComponentId) % Alloc) FSkin(Comp % ComponentId) % w = 0._dp
         END IF
       END IF
 
@@ -1649,7 +1670,7 @@ CONTAINS
     REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), wgt, uu, vv, ww
     LOGICAL :: Exact
     INTEGER :: CompId
-    LOGICAL :: SkinLadder
+    LOGICAL :: SkinLadder, HaveSkinState
     REAL(KIND=dp) :: Kfac
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     LOGICAL, SAVE :: First = .TRUE.
@@ -1702,8 +1723,12 @@ CONTAINS
 
     CompId = Comp % ComponentId
     SkinLadder = .FALSE.
+    HaveSkinState = .FALSE.
     IF (fskin_allocated .AND. CompId >= 1) THEN
-      IF (CompId <= SIZE(FSkin)) SkinLadder = FSkin(CompId) % Active
+      IF (CompId <= SIZE(FSkin)) THEN
+        SkinLadder    = FSkin(CompId) % Active
+        HaveSkinState = FSkin(CompId) % Alloc
+      END IF
     END IF
 
     Exact = (ngp <= 0)
@@ -1762,12 +1787,13 @@ CONTAINS
       IF (SkinLadder) THEN
         CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac * FSkin(CompId) % Gdiag)
         CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + Kfac * FSkin(CompId) % hist(sInd)
-        ! Kfac*SigmaRef = gres SigmaRef^2/sigma_dc is the DC resistance weight of
-        ! this piece, which turns the strand dofs into a dissipation.
-        FSkin(CompId) % w(sInd) = FSkin(CompId) % w(sInd) + Kfac * Comp % SigmaRef
       ELSE
         CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac)
       END IF
+      ! Kfac*SigmaRef = gres SigmaRef^2/sigma_dc is the DC resistance weight of
+      ! this piece, which turns the strand dofs into a dissipation. Accumulated
+      ! whether or not the ladder is on, so that the loss is reported either way.
+      IF (HaveSkinState) FSkin(CompId) % w(sInd) = FSkin(CompId) % w(sInd) + Kfac * Comp % SigmaRef
       CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor)
       CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g)
 
@@ -4048,7 +4074,7 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
        bdf = FoilSkinBDFOrder()
        Pstrand = 0._dp; Pexcess = 0._dp; anyskin = .FALSE.
        DO ci = 1, SIZE(FSkin)
-         IF (.NOT. FSkin(ci) % Active) CYCLE
+         IF (.NOT. FSkin(ci) % Alloc) CYCLE
          anyskin = .TRUE.
          CPar => CurrentModel % Components(ci) % Values
          IF (.NOT. ASSOCIATED(CPar)) CYCLE
