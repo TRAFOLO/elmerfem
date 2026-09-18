@@ -1692,6 +1692,7 @@ Component:Real:      'Foil Sheet Sigma DC'
 ! Transient strand skin ladder (DEV-1513 E2).
 Component:Logical:   'Sheet Skin Ladder'
 Component:Logical:   'Sheet Nu Ladder'
+Component:Real   :   'Sheet Normal Conductivity'
 Component:Integer:   'Sheet Skin Ladder Order'
 Component:Logical:   'Homogenization Model'
 Component:Real:      'Nu 11'

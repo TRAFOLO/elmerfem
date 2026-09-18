@@ -3862,9 +3862,9 @@ END SUBROUTINE LocalConstraintMatrix
                                         av0(:), av1(:), av2(:), rotm_r(:,:,:)
     INTEGER, SAVE :: rg_n = 0, rg_nd = 0
     REAL(KIND=dp) :: detJ_r, rml(3,3), wt, adot(3), vloc
-    REAL(KIND=dp) :: epsreg, sig33, sigreg, reg_total, c1, c2, c3, k_ratio
+    REAL(KIND=dp) :: epsreg, sig33, sigreg, reg_total, c1, c2, c3, k_ratio, signorm, nrm_total
 
-    reg_total = 0._dp
+    reg_total = 0._dp; nrm_total = 0._dp
     any_reg = 0
     IF (dt <= 0._dp) RETURN
 
@@ -3888,12 +3888,13 @@ END SUBROUTINE LocalConstraintMatrix
       IF (coil_type_loc /= 'foil sheet') CYCLE
 
       epsreg = GetConstReal(cParams, 'Sheet Regularization', found_loc)
-      IF (.NOT. found_loc) CYCLE
-      IF (epsreg <= 0._dp) CYCLE
+      IF (.NOT. found_loc) epsreg = 0._dp
       sig33 = GetConstReal(cParams, 'Sigma 33', found_loc)
-      IF (.NOT. found_loc) CYCLE
+      IF (.NOT. found_loc) sig33 = 0._dp
       sigreg = epsreg * sig33
-      IF (sigreg <= 0._dp) CYCLE
+      signorm = GetConstReal(cParams, 'Sheet Normal Conductivity', found_loc)
+      IF (.NOT. found_loc) signorm = 0._dp
+      IF (sigreg <= 0._dp .AND. signorm <= 0._dp) CYCLE
       any_reg = 1
 
       n_el  = GetElementNOFNodes(el)
@@ -3930,6 +3931,8 @@ END SUBROUTINE LocalConstraintMatrix
         wt = detJ_r * ipPts % s(ip_t)
         ! C_global = R C_local R^T, so the local components are R^T (dA/dt) and
         ! only the two in-foil directions carry the regularisation conductivity.
+        vloc = SUM(adot * rml(:,1))
+        nrm_total = nrm_total + signorm * vloc * vloc * wt
         DO d = 2, 3
           vloc = SUM(adot * rml(:,d))
           reg_total = reg_total + sigreg * vloc * vloc * wt
@@ -3941,6 +3944,8 @@ END SUBROUTINE LocalConstraintMatrix
     IF (any_reg == 0) RETURN
     reg_total = ParallelReduction(reg_total)
     CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet regularisation loss', reg_total)
+    nrm_total = ParallelReduction(nrm_total)
+    CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet normal loss', nrm_total)
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeSheetRegLoss
 !------------------------------------------------------------------------------

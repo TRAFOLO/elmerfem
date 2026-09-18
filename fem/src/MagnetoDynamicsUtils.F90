@@ -161,23 +161,34 @@
     INTEGER :: n
     REAL(KIND=dp) :: Tcoef(3,3,n)
     TYPE(ValueList_t), POINTER :: CompParams
-    REAL(KIND=dp) :: eps, sig
+    REAL(KIND=dp) :: eps, sig, signorm
     LOGICAL :: Found
 
     Tcoef = 0._dp
     CompParams => GetComponentParams(Element)
     IF (.NOT. ASSOCIATED(CompParams)) RETURN
 
+    ! Local directions: 1 = across the stack, 2 and 3 in the foil plane.
+    ! The two knobs below are independent and both default to off.
+
+    ! In-plane regularisation. Kept for experiments; it shorts the winding at
+    ! any useful size, so it is not a production setting.
     eps = GetConstReal(CompParams, 'Sheet Regularization', Found)
-    IF (.NOT. Found) eps = 0._dp
-    IF (eps <= 0._dp) RETURN
+    IF (Found .AND. eps > 0._dp) THEN
+      sig = GetConstReal(CompParams, 'Sigma 33', Found)
+      IF (Found) THEN
+        Tcoef(2,2,1:n) = eps * sig
+        Tcoef(3,3,1:n) = eps * sig
+      END IF
+    END IF
 
-    sig = GetConstReal(CompParams, 'Sigma 33', Found)
-    IF (.NOT. Found) RETURN
-
-    ! Local directions: 1 = across the stack (no conduction), 2 and 3 in the foil
-    Tcoef(2,2,1:n) = eps * sig
-    Tcoef(3,3,1:n) = eps * sig
+    ! Conductivity along the stacking normal only. It cannot short the coil
+    ! because there is no in-plane path, and in an axisymmetric winding E_alpha
+    ! vanishes so it carries no current at all. Numerically it supplies the
+    ! sigma dA/dt mass term on the alpha component inside the block, which is a
+    ! gauge condition in the shape of a material.
+    signorm = GetConstReal(CompParams, 'Sheet Normal Conductivity', Found)
+    IF (Found .AND. signorm > 0._dp) Tcoef(1,1,1:n) = signorm
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetConductivity
 !------------------------------------------------------------------------------
