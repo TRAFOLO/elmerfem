@@ -2360,6 +2360,7 @@ END SUBROUTINE LocalConstraintMatrix
           xi_perm_idx = Element % ElementIndex
         END IF
         IF (xi_perm_idx <= 0) CYCLE
+        IF (xi_perm_idx*HomogLadderOrder > SIZE(XiD(xd) % var % Values)) CYCLE
         DO xk = 1, HomogLadderOrder
           xi_e(xk,xd) = XiD(xd) % var % Values((xi_perm_idx-1)*HomogLadderOrder + xk)
           IF (ALLOCATED(XiD(xd) % prev2)) &
@@ -3705,6 +3706,13 @@ END SUBROUTINE LocalConstraintMatrix
         ELSE
           eperm(d) = el % ElementIndex
         END IF
+      END DO
+      IF (ANY(dloc .AND. eperm <= 0)) CYCLE
+      ! Guard the element's slot against the variable's actual length: an -elem
+      ! variable only covers the bodies its solver is active on.
+      DO d = 1, 3
+        IF (.NOT. dloc(d)) CYCLE
+        IF (eperm(d)*nlad > SIZE(XiD(d) % var % Values)) eperm(d) = 0
       END DO
       IF (ANY(dloc .AND. eperm <= 0)) CYCLE
 
