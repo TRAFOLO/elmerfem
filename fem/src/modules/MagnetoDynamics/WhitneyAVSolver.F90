@@ -795,6 +795,8 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   ! Slice 1b: advance the transient-homogenization auxiliary state Xi to t^{n+1}
   ! using the just-converged A^{n+1}. Runs only in transient mode and only if
   ! the Xi exported variables exist (i.e. some Component had transient homog).
+  IF (Transient) CALL ComputeSheetRegLoss()
+
   IF (Transient .AND. (ASSOCIATED(XiD(1) % var) .OR. ASSOCIATED(XiD(2) % var) .OR. &
                        ASSOCIATED(XiD(3) % var))) THEN
     CALL UpdateTransientHomogXiState()
@@ -3836,6 +3838,111 @@ END SUBROUTINE LocalConstraintMatrix
     dt_prev = dt
 !------------------------------------------------------------------------------
   END SUBROUTINE UpdateTransientHomogXiState
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Volumetric Joule loss produced by the artificial 'Sheet Regularization'
+!> conductivity of a foil sheet block. It is not a physical loss: it is the
+!> price of making the transient curl-curl operator of the block regular, so it
+!> is published as its own scalar instead of being folded into the eddy current
+!> power, and it has to stay small next to the strand and proximity losses.
+!------------------------------------------------------------------------------
+  SUBROUTINE ComputeSheetRegLoss()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: el
+    TYPE(ValueList_t), POINTER :: cParams
+    TYPE(GaussIntegrationPoints_t) :: ipPts
+    TYPE(Nodes_t), SAVE :: rgNodes
+    INTEGER :: el_idx, ip_t, n_el, nd_el, np_el, ii, jj, d
+    LOGICAL :: stat_ip, found_loc
+    INTEGER :: any_reg
+    CHARACTER(LEN=MAX_NAME_LEN) :: coil_type_loc
+    REAL(KIND=dp), ALLOCATABLE, SAVE :: bs_r(:), dbs_r(:,:), wbs_r(:,:), rwbs_r(:,:), &
+                                        av0(:), av1(:), av2(:), rotm_r(:,:,:)
+    INTEGER, SAVE :: rg_n = 0, rg_nd = 0
+    REAL(KIND=dp) :: detJ_r, rml(3,3), wt, adot(3), vloc
+    REAL(KIND=dp) :: epsreg, sig33, sigreg, reg_total, c1, c2, c3, k_ratio
+
+    reg_total = 0._dp
+    any_reg = 0
+    IF (dt <= 0._dp) RETURN
+
+    ! Same variable-dt BDF stencil as the ladder, recomputed locally: this runs
+    ! before the ladder records dt_prev, and also when no ladder is active.
+    IF (Solver % Order < 2 .OR. GetTimeStep() <= 2 .OR. dt_prev <= 0._dp) THEN
+      c1 =  1._dp; c2 = -1._dp; c3 = 0._dp
+    ELSE
+      k_ratio = dt / dt_prev
+      c1 = (1._dp + 2._dp * k_ratio) / (1._dp + k_ratio)
+      c2 = -(1._dp + k_ratio)
+      c3 = (k_ratio * k_ratio) / (1._dp + k_ratio)
+    END IF
+
+    DO el_idx = 1, GetNOFActive()
+      el => GetActiveElement(el_idx)
+      cParams => GetComponentParams(el)
+      IF (.NOT. ASSOCIATED(cParams)) CYCLE
+      coil_type_loc = GetString(cParams, 'Coil Type', found_loc)
+      IF (.NOT. found_loc) CYCLE
+      IF (coil_type_loc /= 'foil sheet') CYCLE
+
+      epsreg = GetConstReal(cParams, 'Sheet Regularization', found_loc)
+      IF (.NOT. found_loc) CYCLE
+      IF (epsreg <= 0._dp) CYCLE
+      sig33 = GetConstReal(cParams, 'Sigma 33', found_loc)
+      IF (.NOT. found_loc) CYCLE
+      sigreg = epsreg * sig33
+      IF (sigreg <= 0._dp) CYCLE
+      any_reg = 1
+
+      n_el  = GetElementNOFNodes(el)
+      nd_el = GetElementNOFDOFs(el)
+      IF (n_el > rg_n .OR. nd_el > rg_nd) THEN
+        IF (ALLOCATED(bs_r)) DEALLOCATE(bs_r, dbs_r, wbs_r, rwbs_r, av0, av1, av2, rotm_r)
+        ALLOCATE(bs_r(n_el), dbs_r(n_el,3), wbs_r(nd_el,3), rwbs_r(nd_el,3), &
+                 av0(nd_el), av1(nd_el), av2(nd_el), rotm_r(3,3,n_el))
+        rg_n = n_el; rg_nd = nd_el
+      END IF
+
+      np_el = n_el * Solver % Def_Dofs(GetElementFamily(el), el % BodyId, 1)
+      CALL GetElementNodes(rgNodes, UElement=el)
+      CALL GetElementRotM(el, rotm_r, n_el)
+      av0 = 0._dp; av1 = 0._dp; av2 = 0._dp
+      CALL GetScalarLocalSolution(av0, UElement=el)
+      CALL GetScalarLocalSolution(av1, UElement=el, tStep=-1)
+      IF (c3 /= 0._dp) CALL GetScalarLocalSolution(av2, UElement=el, tStep=-2)
+
+      ipPts = GaussPointsAdapt(el, Solver, EdgeBasis=.TRUE.)
+      DO ip_t = 1, ipPts % n
+        stat_ip = ElementInfo(el, rgNodes, ipPts % U(ip_t), ipPts % V(ip_t), &
+                              ipPts % W(ip_t), detJ_r, bs_r(1:n_el), dbs_r(1:n_el,:), &
+                              EdgeBasis = wbs_r(1:nd_el,:), &
+                              RotBasis = rwbs_r(1:nd_el,:), USolver = pSolver)
+        DO ii = 1, 3
+          DO jj = 1, 3
+            rml(ii,jj) = SUM(rotm_r(ii,jj,1:n_el) * bs_r(1:n_el))
+          END DO
+        END DO
+        adot = ( c1 * MATMUL(av0(np_el+1:nd_el), wbs_r(1:nd_el-np_el,:)) &
+               + c2 * MATMUL(av1(np_el+1:nd_el), wbs_r(1:nd_el-np_el,:)) &
+               + c3 * MATMUL(av2(np_el+1:nd_el), wbs_r(1:nd_el-np_el,:)) ) / dt
+        wt = detJ_r * ipPts % s(ip_t)
+        ! C_global = R C_local R^T, so the local components are R^T (dA/dt) and
+        ! only the two in-foil directions carry the regularisation conductivity.
+        DO d = 2, 3
+          vloc = SUM(adot * rml(:,d))
+          reg_total = reg_total + sigreg * vloc * vloc * wt
+        END DO
+      END DO
+    END DO
+
+    any_reg = ParallelReduction(any_reg, 2)
+    IF (any_reg == 0) RETURN
+    reg_total = ParallelReduction(reg_total)
+    CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet regularisation loss', reg_total)
+!------------------------------------------------------------------------------
+  END SUBROUTINE ComputeSheetRegLoss
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
