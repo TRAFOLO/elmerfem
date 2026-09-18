@@ -2489,6 +2489,17 @@ END FUNCTION isComponentName
 
     Transient = (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient')
     IF (Transient) THEN
+      ! DEV-1513: be honest about where this is validated. A-C of the transient
+      ! work are verified against the harmonic twin on small meshes, but the
+      ! time-domain solve does not converge from a zero start on production
+      ! meshes; see handover item 1o for the measurements and the closed routes.
+      CALL Warn('Circuits_Init', 'Transient foil sheet: validated on small ' // &
+          'meshes only; the time-domain solve on production meshes does not ' // &
+          'converge from a zero start (see DEV-1513 handover 1o); use ' // &
+          'harmonic for production results')
+    END IF
+
+    IF (Transient) THEN
       IF (.NOT. HavePhys) CALL Fatal('Circuits_Init', &
           'Foil sheet transient needs "Foil Thickness", "Fill Factor" and "Sheet Conductivity"!')
 
