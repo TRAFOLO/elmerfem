@@ -2462,7 +2462,7 @@ END FUNCTION isComponentName
     REAL(KIND=dp) :: nuinf, rr(6), tt(6), arr(6,1)
     INTEGER :: nlad, nlk
     COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
-    LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient
+    LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient, NuLadder
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
 
     mu0 = 4.0d-7 * PI
@@ -2503,7 +2503,22 @@ END FUNCTION isComponentName
 
       Homog = GetLogical(CompParams, 'Homogenization Model', Found)
       IF (.NOT. Found) Homog = .FALSE.
-      IF (Homog .AND. .NOT. ListCheckPresent(CompParams,'Nu 22 Residues')) THEN
+      ! DEV-1513: 'Sheet Nu Ladder' (default True) switches the transient
+      ! proximity ladder off, leaving the block at the constant real air
+      ! reluctivity. With no 'Nu 22 Residues' written, the assembly gate in
+      ! WhitneyAVSolver never turns on, so there are no Xi states and no
+      ! history injection either.
+      NuLadder = .TRUE.
+      IF (ListCheckPresent(CompParams,'Sheet Nu Ladder')) &
+          NuLadder = GetLogical(CompParams, 'Sheet Nu Ladder', Found)
+      IF (Homog .AND. .NOT. NuLadder) THEN
+        CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp/mu0)
+        CALL ListAddConstReal(CompParams, 'Nu 22', 1._dp/mu0)
+        CALL ListAddConstReal(CompParams, 'Nu 33', 1._dp/mu0)
+        CALL Info('Circuits_Init', &
+            'Foil sheet Nu ladder disabled: block held at constant real 1/mu0', Level=5)
+      END IF
+      IF (Homog .AND. NuLadder .AND. .NOT. ListCheckPresent(CompParams,'Nu 22 Residues')) THEN
         nlad = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
         IF (.NOT. Found) nlad = 4
         CALL FoilSheetNuFoster(tau0, ff, nlad, nuinf, rr(1:nlad), tt(1:nlad))
