@@ -870,19 +870,59 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Foil sheet: 1-based cell index (along Alpha) and segment index (along Beta)
-!> of a point with normalized coordinates in [0,1].
+!> Foil sheet: 1-based cell index (along the stacking direction) and segment
+!> index (across it) of a point with normalized coordinates in [0,1].
 !------------------------------------------------------------------------------
-  SUBROUTINE FoilSheetStrand(nCells, nSegments, sAlpha, sBeta, k, j)
+  SUBROUTINE FoilSheetStrand(nCells, nSegments, sStack, sAcross, k, j)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     INTEGER :: nCells, nSegments, k, j
-    REAL(KIND=dp) :: sAlpha, sBeta
+    REAL(KIND=dp) :: sStack, sAcross
 
-    k = MIN(nCells,    MAX(1, FLOOR(sAlpha * nCells)    + 1))
-    j = MIN(nSegments, MAX(1, FLOOR(sBeta  * nSegments) + 1))
+    k = MIN(nCells,    MAX(1, FLOOR(sStack  * nCells)    + 1))
+    j = MIN(nSegments, MAX(1, FLOOR(sAcross * nSegments) + 1))
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetStrand
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Local reluctivity tensor directions of a foil sheet. Local direction 1 is
+!> Alpha, 2 is Beta and 3 is Gamma, the current direction, which lies in the
+!> turn plane whichever way the turns are stacked. The stacking normal keeps
+!> 1/mu0 and the two in-plane directions carry the complex stack permeability,
+!> so 'Stacking Direction' alone decides which tensor component is which:
+!> alpha stacking (foils, flatwise flat wire) homogenizes Beta and Gamma,
+!> beta stacking (edgewise flat wire) homogenizes Alpha and Gamma.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetNuDirections(StackAlongAlpha, dStack, dPlane)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    LOGICAL :: StackAlongAlpha
+    INTEGER :: dStack, dPlane(2)
+
+    IF (StackAlongAlpha) THEN
+      dStack = 1
+      dPlane = [2, 3]
+    ELSE
+      dStack = 2
+      dPlane = [1, 3]
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetNuDirections
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Reluctivity keyword of a local direction: 'Nu 11', 'Nu 22' or 'Nu 33'.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetNuKey(d) RESULT(key)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: d
+    CHARACTER(LEN=5) :: key
+
+    WRITE(key,'(A,I1,I1)') 'Nu ', d, d
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetNuKey
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -901,8 +941,10 @@ CONTAINS
 
 !------------------------------------------------------------------------------
 !> Euler potential form of the foil sheet strand direction at an integration
-!> point: t = s * grad(Alpha) x grad(Beta), with s = +-1 fixed once per component
-!> so that t points along grad(W).
+!> point: t = s * grad(stack) x grad(across), with s = +-1 fixed once per
+!> component so that t points along grad(W). Swapping the two fields only flips
+!> the cross product, which the sign absorbs, so the strand direction is the
+!> same physical field for either stacking direction.
 !>
 !> This field is exactly solenoidal in the discrete weak sense - it is a cross
 !> product of two gradients, so div t vanishes identically and its normal
@@ -916,15 +958,15 @@ CONTAINS
 !> strand index is taken at the integration point (FoilSheetStrand on the
 !> interpolated Alpha and Beta), not once per element.
 !------------------------------------------------------------------------------
-  FUNCTION FoilSheetDirection(sAlpha, sBeta, dBasisdx, n, sgn) RESULT(t)
+  FUNCTION FoilSheetDirection(sStack, sAcross, dBasisdx, n, sgn) RESULT(t)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    REAL(KIND=dp) :: sAlpha(:), sBeta(:), dBasisdx(:,:), sgn, t(3)
+    REAL(KIND=dp) :: sStack(:), sAcross(:), dBasisdx(:,:), sgn, t(3)
     INTEGER :: n
     REAL(KIND=dp) :: ga(3), gb(3)
 
-    ga = MATMUL(sAlpha(1:n), dBasisdx(1:n,:))
-    gb = MATMUL(sBeta(1:n), dBasisdx(1:n,:))
+    ga = MATMUL(sStack(1:n), dBasisdx(1:n,:))
+    gb = MATMUL(sAcross(1:n), dBasisdx(1:n,:))
     t(1) = ga(2)*gb(3) - ga(3)*gb(2)
     t(2) = ga(3)*gb(1) - ga(1)*gb(3)
     t(3) = ga(1)*gb(2) - ga(2)*gb(1)
@@ -1178,9 +1220,9 @@ CONTAINS
 
 !------------------------------------------------------------------------------
 !> Exact decomposition of a linear tetrahedron into its foil sheet strand
-!> pieces. Alpha and Beta are linear inside the tet, so the part of the tet that
-!> belongs to strand (k,j) is the convex polytope cut out by
-!>    alpha_k <= Alpha <= alpha_(k+1),  beta_j <= Beta <= beta_(j+1),
+!> pieces. The stacking and across fields are linear inside the tet, so the part
+!> of the tet that belongs to strand (k,j) is the convex polytope cut out by
+!>    a_k <= stack <= a_(k+1),  b_j <= across <= b_(j+1),
 !> obtained here by clipping against the at most four planes that cross the
 !> element. One piece is returned per strand: its volume fraction of the parent
 !> and the barycentric coordinates of its centroid. Every strand integrand of
@@ -2537,19 +2579,28 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Foil sheet winding: the foil stack is modelled as conducting SHEETS, not as a
-!> conducting continuum. The block is split into nCells cells along Alpha (the
-!> stacking normal) and each cell into nSegments strands along Beta (the foil
-!> width). Cell k lumps foilsPerCell = N/nCells foils; strand (k,j) carries a
-!> uniform current density c_kj*grad(W). The intra-foil skin effect is in the
-!> complex sheet conductivity (Sigma 33 / Sigma 33 im) and the intra-foil
+!> Foil sheet winding: the turn stack is modelled as conducting SHEETS, not as a
+!> conducting continuum. The block is split into nCells cells along the stacking
+!> direction (the turn normal) and each cell into nSegments strands across it
+!> (the turn width). Cell k lumps foilsPerCell = N/nCells turns; strand (k,j)
+!> carries a uniform current density c_kj*grad(W). The intra-turn skin effect is
+!> in the complex sheet conductivity (Sigma 33 / Sigma 33 im) and the intra-turn
 !> proximity effect in the complex reluctivity (Nu 11/22/33), so the block
 !> itself carries no volumetric eddy current.
 !>
+!> 'Stacking Direction' picks which direction field is the stacking normal:
+!> alpha (the default) is a foil stack or a flatwise flat wire, beta is an
+!> edgewise flat wire. Everything that distinguishes the stacking from the
+!> across direction follows it - the cell and strand layout, the strand
+!> direction, and which reluctivity components carry the complex stack
+!> permeability.
+!>
 !> Component keywords:
 !>   Number of Turns        number of foils N, must be an integer
-!>   Sheet Cells            cells along Alpha (default N), must divide N
-!>   Sheet Segments         strands along Beta per cell (default 16)
+!>   Stacking Direction     alpha (default, foils and flatwise flat wire) or
+!>                          beta (edgewise flat wire): the field across the stack
+!>   Sheet Cells            cells along the stacking direction (default N), must divide N
+!>   Sheet Segments         strands across the stack per cell (default 16)
 !>   Electrode Area         or Electrode Boundaries, as for foil winding
 !>   Sigma 33 [im]          complex sheet conductivity (harmonic)
 !>   Homogenization Model + Nu 11/22/33 [im]   complex reluctivity via RotM
@@ -2729,15 +2780,17 @@ END FUNCTION isComponentName
 !> InitFoilSheetMaterial, before anything is written). Shared by the init and by
 !> the per-call refresh of a temperature dependent 'Sheet Conductivity'.
 !------------------------------------------------------------------------------
-  SUBROUTINE SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm)
+  SUBROUTINE SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha)
 !------------------------------------------------------------------------------
     USE CircuitUtils
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
     REAL(KIND=dp) :: tfoil, ff, sgm
+    LOGICAL :: StackAlongAlpha
     REAL(KIND=dp) :: tau0, sdc, omega, mu0
     COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
     LOGICAL :: Homog, Found, FoundFreq
+    INTEGER :: dStack, dPlane(2), d
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
 
     mu0 = 4.0d-7 * PI
@@ -2773,13 +2826,14 @@ END FUNCTION isComponentName
     IF (Homog .AND. GetLogical(CompParams, 'Foil Sheet Derive Nu', Found)) THEN
       mue = mu0 * ((1._dp - ff) + ff * th)
       nue = 1._dp / mue
-      CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp / mu0)
-      CALL ListAddConstReal(CompParams, 'Nu 22', REAL(nue, KIND=dp))
-      CALL ListAddConstReal(CompParams, 'Nu 22 im', AIMAG(nue))
-      CALL ListAddConstReal(CompParams, 'Nu 33', REAL(nue, KIND=dp))
-      CALL ListAddConstReal(CompParams, 'Nu 33 im', AIMAG(nue))
-      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Nu 22 = Nu 33 = ', &
-          REAL(nue, KIND=dp), AIMAG(nue), ' i'
+      CALL FoilSheetNuDirections(StackAlongAlpha, dStack, dPlane)
+      CALL ListAddConstReal(CompParams, FoilSheetNuKey(dStack), 1._dp / mu0)
+      DO d = 1, 2
+        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d)), REAL(nue, KIND=dp))
+        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d))//' im', AIMAG(nue))
+      END DO
+      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet '//FoilSheetNuKey(dPlane(1))// &
+          ' = '//FoilSheetNuKey(dPlane(2))//' = ', REAL(nue, KIND=dp), AIMAG(nue), ' i'
       CALL Info('Circuits_Init', Message, Level=3)
     END IF
 !------------------------------------------------------------------------------
@@ -2798,7 +2852,7 @@ END FUNCTION isComponentName
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
     REAL(KIND=dp) :: tfoil, ff, sgm
-    LOGICAL :: FoundT, FoundF, FoundS, Found, Varies
+    LOGICAL :: FoundT, FoundF, FoundS, Found, Varies, StackAlongAlpha
 
     IF (.NOT. GetLogical(CompParams, 'Foil Sheet Sigma Varies', Found)) RETURN
 
@@ -2806,10 +2860,12 @@ END FUNCTION isComponentName
     ff    = GetConstReal(CompParams, 'Fill Factor', FoundF)
     sgm   = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
     IF (.NOT. (FoundT .AND. FoundF .AND. FoundS)) RETURN
+    StackAlongAlpha = GetLogical(CompParams, 'Foil Sheet Stack Along Alpha', Found)
+    IF (.NOT. Found) StackAlongAlpha = .TRUE.
 
     WRITE(Message,'(A,ES12.5)') 'Foil sheet mean sheet conductivity = ', sgm
     CALL Info('Circuits_Init', Message, Level=3)
-    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm)
+    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha)
 !------------------------------------------------------------------------------
   END SUBROUTINE UpdateFoilSheetMaterial
 !------------------------------------------------------------------------------
@@ -2823,30 +2879,34 @@ END FUNCTION isComponentName
 !> here, but only where the SIF did not give them explicitly: an explicit
 !> 'Sigma 33' or 'Nu 22' always wins, which keeps hand written SIFs valid.
 !------------------------------------------------------------------------------
-  SUBROUTINE InitFoilSheetMaterial(CompParams)
+  SUBROUTINE InitFoilSheetMaterial(CompParams, StackAlongAlpha)
 !------------------------------------------------------------------------------
     USE CircuitUtils
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
+    LOGICAL :: StackAlongAlpha
     REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, mu0
     REAL(KIND=dp) :: nuinf, rr(6), tt(6), arr(6,1)
-    INTEGER :: nlad, nlk
+    INTEGER :: nlad, nlk, dStack, dPlane(2), d
     LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient, NuLadder
     LOGICAL :: SigmaVaries
 
     mu0 = 4.0d-7 * PI
+    CALL FoilSheetNuDirections(StackAlongAlpha, dStack, dPlane)
     tfoil = GetConstReal(CompParams, 'Foil Thickness', FoundT)
     ff    = GetConstReal(CompParams, 'Fill Factor', FoundF)
     sgm   = FoilSheetBlockConductivity(CompParams, FoundS, SigmaVaries)
     HavePhys = FoundT .AND. FoundF .AND. FoundS
 
     ! Who owns the derived material has to be decided here, before anything is
-    ! written: an explicit 'Sigma 33' or 'Nu 22' in the SIF always wins, and
+    ! written: an explicit 'Sigma 33' or 'Nu 33' in the SIF always wins, and
     ! after the first derivation both keywords are present whoever wrote them.
+    ! 'Nu 33' is the marker because Gamma is in the turn plane for either
+    ! stacking direction, so it is derived in both cases.
     CALL ListAddLogical(CompParams, 'Foil Sheet Derive Sigma 33', &
         HavePhys .AND. .NOT. ListCheckPresent(CompParams,'Sigma 33'))
     CALL ListAddLogical(CompParams, 'Foil Sheet Derive Nu', &
-        HavePhys .AND. .NOT. ListCheckPresent(CompParams,'Nu 22'))
+        HavePhys .AND. .NOT. ListCheckPresent(CompParams,'Nu 33'))
     ! Only worth refreshing when the derivation actually uses it.
     CALL ListAddLogical(CompParams, 'Foil Sheet Sigma Varies', SigmaVaries .AND. HavePhys)
 
@@ -2904,28 +2964,27 @@ END FUNCTION isComponentName
         CALL Info('Circuits_Init', &
             'Foil sheet Nu ladder disabled: block held at constant real 1/mu0', Level=5)
       END IF
-      IF (Homog .AND. NuLadder .AND. .NOT. ListCheckPresent(CompParams,'Nu 22 Residues')) THEN
+      IF (Homog .AND. NuLadder .AND. .NOT. ListCheckPresent(CompParams,'Nu 33 Residues')) THEN
         nlad = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
         IF (.NOT. Found) nlad = 4
         CALL FoilSheetNuFoster(tau0, ff, nlad, nuinf, rr(1:nlad), tt(1:nlad))
 
-        CALL ListAddConstReal(CompParams, 'Nu 11 y0', 1._dp/mu0)
-        CALL ListAddConstReal(CompParams, 'Nu 22 y0', nuinf)
-        CALL ListAddConstReal(CompParams, 'Nu 33 y0', nuinf)
-        arr = 0._dp
-        arr(1:nlad,1) = rr(1:nlad)
-        CALL ListAddConstRealArray(CompParams, 'Nu 22 Residues', nlad, 1, arr(1:nlad,1:1))
-        CALL ListAddConstRealArray(CompParams, 'Nu 33 Residues', nlad, 1, arr(1:nlad,1:1))
-        arr(1:nlad,1) = tt(1:nlad)
-        CALL ListAddConstRealArray(CompParams, 'Nu 22 Taus', nlad, 1, arr(1:nlad,1:1))
-        CALL ListAddConstRealArray(CompParams, 'Nu 33 Taus', nlad, 1, arr(1:nlad,1:1))
-
+        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dStack)//' y0', 1._dp/mu0)
         ! Post processing still wants a plain reluctivity; give it the DC value
         ! of the same ladder, nu(0) = nu_inf + sum r_k, which for a non magnetic
         ! foil is 1/mu0 whatever the fill factor.
-        CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp/mu0)
-        CALL ListAddConstReal(CompParams, 'Nu 22', nuinf + SUM(rr(1:nlad)))
-        CALL ListAddConstReal(CompParams, 'Nu 33', nuinf + SUM(rr(1:nlad)))
+        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dStack), 1._dp/mu0)
+        DO d = 1, 2
+          CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d))//' y0', nuinf)
+          arr = 0._dp
+          arr(1:nlad,1) = rr(1:nlad)
+          CALL ListAddConstRealArray(CompParams, FoilSheetNuKey(dPlane(d))//' Residues', &
+              nlad, 1, arr(1:nlad,1:1))
+          arr(1:nlad,1) = tt(1:nlad)
+          CALL ListAddConstRealArray(CompParams, FoilSheetNuKey(dPlane(d))//' Taus', &
+              nlad, 1, arr(1:nlad,1:1))
+          CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d)), nuinf + SUM(rr(1:nlad)))
+        END DO
 
         WRITE(Message,'(A,I0,A,ES13.6,A,ES13.6)') 'Foil sheet Nu ladder: order ', nlad, &
             ', nu_inf = ', nuinf, ', nu(0) = ', nuinf + SUM(rr(1:nlad))
@@ -2940,7 +2999,7 @@ END FUNCTION isComponentName
     END IF
 
     IF (.NOT. HavePhys) RETURN
-    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm)
+    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha)
 !------------------------------------------------------------------------------
   END SUBROUTINE InitFoilSheetMaterial
 !------------------------------------------------------------------------------
@@ -2954,17 +3013,32 @@ END FUNCTION isComponentName
     INTEGER :: CompInd, ExtMaster
     INTEGER :: nfoils
     LOGICAL :: Found
+    CHARACTER(LEN=MAX_NAME_LEN) :: str
 
     IF (CoordinateSystemDimension() /= 3) &
         CALL Fatal('Circuits_Init','Foil sheet coil type is implemented only in 3D!')
-
-    CALL InitFoilSheetMaterial(CompParams)
 
     Comp % nofturns = GetConstReal(CompParams, 'Number of Turns', Found)
     IF (.NOT. Found) CALL Fatal('Circuits_Init','Foil sheet: Number of Turns not found!')
     nfoils = NINT(Comp % nofturns)
     IF (nfoils < 1 .OR. ABS(Comp % nofturns - nfoils) > 1.0d-8) &
         CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be a positive integer!')
+
+    ! Foils and flatwise flat wire stack along Alpha, edgewise flat wire along
+    ! Beta. The default reproduces the foil layout, so existing inputs are
+    ! untouched. The flat wire type defaults the same keyword to beta, which is
+    ! why it is spelled out in both places rather than shared.
+    str = GetString(CompParams, 'Stacking Direction', Found)
+    IF (.NOT. Found) str = 'alpha'
+    SELECT CASE (str)
+    CASE ('alpha')
+      Comp % StackAlongAlpha = .TRUE.
+    CASE ('beta')
+      Comp % StackAlongAlpha = .FALSE.
+    CASE DEFAULT
+      CALL Fatal('Circuits_Init','Foil sheet: Stacking Direction must be alpha or beta!')
+    END SELECT
+    CALL ListAddLogical(CompParams, 'Foil Sheet Stack Along Alpha', Comp % StackAlongAlpha)
 
     ! 0 asks the kernel to pick the layout from the block geometry and the mesh.
     Comp % nCells = GetInteger(CompParams, 'Sheet Cells', Found)
@@ -2977,8 +3051,15 @@ END FUNCTION isComponentName
     IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Beta'))) &
         CALL Fatal('Circuits_Init','Foil sheet needs the direction field "Beta"!')
 
-    IF (Comp % nCells <= 0 .OR. Comp % nSegments <= 0) &
+    ! The block geometry is also what a missing 'Foil Thickness' is derived
+    ! from, so measure it whenever anything is left to the kernel. This has to
+    ! run before InitFoilSheetMaterial, which turns the thickness into the
+    ! homogenization coefficients.
+    IF (Comp % nCells <= 0 .OR. Comp % nSegments <= 0 .OR. &
+        .NOT. ListCheckPresent(CompParams, 'Foil Thickness')) &
         CALL FoilSheetAutoLayout(Comp, CompParams, nfoils)
+
+    CALL InitFoilSheetMaterial(CompParams, Comp % StackAlongAlpha)
 
     IF (Comp % nCells < 1 .OR. MOD(nfoils, Comp % nCells) /= 0) &
         CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be divisible by Sheet Cells!')
@@ -3025,24 +3106,31 @@ END FUNCTION isComponentName
     CALL ListAddInteger(CompParams, 'Foil Sheet Foils Per Cell', Comp % foilsPerCell)
 
     WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Component '//I2S(CompInd)//' foil sheet: ', &
-        Comp % nCells,' cells x ',Comp % nSegments,' segments (',Comp % foilsPerCell,' foils per cell)'
+        Comp % nCells,' cells x ',Comp % nSegments,' segments (',Comp % foilsPerCell,' turns per cell)'
     CALL Info('Circuits_Init',Message,Level=6)
+    IF (Comp % StackAlongAlpha) THEN
+      CALL Info('Circuits_Init','Component '//I2S(CompInd)//' foil sheet stacks along Alpha',Level=6)
+    ELSE
+      CALL Info('Circuits_Init','Component '//I2S(CompInd)//' foil sheet stacks along Beta',Level=6)
+    END IF
 !------------------------------------------------------------------------------
   END SUBROUTINE InitFoilSheetComponent
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Orientation of the Euler potential strand direction: grad(Alpha) x grad(Beta)
-!> points along grad(W) or against it depending on how Alpha and Beta are laid
-!> out, so fix the sign once per component from int grad(W) . (gA x gB) dV.
+!> Orientation of the Euler potential strand direction: grad(stack) x
+!> grad(across) points along grad(W) or against it depending on how Alpha and
+!> Beta are laid out and on which of the two is the stacking direction, so fix
+!> the sign once per component from int grad(W) . (gStack x gAcross) dV.
 !------------------------------------------------------------------------------
 !> Choose the strand layout from the block geometry and the mesh, for
-!> 'Sheet Cells' or 'Sheet Segments' given as 0. The SIF writer knows the coil
-!> but not the element size, while the kernel can measure both: Alpha and Beta
-!> run from 0 to 1 across the block, so the block thickness and width are the
-!> inverses of the mean magnitudes of their gradients, and the mean element size
-!> is the cube root of the mean element volume. A strand narrower than about one
-!> and a half elements cannot be resolved, which sets the cap.
+!> 'Sheet Cells' or 'Sheet Segments' given as 0, and derive a missing
+!> 'Foil Thickness'. The SIF writer knows the coil but not the element size,
+!> while the kernel can measure both: the stacking and across fields run from 0
+!> to 1 over the block, so the block extents are the inverses of the mean
+!> magnitudes of their gradients, and the mean element size is the cube root of
+!> the mean element volume. A strand narrower than about one and a half elements
+!> cannot be resolved, which sets the cap.
 !------------------------------------------------------------------------------
   SUBROUTINE FoilSheetAutoLayout(Comp, CompParams, nfoils)
 !------------------------------------------------------------------------------
@@ -3055,13 +3143,14 @@ END FUNCTION isComponentName
     TYPE(Element_t), POINTER :: Element
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
-    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sAlpha(:), sBeta(:)
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sStack(:), sAcross(:)
     REAL(KIND=dp) :: detJ, ga(3), gb(3), wgp, vol, sga, sgb, sh, ve, blkT, blkH, elemH
+    REAL(KIND=dp) :: ff, tfoil
     INTEGER :: e, n, gp, nmax, nel, nCellAuto, nSegAuto
-    LOGICAL :: stat
+    LOGICAL :: stat, Found
 
     nmax = CurrentModel % Mesh % MaxElementNodes
-    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sAlpha(nmax), sBeta(nmax))
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sStack(nmax), sAcross(nmax))
     vol = 0._dp; sga = 0._dp; sgb = 0._dp; sh = 0._dp; nel = 0
 
     DO e = 1, GetNOFActive()
@@ -3069,15 +3158,15 @@ END FUNCTION isComponentName
       IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
       n = GetElementNOFNodes(Element)
       CALL GetElementNodes(Nodes, Element)
-      CALL GetFlatWireLocalFields(.TRUE., Element, n, sAlpha, sBeta)
+      CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, n, sStack, sAcross)
       IP = GaussPoints(Element)
       ve = 0._dp
       DO gp = 1, IP % n
         stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
             detJ, Basis, dBasisdx)
         wgp = IP % s(gp) * detJ
-        ga = MATMUL(sAlpha(1:n), dBasisdx(1:n,:))
-        gb = MATMUL(sBeta(1:n), dBasisdx(1:n,:))
+        ga = MATMUL(sStack(1:n), dBasisdx(1:n,:))
+        gb = MATMUL(sAcross(1:n), dBasisdx(1:n,:))
         sga = sga + wgp * SQRT(SUM(ga*ga))
         sgb = sgb + wgp * SQRT(SUM(gb*gb))
         ve = ve + wgp
@@ -3115,14 +3204,29 @@ END FUNCTION isComponentName
       Comp % nSegments = MIN(40, MAX(4, nSegAuto))
     END IF
 
-    WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES11.4)') 'Foil sheet block: thickness ', blkT, &
-        ', width ', blkH, ', mean element size ', elemH
+    ! 'Foil Thickness' is optional: a winding that gives its fill factor and its
+    ! turn count already fixes the conductor thickness through the stack extent,
+    ! t = ff * L_stack / N. An explicit keyword always wins.
+    IF (.NOT. ListCheckPresent(CompParams, 'Foil Thickness')) THEN
+      ff = GetConstReal(CompParams, 'Fill Factor', Found)
+      IF (Found .AND. ff > 0._dp) THEN
+        tfoil = ff * blkT / nfoils
+        CALL ListAddConstReal(CompParams, 'Foil Thickness', tfoil)
+        WRITE(Message,'(A,ES12.5,A,ES11.4,A,F7.4,A,I0)') &
+            'Foil sheet derived "Foil Thickness" = ', tfoil, ' m from stack extent ', blkT, &
+            ', fill factor ', ff, ', turns ', nfoils
+        CALL Info('Circuits_Init', Message, Level=3)
+      END IF
+    END IF
+
+    WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES11.4)') 'Foil sheet block: stack extent ', blkT, &
+        ', across extent ', blkH, ', mean element size ', elemH
     CALL Info('Circuits_Init', Message, Level=3)
     WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Foil sheet automatic layout: Sheet Cells = ', &
         Comp % nCells, ', Sheet Segments = ', Comp % nSegments, ' (', nel, ' block elements)'
     CALL Info('Circuits_Init', Message, Level=3)
 
-    DEALLOCATE(Basis, dBasisdx, sAlpha, sBeta)
+    DEALLOCATE(Basis, dBasisdx, sStack, sAcross)
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetAutoLayout
 !------------------------------------------------------------------------------
@@ -3212,7 +3316,7 @@ END FUNCTION isComponentName
     TYPE(Element_t), POINTER :: Element
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
-    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sAlpha(:), sBeta(:), Wloc(:)
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sStack(:), sAcross(:), Wloc(:)
     REAL(KIND=dp), ALLOCATABLE :: dNode(:), aNode(:)
     LOGICAL, ALLOCATABLE :: inBlk(:), skipn(:)
     REAL(KIND=dp) :: detJ, gw(3), tv(3), flux, sgn
@@ -3225,7 +3329,7 @@ END FUNCTION isComponentName
     Mesh => CurrentModel % Mesh
     nmax = Mesh % MaxElementNodes
     nno = Mesh % NumberOfNodes
-    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sAlpha(nmax), sBeta(nmax), Wloc(nmax))
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sStack(nmax), sAcross(nmax), Wloc(nmax))
     ALLOCATE(dNode(nno), aNode(nno), inBlk(nno), skipn(nno))
     dNode = 0._dp; aNode = 0._dp; inBlk = .FALSE.; skipn = .FALSE.
     flux = 0._dp
@@ -3260,14 +3364,14 @@ END FUNCTION isComponentName
       IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
       n = GetElementNOFNodes(Element)
       CALL GetElementNodes(Nodes, Element)
-      CALL GetFlatWireLocalFields(.TRUE., Element, n, sAlpha, sBeta)
+      CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, n, sStack, sAcross)
       CALL GetCoilWBase(Element, n, CompParams, Wloc)
       IP = GaussPoints(Element)
       DO gp = 1, IP % n
         stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
             detJ, Basis, dBasisdx)
         gw = MATMUL(Wloc(1:n), dBasisdx(1:n,:))
-        tv = FoilSheetDirection(sAlpha, sBeta, dBasisdx, n, 1._dp)
+        tv = FoilSheetDirection(sStack, sAcross, dBasisdx, n, 1._dp)
         flux = flux + IP % s(gp) * detJ * SUM(gw*tv)
       END DO
 
@@ -3277,11 +3381,11 @@ END FUNCTION isComponentName
       ! currents. The currents are a fixed function of the strand index so that
       ! every partition uses the same ones.
       IF (n /= 4 .OR. Element % TYPE % ElementCode /= 504) CYCLE
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sAlpha(1:4), sBeta(1:4), &
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
           nPiece, pCell, pSeg, pVol, pBary)
       volerr = MAX(volerr, ABS(SUM(pVol(1:nPiece)) - 1._dp))
       stat = ElementInfo(Element, Nodes, 0.25_dp, 0.25_dp, 0.25_dp, detJ, Basis, dBasisdx)
-      tv = FoilSheetDirection(sAlpha, sBeta, dBasisdx, n, 1._dp)
+      tv = FoilSheetDirection(sStack, sAcross, dBasisdx, n, 1._dp)
       Vpar = detJ / 6._dp
       DO i = 1, nPiece
         ind = (pCell(i)-1) * Comp % nSegments + pSeg(i)
@@ -3320,7 +3424,7 @@ END FUNCTION isComponentName
         ' of scale ', amax, ', relative ', dmax / MAX(amax, TINY(amax))
     CALL Info('Circuits_Init', Message, Level=5)
 
-    DEALLOCATE(Basis, dBasisdx, sAlpha, sBeta, Wloc, dNode, aNode, inBlk, skipn)
+    DEALLOCATE(Basis, dBasisdx, sStack, sAcross, Wloc, dNode, aNode, inBlk, skipn)
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeFoilSheetSign
 !------------------------------------------------------------------------------
@@ -4321,7 +4425,7 @@ CONTAINS
     LOGICAL*1 :: Done(:)
     LOGICAL, OPTIONAL :: Harmonic
     LOGICAL :: harm
-    REAL(KIND=dp) :: sAlpha(nn), sBeta(nn)
+    REAL(KIND=dp) :: sStack(nn), sAcross(nn)
 
     IF (.NOT. PRESENT(Harmonic)) THEN
       harm = CurrentModel % HarmonicCircuits
@@ -4337,14 +4441,14 @@ CONTAINS
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
 
-    CALL GetFlatWireLocalFields(.TRUE., Element, nn, sAlpha, sBeta)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
 
     ! Strands the element can touch: the nodal range plus one cell of margin
     ! for higher order elements and strand borders cutting through elements.
-    ks1 = MAX(1, FLOOR(MINVAL(sAlpha) * Comp % nCells))
-    ks2 = MIN(Comp % nCells, FLOOR(MAXVAL(sAlpha) * Comp % nCells) + 2)
-    ka1 = MAX(1, FLOOR(MINVAL(sBeta) * Comp % nSegments))
-    ka2 = MIN(Comp % nSegments, FLOOR(MAXVAL(sBeta) * Comp % nSegments) + 2)
+    ks1 = MAX(1, FLOOR(MINVAL(sStack) * Comp % nCells))
+    ks2 = MIN(Comp % nCells, FLOOR(MAXVAL(sStack) * Comp % nCells) + 2)
+    ka1 = MAX(1, FLOOR(MINVAL(sAcross) * Comp % nSegments))
+    ka2 = MIN(Comp % nSegments, FLOOR(MAXVAL(sAcross) * Comp % nSegments) + 2)
 
     DO ks = ks1, ks2
       DO ka = ka1, ka2

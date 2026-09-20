@@ -1387,8 +1387,12 @@ END BLOCK
     StrandedHomogenization = .FALSE.
     UseRotM = .FALSE.
     IF(CoilBody) THEN
-      ! 'foil sheet' uses the same homogenized complex reluctivity as 'stranded':
-      ! Nu 11 normal to the foils, Nu 22 / Nu 33 in the foil plane.
+      ! 'foil sheet' uses the same homogenized complex reluctivity as
+      ! 'stranded': 1/mu0 on the stacking normal, the complex stack reluctivity
+      ! on the two components in the turn plane. Which tensor component is which
+      ! follows 'Stacking Direction' and is decided where the keywords are
+      ! written, in SetFoilSheetHarmonicMaterial, so nothing is direction aware
+      ! here.
       IF (CoilType == 'stranded' .OR. CoilType == 'foil sheet') THEN
         CompParams => GetComponentParams( Element )
         StrandedHomogenization = GetLogical(CompParams, 'Homogenization Model', Found)

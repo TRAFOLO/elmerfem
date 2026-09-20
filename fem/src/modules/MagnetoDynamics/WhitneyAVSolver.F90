@@ -265,6 +265,7 @@ END SUBROUTINE WhitneyAVSolver_Init0
 SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
 !------------------------------------------------------------------------------
   USE MagnetoDynamicsUtils
+  USE CircuitUtils
   IMPLICIT NONE
 !------------------------------------------------------------------------------
   TYPE(Solver_t) :: Solver
@@ -323,11 +324,13 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
   IF (Transient) THEN
     BLOCK
       TYPE(ValueList_t), POINTER :: CPar
-      INTEGER :: ic, nlad, slot
-      LOGICAL :: gotit, need
-      CHARACTER(LEN=MAX_NAME_LEN) :: ctype
+      INTEGER :: ic, nlad, slot, dStack, dPlane(2), d
+      LOGICAL :: gotit, need, stackalpha
+      CHARACTER(LEN=MAX_NAME_LEN) :: ctype, str
+      CHARACTER(LEN=8), PARAMETER :: XiName(3) = ['Xi Alpha','Xi Beta ','Xi Gamma']
       need = .FALSE.
       nlad = 4
+      stackalpha = .TRUE.
       DO ic = 1, CurrentModel % NumberOfComponents
         CPar => CurrentModel % Components(ic) % Values
         IF (.NOT. ASSOCIATED(CPar)) CYCLE
@@ -338,19 +341,23 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
         need = .TRUE.
         i = ListGetInteger(CPar, 'Homogenization Ladder Order', gotit)
         IF (gotit) nlad = i
+        str = ListGetString(CPar, 'Stacking Direction', gotit)
+        IF (gotit .AND. TRIM(str) == 'beta') stackalpha = .FALSE.
       END DO
       IF (need .AND. .NOT. ListCheckPresent(Params, 'Foil Sheet Xi Declared')) THEN
+        CALL FoilSheetNuDirections(stackalpha, dStack, dPlane)
         slot = 1
         DO WHILE (ListCheckPresent(Params, 'Exported Variable '//I2S(slot)))
           slot = slot + 1
         END DO
-        CALL ListAddString(Params, 'Exported Variable '//I2S(slot), &
-            '-dofs '//I2S(nlad)//' -elem Xi Beta')
-        CALL ListAddString(Params, 'Exported Variable '//I2S(slot+1), &
-            '-dofs '//I2S(nlad)//' -elem Xi Gamma')
+        DO d = 1, 2
+          CALL ListAddString(Params, 'Exported Variable '//I2S(slot+d-1), &
+              '-dofs '//I2S(nlad)//' -elem '//TRIM(XiName(dPlane(d))))
+        END DO
         CALL ListAddLogical(Params, 'Foil Sheet Xi Declared', .TRUE.)
-        CALL Info('WhitneyAVSolver_Init','Declared Xi Beta and Xi Gamma with '// &
-            I2S(nlad)//' dofs for the foil sheet reluctivity ladder', Level=5)
+        CALL Info('WhitneyAVSolver_Init','Declared '//TRIM(XiName(dPlane(1)))//' and '// &
+            TRIM(XiName(dPlane(2)))//' with '//I2S(nlad)// &
+            ' dofs for the foil sheet reluctivity ladder', Level=5)
       END IF
     END BLOCK
   END IF
@@ -455,7 +462,8 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   ! Active when Component has Coil Type = stranded, Homogenization Model = True,
   ! AND Transient Homogenization = True. Workspace is sized to the ladder order
   ! once and reused across elements/timesteps.
-  LOGICAL :: StrandedTransientHomog, FoilSheetTransientHomog
+  LOGICAL :: StrandedTransientHomog, FoilSheetTransientHomog, FsStackAlongAlpha
+  INTEGER :: FsDirStack, FsDirPlane(2)
   INTEGER :: HomogLadderOrder, HomogLadderOrder_alloc = 0
   REAL(KIND=dp) :: nu_air
   ! DEV-1513 E2-B: one Foster ladder per LOCAL direction,
@@ -1003,7 +1011,9 @@ CONTAINS
             ! InitFoilSheetMaterial, so their presence is the gate.
             IF (CoilType == 'foil sheet' .AND. Transient) THEN
               IF (GetLogical(CompParams, 'Homogenization Model', Found) .AND. Found) THEN
-                IF (ListCheckPresent(CompParams,'Nu 22 Residues')) THEN
+                ! Gamma is in the turn plane for either stacking direction, so
+                ! 'Nu 33 Residues' is the direction independent gate.
+                IF (ListCheckPresent(CompParams,'Nu 33 Residues')) THEN
                   StrandedTransientHomog = .TRUE.
                   FoilSheetTransientHomog = .TRUE.
                 END IF
@@ -1020,10 +1030,15 @@ CONTAINS
        ! DEV-1513 E2-B. Which local directions carry a ladder: a stranded
        ! winding homogenises the two directions across the wire (Alpha, Beta)
        ! and leaves the wire axis at the air value, while a foil sheet
-       ! homogenises the two in-plane directions (Beta, Gamma) and keeps the
-       ! stacking normal at 1/mu0.
+       ! homogenises the two directions in the turn plane and keeps the stacking
+       ! normal at 1/mu0. DEV-1520: which two those are follows the component's
+       ! 'Stacking Direction'.
        IF (FoilSheetTransientHomog) THEN
-         dir_active = [ .FALSE., .TRUE., .TRUE. ]
+         FsStackAlongAlpha = GetLogical(CompParams, 'Foil Sheet Stack Along Alpha', Found)
+         IF (.NOT. Found) FsStackAlongAlpha = .TRUE.
+         CALL FoilSheetNuDirections(FsStackAlongAlpha, FsDirStack, FsDirPlane)
+         dir_active = .TRUE.
+         dir_active(FsDirStack) = .FALSE.
        ELSE
          dir_active = [ .TRUE., .TRUE., .FALSE. ]
        END IF
@@ -1100,8 +1115,9 @@ CONTAINS
          END DO
        END DO
        IF (FoilSheetTransientHomog) THEN
-         nu_eff_dir(1) = GetConstReal(CompParams, 'Nu 11 y0', Found)
-         IF (.NOT. Found) nu_eff_dir(1) = nu_air
+         nu_eff_dir(FsDirStack) = GetConstReal(CompParams, &
+             FoilSheetNuKey(FsDirStack)//' y0', Found)
+         IF (.NOT. Found) nu_eff_dir(FsDirStack) = nu_air
        END IF
 
        ! Xi states: one -elem variable per active direction, with
@@ -3668,7 +3684,8 @@ END SUBROUTINE LocalConstraintMatrix
     REAL(KIND=dp) :: detJ_loc, rml(3,3), curlA_ip(3), wt, elem_volume
     REAL(KIND=dp) :: bbar(3), y0l(3), rl(6,3), Tl(6,3), mki(6,3)
     REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem, prox_total
-    LOGICAL :: dloc(3)
+    LOGICAL :: dloc(3), stackalpha_loc
+    INTEGER :: dstack_loc, dplane_loc(2)
     INTEGER :: nlad, d, k, idx, eperm(3), elem_perm_pl
 
     prox_total = 0._dp
@@ -3688,8 +3705,12 @@ END SUBROUTINE LocalConstraintMatrix
         dloc = [ .TRUE., .TRUE., .FALSE. ]
       ELSE IF (coil_type_loc == 'foil sheet') THEN
         IF (.NOT. (GetLogical(cParams, 'Homogenization Model', found_loc) .AND. found_loc)) CYCLE
-        IF (.NOT. ListCheckPresent(cParams, 'Nu 22 Residues')) CYCLE
-        dloc = [ .FALSE., .TRUE., .TRUE. ]
+        IF (.NOT. ListCheckPresent(cParams, 'Nu 33 Residues')) CYCLE
+        stackalpha_loc = GetLogical(cParams, 'Foil Sheet Stack Along Alpha', found_loc)
+        IF (.NOT. found_loc) stackalpha_loc = .TRUE.
+        CALL FoilSheetNuDirections(stackalpha_loc, dstack_loc, dplane_loc)
+        dloc = .TRUE.
+        dloc(dstack_loc) = .FALSE.
       ELSE
         CYCLE
       END IF

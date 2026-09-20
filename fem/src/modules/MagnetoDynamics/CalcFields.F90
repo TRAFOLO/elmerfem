@@ -610,7 +610,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp), ALLOCATABLE :: SOL(:,:), PSOL(:), ElPotSol(:,:), C(:)
    REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), beta(:), NF_ip(:,:)
    INTEGER :: FwStack, FwAcross
-   LOGICAL :: FwStackAlongAlpha
+   LOGICAL :: FwStackAlongAlpha, FsStackAlongAlpha
    INTEGER :: FsCells, FsSegments, FsK, FsJ, FsDof
    REAL(KIND=dp) :: FsSigmaRef, FsSign
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
@@ -1358,7 +1358,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Sigma Ref not found!')
          FsSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
          IF (.NOT. Found) FsSign = 1._dp
-         CALL GetFlatWireLocalFields(.TRUE., Element, n, alpha, beta)
+         ! For a foil sheet 'alpha' and 'beta' hold the stacking and the across
+         ! field, in that order, whichever direction field each of them is.
+         FsStackAlongAlpha = GetLogical(CompParams, 'Foil Sheet Stack Along Alpha', Found)
+         IF (.NOT. Found) FsStackAlongAlpha = .TRUE.
+         CALL GetFlatWireLocalFields(FsStackAlongAlpha, Element, n, alpha, beta)
 
          ! The block has no volumetric conductivity: the strand current density
          ! c_kj*grad(W) flows with the complex SHEET conductivity, so give the

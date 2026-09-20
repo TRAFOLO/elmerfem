@@ -1667,7 +1667,7 @@ CONTAINS
     INTEGER, POINTER :: PS(:)
     TYPE(Matrix_t), POINTER :: CM
     REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s
-    REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
     INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
     LOGICAL :: stat, PiolaVersion, Found
     TYPE(Nodes_t), SAVE :: Nodes
@@ -1710,7 +1710,7 @@ CONTAINS
 
     CALL GetElementNodes(Nodes)
     nd = GetElementDOFs(Indexes,Element,ASolver)
-    CALL GetFlatWireLocalFields(.TRUE., Element, nn, sAlpha, sBeta)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
 
     CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
     IF(Solver % Order<2.OR.GetTimeStep()<=2) THEN
@@ -1757,7 +1757,7 @@ CONTAINS
     IF (Exact) THEN
       IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
           'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sAlpha(1:4), sBeta(1:4), &
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
           nItem, pCell, pSeg, pVol, pBary)
     ELSE
       IP = GaussPoints(Element, np=ngp)
@@ -1779,13 +1779,13 @@ CONTAINS
       END IF
       gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
       ! Euler potential strand direction; see the harmonic Add_foil_sheet.
-      tvec = FoilSheetDirection(sAlpha, sBeta, dBasisdx, nn, DirSign)
+      tvec = FoilSheetDirection(sStack, sAcross, dBasisdx, nn, DirSign)
 
       IF (Exact) THEN
         kc = pCell(t); js = pSeg(t)
       ELSE
         CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, &
-            SUM(sAlpha(1:nn)*Basis(1:nn)), SUM(sBeta(1:nn)*Basis(1:nn)), kc, js)
+            SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)), kc, js)
       END IF
       sInd = (kc-1) * Comp % nSegments + js
       sdof = vvarId + FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
@@ -3448,7 +3448,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     INTEGER, POINTER :: PS(:)
     TYPE(Matrix_t), POINTER :: CM
     REAL(KIND=dp) :: Basis(nd), DetJ, Omega, g
-    REAL(KIND=dp) :: dBasisdx(nd,3), sAlpha(nn), sBeta(nn)
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
     INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
     LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
     TYPE(Nodes_t), SAVE :: Nodes
@@ -3487,7 +3487,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     CALL GetElementNodes(Nodes)
     nd = GetElementDOFs(Indexes,Element,ASolver)
-    CALL GetFlatWireLocalFields(.TRUE., Element, nn, sAlpha, sBeta)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
 
     CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
     IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
@@ -3512,7 +3512,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     IF (Exact) THEN
       IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
           'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sAlpha(1:4), sBeta(1:4), &
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
           nItem, pCell, pSeg, pVol, pBary)
     ELSE
       IP = GaussPoints(Element, np=ngp)
@@ -3539,9 +3539,9 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       END IF
 
       ! Euler potential strand direction: exactly solenoidal and exactly
-      ! tangential to the strand interfaces, which are iso-surfaces of Alpha and
-      ! Beta. See FoilSheetDirection.
-      tvec = FoilSheetDirection(sAlpha, sBeta, dBasisdx, nn, DirSign)
+      ! tangential to the strand interfaces, which are iso-surfaces of the
+      ! stacking and across fields. See FoilSheetDirection.
+      tvec = FoilSheetDirection(sStack, sAcross, dBasisdx, nn, DirSign)
 
       sigma_s = SUM( Tcoef(3,3,1:nn) * Basis(1:nn) )
       IF (sigma_s == CMPLX(0._dp,0._dp,KIND=dp)) &
@@ -3551,7 +3551,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         kc = pCell(t); js = pSeg(t)
       ELSE
         CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, &
-            SUM(sAlpha(1:nn)*Basis(1:nn)), SUM(sBeta(1:nn)*Basis(1:nn)), kc, js)
+            SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)), kc, js)
       END IF
       sInd = (kc-1) * Comp % nSegments + js
       sdof = vvarId + 2*FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
