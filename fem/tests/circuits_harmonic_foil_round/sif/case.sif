@@ -17,7 +17,10 @@
 ! 'res: eddy current power' (the factor 4 is 2 for peak -> rms and 2 for the
 ! half model), 0.7 % below r_component; with the default Laplace Alpha the same
 ! case gives 1.6081 mOhm, 4.4 % low, which is the ln(r) error this method
-! removes. Solver 9 Reference Norm below is that eddy current power.
+! removes. The Alpha field itself is exact here -- the integral of |grad Alpha|^2
+! over the coil is within 0.013 % of V/T^2 -- so the remaining 0.7 % is the
+! discretisation of the AV and circuit solve, not of Alpha.
+! Solver 9 Reference Norm below is that eddy current power.
 INCLUDE mesh/mesh.names
 Header
   CHECK KEYWORDS Warn
