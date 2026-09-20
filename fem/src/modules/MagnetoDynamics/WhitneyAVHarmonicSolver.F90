@@ -745,6 +745,10 @@ BLOCK
 
       IF(ASSOCIATED(Electrodes)) THEN
         IF(ALL(Electrodes/=Element % BoundaryInfo % Constraint)) CYCLE
+      ELSE IF(GetLogical(CompParams,'Coil Closed',Found)) THEN
+        ! DEV-491: a closed coil has no electrodes, so without the list this
+        ! would pin the whole coil surface. One node is pinned below instead.
+        CYCLE
       END IF
 
       DO i=1,Element % Type % NumberOfNodes
@@ -752,6 +756,61 @@ BLOCK
         A % ConstrainedDOF(j:j+1) = .TRUE.
       END DO
     END DO
+
+    ! DEV-491: fix the constant of the nodal potential of every closed coil at
+    ! exactly one node. The smallest global node index of the coil's bodies is
+    ! the same choice on every partition; all partitions holding it constrain
+    ! it, so the shared row stays consistent.
+    BLOCK
+      INTEGER, PARAMETER :: NoNode = HUGE(1)/2
+      INTEGER :: c, e, ni, gnode, MinGNode
+      TYPE(Element_t), POINTER :: BulkElement
+      LOGICAL :: Parallel
+
+      Parallel = ( ParEnv % PEs > 1 )
+      IF(Parallel) Parallel = ASSOCIATED(Mesh % ParallelInfo % GlobalDOFs)
+
+      DO c=1,Model % NumberOfComponents
+        CompParams => Model % Components(c) % Values
+        IF(.NOT.ASSOCIATED(CompParams)) CYCLE
+        IF(.NOT.GetLogical(CompParams,'Coil Closed',Found)) CYCLE
+        IF(.NOT.GetLogical(CompParams,'Activate Constraint',Found)) CYCLE
+        AutomaticBC = GetLogical(CompParams,'Automatic electrode BC',Found)
+        IF(.NOT.Found) AutomaticBC = .TRUE.
+        IF(.NOT.AutomaticBC) CYCLE
+        Electrodes => ListGetIntegerArray(CompParams,'Electrode Boundaries',Found)
+        IF(ASSOCIATED(Electrodes)) CYCLE
+
+        MinGNode = NoNode
+        DO e=1,GetNOFActive()
+          BulkElement => GetActiveElement(e)
+          IF(.NOT.ASSOCIATED(GetComponentParams(BulkElement),CompParams)) CYCLE
+          DO i=1,BulkElement % TYPE % NumberOfNodes
+            ni = BulkElement % NodeIndexes(i)
+            IF(Solver % Variable % Perm(ni) == 0) CYCLE
+            gnode = ni
+            IF(Parallel) gnode = Mesh % ParallelInfo % GlobalDOFs(ni)
+            MinGNode = MIN(MinGNode,gnode)
+          END DO
+        END DO
+
+        IF(ParEnv % PEs > 1) MinGNode = NINT(ParallelReduction(1._dp*MinGNode,1))
+        IF(MinGNode >= NoNode) CYCLE
+
+        DO ni=1,Mesh % NumberOfNodes
+          IF(Solver % Variable % Perm(ni) == 0) CYCLE
+          gnode = ni
+          IF(Parallel) gnode = Mesh % ParallelInfo % GlobalDOFs(ni)
+          IF(gnode /= MinGNode) CYCLE
+          j = 2*(Solver % Variable % Perm(ni)-1)+1
+          A % ConstrainedDOF(j:j+1) = .TRUE.
+          EXIT
+        END DO
+
+        CALL Info('WhitneyAVHarmonicSolver','Closed coil component '//I2S(c)//&
+            ': nodal potential pinned at global node '//I2S(MinGNode),Level=6)
+      END DO
+    END BLOCK
 END BLOCK
 
     CALL DefaultDirichletBCs()
