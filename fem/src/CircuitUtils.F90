@@ -976,33 +976,6 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Projector on the foil plane (local directions Beta and Gamma) at an
-!> integration point. The foil sheet current follows the foils, so its shape
-!> function is t = P grad(W): this is the same component the foil winding
-!> conductivity tensor keeps with Tcoef(1,1) = 0, and it is what makes the
-!> strand source divergence free.
-!------------------------------------------------------------------------------
-  FUNCTION FoilSheetProjector(RotM, Basis, n) RESULT(P)
-!------------------------------------------------------------------------------
-    IMPLICIT NONE
-    REAL(KIND=dp) :: RotM(:,:,:), Basis(:), P(3,3)
-    INTEGER :: n
-    REAL(KIND=dp) :: RotMLoc(3,3)
-    REAL(KIND=dp), PARAMETER :: FoilPlane(3,3) = RESHAPE([0._dp,0._dp,0._dp, &
-        0._dp,1._dp,0._dp, 0._dp,0._dp,1._dp],[3,3])
-    INTEGER :: i, j
-
-    DO i=1,3
-      DO j=1,3
-        RotMLoc(i,j) = SUM( RotM(i,j,1:n) * Basis(1:n) )
-      END DO
-    END DO
-    P = MATMUL(MATMUL(RotMLoc, FoilPlane), TRANSPOSE(RotMLoc))
-!------------------------------------------------------------------------------
-  END FUNCTION FoilSheetProjector
-!------------------------------------------------------------------------------
-
-!------------------------------------------------------------------------------
 !> A foil sheet strand with no integration point of its own would leave a zero
 !> row in the circuit matrix. Fail early and say which (cell, segment) is empty.
 !------------------------------------------------------------------------------
