@@ -1672,6 +1672,12 @@ Component:Real:      'Nu 33 Taus'
 Component:Logical:   'Activate Constraint'
 Component:Logical:   'Automatic Electrode BC'
 Component:Integer:   'Electrode Boundaries'
+! Closed (full 360 degree) coil: no electrodes and no single valued W, so the
+! direction field is the CoilSolver cut potential of unit circulation. The
+! multipliers are written by the CoilSolver itself, not by the SIF.
+Component:Logical:   'Coil Closed'
+Component:Real:      'Coil Potential Multiplier'
+Component:Real:      'Coil Potential Multiplier B'
 ! Flat wire winding (per-turn cell model).
 Component:Integer:   'Turns Across'
 Component:String:    'Stacking Direction'
