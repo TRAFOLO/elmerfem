@@ -1689,6 +1689,9 @@ Component:Real:      'Conductor Width'
 ! Foil sheet winding (DEV-1513): conducting sheets, not a conducting continuum.
 Component:Integer:   'Sheet Cells'
 Component:Integer:   'Sheet Segments'
+! DEV-1520: strand layers through the thickness of one turn, 0 = automatic.
+Component:Integer:   'Sheet Sublayers'
+Component:Integer:   'Foil Sheet Sublayers'
 Component:Integer:   'Sheet Integration Points'
 Component:Real:      'Sheet Regularization'
 ! Physics the SIF writer supplies; Elmer derives tau0, the sheet conductivity
@@ -1702,6 +1705,8 @@ Component:Logical:   'Foil Sheet Derive Nu'
 Component:Logical:   'Foil Sheet Sigma Varies'
 ! DEV-1520: 'Stacking Direction' of a foil sheet, published for the solvers.
 Component:Logical:   'Foil Sheet Stack Along Alpha'
+Component:Real:      'Foil Sheet Stack Extent'
+Component:Real:      'Foil Sheet Element Size'
 ! Transient strand skin ladder (DEV-1513 E2).
 Component:Logical:   'Sheet Skin Ladder'
 Component:Logical:   'Sheet Nu Ladder'

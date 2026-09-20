@@ -611,7 +611,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), beta(:), NF_ip(:,:)
    INTEGER :: FwStack, FwAcross
    LOGICAL :: FwStackAlongAlpha, FsStackAlongAlpha
-   INTEGER :: FsCells, FsSegments, FsK, FsJ, FsDof
+   INTEGER :: FsCells, FsSegments, FsSublayers, FsK, FsJ, FsDof
    REAL(KIND=dp) :: FsSigmaRef, FsSign
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
@@ -1354,6 +1354,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Cells not found!')
          FsSegments = GetInteger(CompParams, 'Foil Sheet Segments', Found)
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Segments not found!')
+         FsSublayers = GetInteger(CompParams, 'Foil Sheet Sublayers', Found)
+         IF (.NOT. Found) FsSublayers = 1
          FsSigmaRef = GetConstReal(CompParams, 'Foil Sheet Sigma Ref', Found)
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Sigma Ref not found!')
          FsSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
@@ -1651,9 +1653,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            E(2,:) = E(2,:)-localV(2) * wvec
 
          CASE ('foil sheet')
-           CALL FoilSheetStrand(FsCells, FsSegments, &
+           CALL FoilSheetStrand(FsCells * FsSublayers, FsSegments, &
                SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
            FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+           FsK = FoilSheetLayerCell(FsSublayers, FsK)
            IF (CoilUseWvec) THEN
              wvec = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
            ELSE
@@ -1798,9 +1801,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
 
          CASE ('foil sheet')
-           CALL FoilSheetStrand(FsCells, FsSegments, &
+           CALL FoilSheetStrand(FsCells * FsSublayers, FsSegments, &
                SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
            FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+           FsK = FoilSheetLayerCell(FsSublayers, FsK)
            wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
            IF (REAL(CMat_ip(3,3)) /= 0._dp) &
                E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec

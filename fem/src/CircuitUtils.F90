@@ -926,17 +926,33 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Offset of the strand (k,j) current dof c_kj inside the foil sheet voltage
-!> variable. Layout: 0 = V, 1..nCells = V_k, then the strands cell by cell.
+!> Offset of the strand (l,j) current dof inside the foil sheet voltage
+!> variable, l being the sub-layer index along the stack. Layout: 0 = V,
+!> 1..nCells = V_k, then the strands sub-layer by sub-layer. With one sub-layer
+!> per turn the sub-layer index is the cell index and this is the old layout.
 !------------------------------------------------------------------------------
-  FUNCTION FoilSheetStrandDof(nCells, nSegments, k, j) RESULT(ind)
+  FUNCTION FoilSheetStrandDof(nCells, nSegments, l, j) RESULT(ind)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    INTEGER :: nCells, nSegments, k, j, ind
+    INTEGER :: nCells, nSegments, l, j, ind
 
-    ind = nCells + (k-1) * nSegments + j
+    ind = nCells + (l-1) * nSegments + j
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetStrandDof
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Turn cell of a sub-layer: sub-layers (k-1)*nSublayers+1 .. k*nSublayers are
+!> the same conductor in parallel and share the voltage dof of turn cell k.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetLayerCell(nSublayers, l) RESULT(k)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nSublayers, l, k
+
+    k = (l-1) / nSublayers + 1
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetLayerCell
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -984,7 +1000,7 @@ CONTAINS
     IMPLICIT NONE
     TYPE(Component_t), POINTER :: Comp
     REAL(KIND=dp) :: w, wmax
-    INTEGER :: k, j, ind, nempty
+    INTEGER :: k, j, ind, nempty, nLayers
 
     IF (.NOT. ALLOCATED(Comp % StrandWeight)) RETURN
 
@@ -996,22 +1012,23 @@ CONTAINS
     IF (wmax <= 0._dp) RETURN
 
     nempty = 0
-    DO k = 1, Comp % nCells
+    nLayers = Comp % nCells * Comp % nSublayers
+    DO k = 1, nLayers
       DO j = 1, Comp % nSegments
         ind = (k-1) * Comp % nSegments + j
         w = Comp % StrandWeight(ind)
         IF (w > 1.0d-8 * wmax) CYCLE
         nempty = nempty + 1
         IF (nempty <= 20) CALL Error('CheckFoilSheetStrands', &
-            'Foil sheet strand (cell '//I2S(k)//', segment '//I2S(j)//') has no element!')
+            'Foil sheet strand (sub-layer '//I2S(k)//', segment '//I2S(j)//') has no element!')
       END DO
     END DO
 
     IF (nempty > 0) THEN
       CALL Error('CheckFoilSheetStrands','Component '//I2S(Comp % ComponentId)//': '// &
-          I2S(nempty)//' of '//I2S(Comp % nCells * Comp % nSegments)//' strands are empty.')
+          I2S(nempty)//' of '//I2S(nLayers * Comp % nSegments)//' strands are empty.')
       CALL Fatal('CheckFoilSheetStrands', &
-          'Lower "Sheet Cells" / "Sheet Segments" or refine the coil mesh!')
+          'Lower "Sheet Cells" / "Sheet Segments" / "Sheet Sublayers" or refine the coil mesh!')
     END IF
 
     ! With the Euler potential direction the strand flux is exactly
@@ -1020,8 +1037,8 @@ CONTAINS
     ! the sharpest check that the strand bookkeeping and the direction sign are
     ! right, and it is mesh independent.
     WRITE(Message,'(A,F14.10,A,F14.10)') 'Foil sheet strand flux / (dAlpha dBeta): min ', &
-        MINVAL(Comp % StrandWeight) * Comp % nCells * Comp % nSegments, &
-        '  max ', MAXVAL(Comp % StrandWeight) * Comp % nCells * Comp % nSegments
+        MINVAL(Comp % StrandWeight) * nLayers * Comp % nSegments, &
+        '  max ', MAXVAL(Comp % StrandWeight) * nLayers * Comp % nSegments
     CALL Info('CheckFoilSheetStrands', Message, Level=5)
 !------------------------------------------------------------------------------
   END SUBROUTINE CheckFoilSheetStrands
@@ -2574,6 +2591,9 @@ END FUNCTION isComponentName
 !>                          beta (edgewise flat wire): the field across the stack
 !>   Sheet Cells            cells along the stacking direction (default N), must divide N
 !>   Sheet Segments         strands across the stack per cell (default 16)
+!>   Sheet Sublayers        strand layers through the thickness of one turn
+!>                          (default 1 = one uniform current layer per turn,
+!>                          0 = chosen from t/delta at the run frequency)
 !>   Electrode Area         or Electrode Boundaries, as for foil winding
 !>   Sigma 33 [im]          complex sheet conductivity (harmonic)
 !>   Homogenization Model + Nu 11/22/33 [im]   complex reluctivity via RotM
@@ -2747,27 +2767,73 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> How many strand layers one turn needs at this frequency. One uniform current
+!> layer per turn homogenizes the through-thickness redistribution away, which
+!> is exact while the turn is thin against the skin depth and wrong once it is
+!> not: on W-G1 one layer loses 10 % of Rac at t/delta = 1.4 and 12 % at 4.3,
+!> while three layers hold 1 % and five hold 2 % (DEV-1520 FEMM study). The
+!> thresholds are that study's B3 and B5 columns.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetAutoSublayers(tfoil, sgm) RESULT(m)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: tfoil, sgm
+    INTEGER :: m
+    REAL(KIND=dp) :: omega, delta, ratio, mu0
+    LOGICAL :: Found
+
+    mu0 = 4.0d-7 * PI
+    omega = GetAngularFrequency(Found = Found)
+    IF (.NOT. Found) omega = 0._dp
+    ratio = 0._dp
+    IF (omega > 0._dp .AND. sgm > 0._dp) THEN
+      delta = SQRT(2._dp / (omega * mu0 * sgm))
+      ratio = tfoil / delta
+    END IF
+
+    IF (ratio <= 0.5_dp) THEN
+      m = 1
+    ELSE IF (ratio <= 2._dp) THEN
+      m = 3
+    ELSE
+      m = 5
+    END IF
+    WRITE(Message,'(A,F8.3,A,I0)') 'Foil sheet automatic sub-layers: t/delta = ', ratio, &
+        ' gives Sheet Sublayers = ', m
+    CALL Info('Circuits_Init', Message, Level=3)
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetAutoSublayers
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Harmonic sheet material from the physics: the complex sheet conductivity and
 !> the complex in-plane reluctivity at the current angular frequency, written
 !> only where the SIF did not give them (the ownership is decided once, in
 !> InitFoilSheetMaterial, before anything is written). Shared by the init and by
 !> the per-call refresh of a temperature dependent 'Sheet Conductivity'.
 !------------------------------------------------------------------------------
-  SUBROUTINE SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha)
+  SUBROUTINE SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha, nSub)
 !------------------------------------------------------------------------------
     USE CircuitUtils
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
     REAL(KIND=dp) :: tfoil, ff, sgm
     LOGICAL :: StackAlongAlpha
-    REAL(KIND=dp) :: tau0, sdc, omega, mu0
+    INTEGER :: nSub
+    REAL(KIND=dp) :: tau0, sdc, omega, mu0, tsub
     COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
     LOGICAL :: Homog, Found, FoundFreq
     INTEGER :: dStack, dPlane(2), d
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
 
+    ! Every strand is one sub-layer of a turn, so the 1-D skin solution that the
+    ! sheet coefficients come from is the one of a plate of thickness t/nSub.
+    ! The block is still the same continuum, so the fill factor of the slab a
+    ! sub-layer smears over is unchanged - that is where this differs from the
+    ! FEMM study, which draws copper-only regions and therefore uses ff = 1.
     mu0 = 4.0d-7 * PI
-    tau0 = mu0 * sgm * tfoil**2 / 4._dp
+    tsub = tfoil / nSub
+    tau0 = mu0 * sgm * tsub**2 / 4._dp
     sdc  = ff * sgm
     CALL ListAddConstReal(CompParams, 'Foil Sheet Tau0', tau0)
     CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma DC', sdc)
@@ -2800,13 +2866,26 @@ END FUNCTION isComponentName
       mue = mu0 * ((1._dp - ff) + ff * th)
       nue = 1._dp / mue
       CALL FoilSheetNuDirections(StackAlongAlpha, dStack, dPlane)
-      CALL ListAddConstReal(CompParams, FoilSheetNuKey(dStack), 1._dp / mu0)
-      DO d = 1, 2
-        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d)), REAL(nue, KIND=dp))
-        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d))//' im', AIMAG(nue))
-      END DO
-      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet '//FoilSheetNuKey(dPlane(1))// &
-          ' = '//FoilSheetNuKey(dPlane(2))//' = ', REAL(nue, KIND=dp), AIMAG(nue), ' i'
+      IF (nSub > 1) THEN
+        ! With several strand layers per turn the through-thickness current
+        ! redistribution is carried by the strands, and what is left for the
+        ! material law is the sub-layer's own plate response, which the FEMM
+        ! study's variant B applies to every field component.
+        DO d = 1, 3
+          CALL ListAddConstReal(CompParams, FoilSheetNuKey(d), REAL(nue, KIND=dp))
+          CALL ListAddConstReal(CompParams, FoilSheetNuKey(d)//' im', AIMAG(nue))
+        END DO
+        WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Nu (isotropic, sub-layers) = ', &
+            REAL(nue, KIND=dp), AIMAG(nue), ' i'
+      ELSE
+        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dStack), 1._dp / mu0)
+        DO d = 1, 2
+          CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d)), REAL(nue, KIND=dp))
+          CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d))//' im', AIMAG(nue))
+        END DO
+        WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet '//FoilSheetNuKey(dPlane(1))// &
+            ' = '//FoilSheetNuKey(dPlane(2))//' = ', REAL(nue, KIND=dp), AIMAG(nue), ' i'
+      END IF
       CALL Info('Circuits_Init', Message, Level=3)
     END IF
 !------------------------------------------------------------------------------
@@ -2825,6 +2904,7 @@ END FUNCTION isComponentName
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
     REAL(KIND=dp) :: tfoil, ff, sgm
+    INTEGER :: nSub
     LOGICAL :: FoundT, FoundF, FoundS, Found, Varies, StackAlongAlpha
 
     IF (.NOT. GetLogical(CompParams, 'Foil Sheet Sigma Varies', Found)) RETURN
@@ -2835,10 +2915,12 @@ END FUNCTION isComponentName
     IF (.NOT. (FoundT .AND. FoundF .AND. FoundS)) RETURN
     StackAlongAlpha = GetLogical(CompParams, 'Foil Sheet Stack Along Alpha', Found)
     IF (.NOT. Found) StackAlongAlpha = .TRUE.
+    nSub = GetInteger(CompParams, 'Foil Sheet Sublayers', Found)
+    IF (.NOT. Found .OR. nSub < 1) nSub = 1
 
     WRITE(Message,'(A,ES12.5)') 'Foil sheet mean sheet conductivity = ', sgm
     CALL Info('Circuits_Init', Message, Level=3)
-    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha)
+    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha, nSub)
 !------------------------------------------------------------------------------
   END SUBROUTINE UpdateFoilSheetMaterial
 !------------------------------------------------------------------------------
@@ -2852,12 +2934,13 @@ END FUNCTION isComponentName
 !> here, but only where the SIF did not give them explicitly: an explicit
 !> 'Sigma 33' or 'Nu 22' always wins, which keeps hand written SIFs valid.
 !------------------------------------------------------------------------------
-  SUBROUTINE InitFoilSheetMaterial(CompParams, StackAlongAlpha)
+  SUBROUTINE InitFoilSheetMaterial(CompParams, StackAlongAlpha, nSub)
 !------------------------------------------------------------------------------
     USE CircuitUtils
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
     LOGICAL :: StackAlongAlpha
+    INTEGER :: nSub
     REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, mu0
     REAL(KIND=dp) :: nuinf, rr(6), tt(6), arr(6,1)
     INTEGER :: nlad, nlk, dStack, dPlane(2), d
@@ -2894,6 +2977,11 @@ END FUNCTION isComponentName
       WRITE(Message,'(A,ES12.5,A,ES12.5,A,ES12.5)') 'Foil sheet physics: t = ', tfoil, &
           ', ff = ', ff, ', sigma = ', sgm
       CALL Info('Circuits_Init', Message, Level=3)
+      IF (nSub > 1) THEN
+        WRITE(Message,'(A,I0,A,ES12.5,A)') 'Foil sheet sub-layers: ', nSub, &
+            ' per turn, the sheet coefficients use t/nSub = ', tfoil / nSub, ' m'
+        CALL Info('Circuits_Init', Message, Level=3)
+      END IF
       WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Foil sheet derived: tau0 = ', tau0, &
           ' s, DC sheet conductivity = ', sdc
       CALL Info('Circuits_Init', Message, Level=3)
@@ -2908,6 +2996,9 @@ END FUNCTION isComponentName
     ! complex one, so the twins ran with no condition on A at all. With the
     ! conditions translated the production F-G1 half model converges.
     IF (Transient) THEN
+      IF (nSub /= 1) CALL Fatal('Circuits_Init', &
+          'Foil sheet transient supports "Sheet Sublayers = 1" only; the strand '// &
+          'skin ladder and the reluctivity ladder are derived for one layer per turn.')
       IF (.NOT. HavePhys) CALL Fatal('Circuits_Init', &
           'Foil sheet transient needs "Foil Thickness", "Fill Factor" and "Sheet Conductivity"!')
 
@@ -2972,7 +3063,7 @@ END FUNCTION isComponentName
     END IF
 
     IF (.NOT. HavePhys) RETURN
-    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha)
+    CALL SetFoilSheetHarmonicMaterial(CompParams, tfoil, ff, sgm, StackAlongAlpha, nSub)
 !------------------------------------------------------------------------------
   END SUBROUTINE InitFoilSheetMaterial
 !------------------------------------------------------------------------------
@@ -2984,8 +3075,9 @@ END FUNCTION isComponentName
     TYPE(Component_t), POINTER :: Comp
     TYPE(ValueList_t), POINTER :: CompParams
     INTEGER :: CompInd, ExtMaster
-    INTEGER :: nfoils
-    LOGICAL :: Found
+    INTEGER :: nfoils, nLayers
+    REAL(KIND=dp) :: tfoil, sgm, elemH, tsub
+    LOGICAL :: Found, FoundS, Varies
     CHARACTER(LEN=MAX_NAME_LEN) :: str
 
     IF (CoordinateSystemDimension() /= 3) &
@@ -3024,15 +3116,18 @@ END FUNCTION isComponentName
     IF (.NOT. ASSOCIATED(VariableGet(CurrentModel % Mesh % Variables, 'Beta'))) &
         CALL Fatal('Circuits_Init','Foil sheet needs the direction field "Beta"!')
 
+    ! 0 asks for the sub-layer count to be chosen from the skin depth; it needs
+    ! the thickness, so it is resolved after the geometry has been measured.
+    Comp % nSublayers = GetInteger(CompParams, 'Sheet Sublayers', Found)
+    IF (.NOT. Found) Comp % nSublayers = 1
+
     ! The block geometry is also what a missing 'Foil Thickness' is derived
     ! from, so measure it whenever anything is left to the kernel. This has to
     ! run before InitFoilSheetMaterial, which turns the thickness into the
     ! homogenization coefficients.
-    IF (Comp % nCells <= 0 .OR. Comp % nSegments <= 0 .OR. &
+    IF (Comp % nCells <= 0 .OR. Comp % nSegments <= 0 .OR. Comp % nSublayers <= 0 .OR. &
         .NOT. ListCheckPresent(CompParams, 'Foil Thickness')) &
         CALL FoilSheetAutoLayout(Comp, CompParams, nfoils)
-
-    CALL InitFoilSheetMaterial(CompParams, Comp % StackAlongAlpha)
 
     IF (Comp % nCells < 1 .OR. MOD(nfoils, Comp % nCells) /= 0) &
         CALL Fatal('Circuits_Init','Foil sheet: Number of Turns must be divisible by Sheet Cells!')
@@ -3041,11 +3136,29 @@ END FUNCTION isComponentName
     IF (Comp % nSegments < 1) &
         CALL Fatal('Circuits_Init','Foil sheet: Sheet Segments must be positive!')
 
-    ! dofs: V, V_1..V_nCells, c_11..c_(nCells)(nSegments)
+    IF (Comp % nSublayers <= 0) THEN
+      tfoil = GetConstReal(CompParams, 'Foil Thickness', Found)
+      sgm = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
+      IF (.NOT. (Found .AND. FoundS)) CALL Fatal('Circuits_Init', &
+          'Foil sheet: "Sheet Sublayers = 0" needs the thickness and "Sheet Conductivity"!')
+      Comp % nSublayers = FoilSheetAutoSublayers(tfoil / Comp % foilsPerCell, sgm)
+    END IF
+    IF (Comp % nSublayers < 1) &
+        CALL Fatal('Circuits_Init','Foil sheet: Sheet Sublayers must be positive!')
+    CALL ListAddInteger(CompParams, 'Foil Sheet Sublayers', Comp % nSublayers)
+
+    CALL InitFoilSheetMaterial(CompParams, Comp % StackAlongAlpha, Comp % nSublayers)
+
+    ! Sub-layers subdivide the stack further but stay one conductor: they share
+    ! the voltage dof and the current constraint of their turn cell, so only the
+    ! strand dofs multiply.
+    nLayers = Comp % nCells * Comp % nSublayers
+
+    ! dofs: V, V_1..V_nCells, then one current dof per (sub-layer, segment)
     Comp % ivar % dofs = 1
     Comp % ivar % pdofs = 0
-    Comp % vvar % dofs = 1 + Comp % nCells * (1 + Comp % nSegments)
-    Comp % vvar % pdofs = Comp % nCells * (1 + Comp % nSegments)
+    Comp % vvar % dofs = 1 + Comp % nCells + nLayers * Comp % nSegments
+    Comp % vvar % pdofs = Comp % nCells + nLayers * Comp % nSegments
 
     Comp % coilthickness = 1._dp
 
@@ -3058,7 +3171,7 @@ END FUNCTION isComponentName
     Comp % N_j = Comp % nofturns / Comp % ElArea
 
     IF (ALLOCATED(Comp % StrandWeight)) DEALLOCATE(Comp % StrandWeight)
-    ALLOCATE(Comp % StrandWeight(Comp % nCells * Comp % nSegments))
+    ALLOCATE(Comp % StrandWeight(nLayers * Comp % nSegments))
     Comp % StrandWeight = 0._dp
 
     ! Scale of the strand dofs: with c_kj = SigmaRef * y_kj the unknown y_kj is a
@@ -3078,9 +3191,24 @@ END FUNCTION isComponentName
     CALL ListAddInteger(CompParams, 'Foil Sheet Segments', Comp % nSegments)
     CALL ListAddInteger(CompParams, 'Foil Sheet Foils Per Cell', Comp % foilsPerCell)
 
-    WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Component '//I2S(CompInd)//' foil sheet: ', &
-        Comp % nCells,' cells x ',Comp % nSegments,' segments (',Comp % foilsPerCell,' turns per cell)'
+    WRITE(Message,'(A,I0,A,I0,A,I0,A,I0,A)') 'Component '//I2S(CompInd)//' foil sheet: ', &
+        Comp % nCells,' cells x ',Comp % nSublayers,' sub-layers x ',Comp % nSegments, &
+        ' segments (',Comp % foilsPerCell,' turns per cell)'
     CALL Info('Circuits_Init',Message,Level=6)
+
+    ! A sub-layer thinner than an element is still integrated exactly, because
+    ! FoilSheetPieces clips it, but the field it drives cannot be resolved that
+    ! finely. Say so rather than let it look like a converged layout.
+    elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
+    IF (Found .AND. elemH > 0._dp) THEN
+      tsub = GetConstReal(CompParams, 'Foil Sheet Stack Extent', Found) / MAX(1, nLayers)
+      IF (Found .AND. tsub < elemH) THEN
+        WRITE(Message,'(A,ES10.3,A,ES10.3,A)') 'Foil sheet sub-layer pitch ', tsub, &
+            ' m is below the mean element size ', elemH, &
+            ' m: the strand currents resolve the turn, the field does not'
+        CALL Info('Circuits_Init', Message, Level=4)
+      END IF
+    END IF
     IF (Comp % StackAlongAlpha) THEN
       CALL Info('Circuits_Init','Component '//I2S(CompInd)//' foil sheet stacks along Alpha',Level=6)
     ELSE
@@ -3162,6 +3290,8 @@ END FUNCTION isComponentName
     blkH = vol / sgb
     elemH = sh / nel
 
+    ! The cap is on the TURN cells only. Sub-layers subdivide a turn further on
+    ! purpose, so they are never traded away against the mesh here.
     IF (Comp % nCells <= 0) THEN
       nCellAuto = MIN(nfoils, MAX(1, FLOOR(blkT / (1.5_dp * elemH))))
       DO WHILE (nCellAuto > 1 .AND. MOD(nfoils, nCellAuto) /= 0)
@@ -3198,6 +3328,8 @@ END FUNCTION isComponentName
       END IF
     END IF
 
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Stack Extent', blkT)
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Element Size', elemH)
     WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES11.4)') 'Foil sheet block: stack extent ', blkT, &
         ', across extent ', blkH, ', mean element size ', elemH
     CALL Info('Circuits_Init', Message, Level=3)
@@ -3360,14 +3492,14 @@ END FUNCTION isComponentName
       ! currents. The currents are a fixed function of the strand index so that
       ! every partition uses the same ones.
       IF (n /= 4 .OR. Element % TYPE % ElementCode /= 504) CYCLE
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
-          nPiece, pCell, pSeg, pVol, pBary)
+      CALL FoilSheetPieces(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
+          sStack(1:4), sAcross(1:4), nPiece, pCell, pSeg, pVol, pBary)
       volerr = MAX(volerr, ABS(SUM(pVol(1:nPiece)) - 1._dp))
       stat = ElementInfo(Element, Nodes, 0.25_dp, 0.25_dp, 0.25_dp, detJ, Basis, dBasisdx)
       tv = FoilSheetDirection(sStack, sAcross, dBasisdx, n, 1._dp)
       Vpar = detJ / 6._dp
       DO i = 1, nPiece
-        ind = (pCell(i)-1) * Comp % nSegments + pSeg(i)
+        ind = (pCell(i)-1) * Comp % nSegments + pSeg(i)  ! pCell is the sub-layer here
         cval = SIN(1.234_dp*ind) + 0.5_dp*COS(2.345_dp*ind)
         DO v = 1, 4
           gnode = Element % NodeIndexes(v)
@@ -3832,8 +3964,9 @@ CONTAINS
             ! V - sum_k m_k V_k = 0
             CALL CountMatElement(Rows, Cnts, RowId, 1 + Comp % nCells)
             DO j=1, Comp % nCells
-              ! cell row: (V_k, I) and (V_k, c_kj) for every segment
-              CALL CountMatElement(Rows, Cnts, RowId + AddIndex(j), 1 + Comp % nSegments)
+              ! cell row: (V_k, I) and one (V_k, c) per strand of the turn
+              CALL CountMatElement(Rows, Cnts, RowId + AddIndex(j), &
+                  1 + Comp % nSublayers * Comp % nSegments)
             END DO
             DO j=Comp % nCells + 1, Cvar % pdofs
               ! strand row: (c_kj, c_kj) and (c_kj, V_k)
@@ -3871,7 +4004,7 @@ CONTAINS
     TYPE(Solver_t), POINTER :: ASolver
     TYPE(Element_t), POINTER :: Element
     TYPE(Component_t), POINTER :: Comp
-    INTEGER :: i, j, jj, p, nm, nn, nd, &
+    INTEGER :: i, j, jj, ll, p, nm, nn, nd, &
                VvarId, IvarId, n_Circuits, &
                CompInd, q
     INTEGER, POINTER :: Rows(:), Cols(:), Cnts(:)
@@ -3929,12 +4062,14 @@ CONTAINS
             DO j=1, Comp % nCells
               CALL CreateMatElement(Rows, Cols, Cnts, VvarId, VvarId + AddIndex(j))
               CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), IvarId)
-              DO jj=1, Comp % nSegments
-                i = FoilSheetStrandDof(Comp % nCells, Comp % nSegments, j, jj)
-                ! cell current balance and the strand equation
-                CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), VvarId + AddIndex(i))
-                CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(i), VvarId + AddIndex(j))
-                CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(i), VvarId + AddIndex(i))
+              DO ll=(j-1)*Comp % nSublayers + 1, j*Comp % nSublayers
+                DO jj=1, Comp % nSegments
+                  i = FoilSheetStrandDof(Comp % nCells, Comp % nSegments, ll, jj)
+                  ! cell current balance and the strand equation
+                  CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(j), VvarId + AddIndex(i))
+                  CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(i), VvarId + AddIndex(j))
+                  CALL CreateMatElement(Rows, Cols, Cnts, VvarId + AddIndex(i), VvarId + AddIndex(i))
+                END DO
               END DO
             END DO
           END SELECT
@@ -4399,7 +4534,7 @@ CONTAINS
     OPTIONAL :: Cols
     INTEGER :: Rows(:), Cols(:), Cnts(:)
     INTEGER :: Indexes(nd)
-    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs
+    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs, nLayers
     INTEGER, POINTER :: PS(:)
     LOGICAL*1 :: Done(:)
     LOGICAL, OPTIONAL :: Harmonic
@@ -4424,8 +4559,9 @@ CONTAINS
 
     ! Strands the element can touch: the nodal range plus one cell of margin
     ! for higher order elements and strand borders cutting through elements.
-    ks1 = MAX(1, FLOOR(MINVAL(sStack) * Comp % nCells))
-    ks2 = MIN(Comp % nCells, FLOOR(MAXVAL(sStack) * Comp % nCells) + 2)
+    nLayers = Comp % nCells * Comp % nSublayers
+    ks1 = MAX(1, FLOOR(MINVAL(sStack) * nLayers))
+    ks2 = MIN(nLayers, FLOOR(MAXVAL(sStack) * nLayers) + 2)
     ka1 = MAX(1, FLOOR(MINVAL(sAcross) * Comp % nSegments))
     ka2 = MIN(Comp % nSegments, FLOOR(MAXVAL(sAcross) * Comp % nSegments) + 2)
 

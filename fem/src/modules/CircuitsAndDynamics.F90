@@ -1757,8 +1757,8 @@ CONTAINS
     IF (Exact) THEN
       IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
           'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
-          nItem, pCell, pSeg, pVol, pBary)
+      CALL FoilSheetPieces(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
+          sStack(1:4), sAcross(1:4), nItem, pCell, pSeg, pVol, pBary)
     ELSE
       IP = GaussPoints(Element, np=ngp)
       nItem = IP % n
@@ -1784,12 +1784,12 @@ CONTAINS
       IF (Exact) THEN
         kc = pCell(t); js = pSeg(t)
       ELSE
-        CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, &
+        CALL FoilSheetStrand(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
             SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)), kc, js)
       END IF
       sInd = (kc-1) * Comp % nSegments + js
       sdof = vvarId + FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
-      vdof = vvarId + kc
+      vdof = vvarId + FoilSheetLayerCell(Comp % nSublayers, kc)
 
       g = wgt*SUM(tvec*gradv)
       gres = wgt*SUM(tvec*tvec)
@@ -3512,8 +3512,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     IF (Exact) THEN
       IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
           'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
-          nItem, pCell, pSeg, pVol, pBary)
+      CALL FoilSheetPieces(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
+          sStack(1:4), sAcross(1:4), nItem, pCell, pSeg, pVol, pBary)
     ELSE
       IP = GaussPoints(Element, np=ngp)
       nItem = IP % n
@@ -3550,12 +3550,14 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (Exact) THEN
         kc = pCell(t); js = pSeg(t)
       ELSE
-        CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, &
+        CALL FoilSheetStrand(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
             SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)), kc, js)
       END IF
+      ! kc is the sub-layer; the sub-layers of one turn are that turn's conductor
+      ! in parallel, so they share its voltage dof and its current constraint.
       sInd = (kc-1) * Comp % nSegments + js
       sdof = vvarId + 2*FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
-      vdof = vvarId + 2*kc
+      vdof = vvarId + 2*FoilSheetLayerCell(Comp % nSublayers, kc)
 
       ! g pairs the strand with grad W and is the strand's flux for c = 1; it is
       ! the SAME number in R1 and R2, which keeps the transposition exact. gres
