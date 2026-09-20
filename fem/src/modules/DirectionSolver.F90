@@ -184,6 +184,7 @@ SUBROUTINE DirectionSolver( Model,Solver,dt,TransientSimulation )
   TYPE(Mesh_t), POINTER :: Mesh
   TYPE(ValueList_t), POINTER :: BodyForce, BC
   REAL(KIND=dp), ALLOCATABLE :: STIFF(:,:), LOAD(:), FORCE(:)
+  LOGICAL, ALLOCATABLE :: ActiveBody(:)
 
   ! Boundary values closer than this are the same value, and a wall thinner than
   ! this times the bounding box diagonal has no direction.
@@ -293,9 +294,10 @@ CONTAINS
 !> faces: value = v_lo + (v_hi-v_lo)*d_lo/(d_lo+d_hi). This gives |grad var| = 1/T
 !> for a wall of constant thickness T of any shape, whereas the Laplace solution
 !> of the default method behaves like ln(r) in a round coil.
-!> The 'body N:' namespace trick of the Laplace path is not supported here: the
-!> boundary values are read without a namespace, so one field is computed for the
-!> whole variable.
+!> Faces and nodes are grouped by body, so a model with several windings measures
+!> each node against the faces of its own winding only. The 'body N:' namespace
+!> trick of the Laplace path is not supported here: the boundary values are read
+!> without a namespace, and the same two values serve every body.
 !------------------------------------------------------------------------------
   SUBROUTINE DirectionByDistance()
 !------------------------------------------------------------------------------
@@ -306,7 +308,9 @@ CONTAINS
     TYPE(ValueList_t), POINTER :: BC
     TYPE(Variable_t), POINTER :: Var
     INTEGER, POINTER :: Perm(:), Indexes(:)
-    INTEGER :: i, j, k, t, n, pass, family, ntri, nlo, nhi, nfaces
+    INTEGER :: i, j, k, t, n, b, pass, nbody, nface, ntri, nlo, nhi, nparents
+    INTEGER :: Parents(2)
+    INTEGER, ALLOCATABLE :: BodyLo(:), BodyHi(:), OffLo(:), OffHi(:), NodeBody(:)
     LOGICAL :: IsLo
     REAL(KIND=dp) :: BVals(Mesh % MaxElementNodes)
     REAL(KIND=dp), ALLOCATABLE :: TriLo(:,:), TriHi(:,:), CenLo(:,:), CenHi(:,:), &
@@ -319,26 +323,42 @@ CONTAINS
     IF (Var % DOFs /= 1) CALL Fatal('DirectionSolver', &
         'Direction Method = distance needs a scalar variable')
     Perm => Var % Perm
+    nbody = Model % NumberOfBodies
+
+    ! Which body each active node belongs to. A node of two active bodies has no
+    ! unique pair of faces to measure against; separate windings never touch.
+    !------------------------------------------------------------------------------
+    ALLOCATE(ActiveBody(nbody), NodeBody(Mesh % NumberOfNodes))
+    ActiveBody = .FALSE.
+    NodeBody = 0
+    DO t=1,GetNOFActive()
+      Element => GetActiveElement(t)
+      b = Element % BodyId
+      ActiveBody(b) = .TRUE.
+      n = GetElementNOFNodes()
+      DO i=1,n
+        j = Element % NodeIndexes(i)
+        IF (NodeBody(j) == 0) THEN
+          NodeBody(j) = b
+        ELSE IF (NodeBody(j) /= b) THEN
+          k = j
+          IF (ParEnv % PEs > 1) k = Mesh % ParallelInfo % GlobalDOFs(j)
+          WRITE(Message,'(A,I0,A,I0,A,I0)') 'Direction Method = distance needs separate &
+              &bodies, but node ',k,' belongs to both body ',NodeBody(j),' and body ',b
+          CALL Fatal('DirectionSolver', Message)
+        END IF
+      END DO
+    END DO
 
     ! Pass over the Dirichlet faces of the variable to find the two boundary values
     !------------------------------------------------------------------------------
-    nfaces = 0
+    nface = 0
     vlo = HUGE(vlo)
     vhi = -HUGE(vhi)
     DO t=1,Mesh % NumberOfBoundaryElements
       Element => GetBoundaryElement(t)
-      IF (GetElementFamily() == 1) CYCLE
-      IF (.NOT. ActiveBoundaryElement()) CYCLE
-      BC => GetBC()
-      IF (.NOT. ASSOCIATED(BC)) CYCLE
-      IF (.NOT. ListCheckPresent(BC, varname)) CYCLE
-
-      family = GetElementFamily()
-      IF (family == 2) CALL Fatal('DirectionSolver', &
-          'Direction Method = distance is 3D only')
-      IF (family /= 3 .AND. family /= 4) CALL Fatal('DirectionSolver', &
-          'Direction Method = distance cannot triangulate boundary element type '&
-          //I2S(Element % TYPE % ElementCode))
+      IF (.NOT. DirichletFace(Element, BC)) CYCLE
+      IF (ActiveParents(Element, Parents) == 0) CYCLE
 
       n = GetElementNOFNodes()
       BVals(1:n) = GetReal(BC, varname, Found)
@@ -350,12 +370,12 @@ CONTAINS
         CALL Fatal('DirectionSolver', Message)
       END IF
 
-      nfaces = nfaces + 1
+      nface = nface + 1
       vlo = MIN(vlo, BVals(1))
       vhi = MAX(vhi, BVals(1))
     END DO
 
-    IF (ParallelReduction(nfaces) == 0) CALL Fatal('DirectionSolver', &
+    IF (ParallelReduction(nface) == 0) CALL Fatal('DirectionSolver', &
         'Direction Method = distance found no boundary conditions for '//TRIM(varname))
 
     IF (ParEnv % PEs > 1) THEN
@@ -363,23 +383,21 @@ CONTAINS
       vhi = ParallelReduction(vhi,2)
     END IF
     IF (vhi - vlo <= BC_VALUE_TOL) THEN
-      WRITE(Message,'(A,ES12.5)') 'Direction Method = distance needs two distinct &
+      WRITE(Message,'(A,ES15.8)') 'Direction Method = distance needs two distinct &
           &boundary values, found only ', vlo
       CALL Fatal('DirectionSolver', Message)
     END IF
 
-    ! Collect the faces of both sets as triangles, counting them first
+    ! Collect the faces of both sets as triangles tagged by body, counting them first
     !------------------------------------------------------------------------------
     DO pass=1,2
       nlo = 0
       nhi = 0
       DO t=1,Mesh % NumberOfBoundaryElements
         Element => GetBoundaryElement(t)
-        IF (GetElementFamily() == 1) CYCLE
-        IF (.NOT. ActiveBoundaryElement()) CYCLE
-        BC => GetBC()
-        IF (.NOT. ASSOCIATED(BC)) CYCLE
-        IF (.NOT. ListCheckPresent(BC, varname)) CYCLE
+        IF (.NOT. DirichletFace(Element, BC)) CYCLE
+        nparents = ActiveParents(Element, Parents)
+        IF (nparents == 0) CYCLE
 
         n = GetElementNOFNodes()
         BVals(1:n) = GetReal(BC, varname, Found)
@@ -400,19 +418,28 @@ CONTAINS
         IF (GetElementFamily() == 4) ntri = 2
         Indexes => Element % NodeIndexes
 
-        DO i=1,ntri
-          IF (IsLo) THEN
-            nlo = nlo + 1
-            IF (pass == 2) CALL SetTriangle(TriLo(:,nlo), Indexes(TriCorners(:,i)))
-          ELSE
-            nhi = nhi + 1
-            IF (pass == 2) CALL SetTriangle(TriHi(:,nhi), Indexes(TriCorners(:,i)))
-          END IF
+        DO k=1,nparents
+          DO i=1,ntri
+            IF (IsLo) THEN
+              nlo = nlo + 1
+              IF (pass == 2) THEN
+                CALL SetTriangle(TriLo(:,nlo), Indexes(TriCorners(:,i)))
+                BodyLo(nlo) = Parents(k)
+              END IF
+            ELSE
+              nhi = nhi + 1
+              IF (pass == 2) THEN
+                CALL SetTriangle(TriHi(:,nhi), Indexes(TriCorners(:,i)))
+                BodyHi(nhi) = Parents(k)
+              END IF
+            END IF
+          END DO
         END DO
       END DO
 
       IF (pass == 1) THEN
-        ALLOCATE(TriLo(9,MAX(nlo,1)), TriHi(9,MAX(nhi,1)))
+        ALLOCATE(TriLo(9,MAX(nlo,1)), TriHi(9,MAX(nhi,1)), &
+            BodyLo(MAX(nlo,1)), BodyHi(MAX(nhi,1)))
       END IF
     END DO
 
@@ -420,9 +447,22 @@ CONTAINS
     ! for a minimum distance.
     !------------------------------------------------------------------------------
     IF (ParEnv % PEs > 1) THEN
-      CALL GatherTriangles(TriLo, nlo)
-      CALL GatherTriangles(TriHi, nhi)
+      CALL GatherTriangles(TriLo, BodyLo, nlo)
+      CALL GatherTriangles(TriHi, BodyHi, nhi)
     END IF
+
+    ALLOCATE(OffLo(nbody+1), OffHi(nbody+1))
+    CALL GroupByBody(TriLo, BodyLo, nlo, OffLo)
+    CALL GroupByBody(TriHi, BodyHi, nhi, OffHi)
+
+    DO b=1,nbody
+      IF (.NOT. ActiveBody(b)) CYCLE
+      IF (OffLo(b+1) > OffLo(b) .AND. OffHi(b+1) > OffHi(b)) CYCLE
+      WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Direction Method = distance needs both boundary &
+          &values on every body, but body ',b,' has ',OffLo(b+1)-OffLo(b),' and ', &
+          OffHi(b+1)-OffHi(b),' faces'
+      CALL Fatal('DirectionSolver', Message)
+    END DO
 
     ALLOCATE(CenLo(3,MAX(nlo,1)), RadLo(MAX(nlo,1)), CenHi(3,MAX(nhi,1)), RadHi(MAX(nhi,1)), &
         LowBound(MAX(nlo,nhi,1)))
@@ -441,9 +481,12 @@ CONTAINS
     DO i=1,n
       j = Perm(i)
       IF (j == 0) CYCLE
+      b = NodeBody(i)
+      IF (b == 0) CALL Fatal('DirectionSolver', &
+          'Direction Method = distance found a dof outside the active bodies')
       p = [Mesh % Nodes % x(i), Mesh % Nodes % y(i), Mesh % Nodes % z(i)]
-      dlo = MinTriangleDistance(p, TriLo, CenLo, RadLo, nlo, LowBound)
-      dhi = MinTriangleDistance(p, TriHi, CenHi, RadHi, nhi, LowBound)
+      dlo = MinTriangleDistance(p, TriLo, CenLo, RadLo, OffLo(b)+1, OffLo(b+1), LowBound)
+      dhi = MinTriangleDistance(p, TriHi, CenHi, RadHi, OffHi(b)+1, OffHi(b+1), LowBound)
       dsum = dlo + dhi
       IF (dsum < REL_THICKNESS_TOL * bbox) THEN
         Var % Values(j) = 0.5_dp * (vlo + vhi)
@@ -461,8 +504,8 @@ CONTAINS
       dsmax = ParallelReduction(dsmax,2)
     END IF
 
-    WRITE(Message,'(A,I0,A,I0,A)') 'Distance direction for '//TRIM(varname)//' from ', &
-        nlo,' and ',nhi,' boundary triangles'
+    WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Distance direction for '//TRIM(varname)//' from ', &
+        nlo,' and ',nhi,' boundary triangles on ',COUNT(ActiveBody),' bodies'
     CALL Info('DirectionSolver', Message, Level=5)
     WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Wall thickness between the faces ranges from ', &
         dsmin,' to ',dsmax
@@ -470,9 +513,75 @@ CONTAINS
     WRITE(Message,'(A,F8.3,A)') 'Distance direction computed in ',RealTime()-t0,' s'
     CALL Info('DirectionSolver', Message, Level=5)
 
-    DEALLOCATE(TriLo, TriHi, CenLo, RadLo, CenHi, RadHi, LowBound)
+    DEALLOCATE(TriLo, TriHi, BodyLo, BodyHi, OffLo, OffHi, CenLo, RadLo, CenHi, RadHi, &
+        LowBound, ActiveBody, NodeBody)
 !------------------------------------------------------------------------------
   END SUBROUTINE DirectionByDistance
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> True for a face that carries a Dirichlet condition of the solver variable.
+!------------------------------------------------------------------------------
+  FUNCTION DirichletFace(Element, BC) RESULT(Found)
+!------------------------------------------------------------------------------
+    TYPE(Element_t), POINTER :: Element
+    TYPE(ValueList_t), POINTER :: BC
+    LOGICAL :: Found
+!------------------------------------------------------------------------------
+    INTEGER :: family
+!------------------------------------------------------------------------------
+    Found = .FALSE.
+    IF (GetElementFamily() == 1) RETURN
+    IF (.NOT. ActiveBoundaryElement()) RETURN
+    BC => GetBC()
+    IF (.NOT. ASSOCIATED(BC)) RETURN
+    IF (.NOT. ListCheckPresent(BC, varname)) RETURN
+
+    family = GetElementFamily()
+    IF (family == 2) CALL Fatal('DirectionSolver', &
+        'Direction Method = distance is 3D only')
+    IF (family /= 3 .AND. family /= 4) CALL Fatal('DirectionSolver', &
+        'Direction Method = distance cannot triangulate boundary element type '&
+        //I2S(Element % TYPE % ElementCode))
+    Found = .TRUE.
+!------------------------------------------------------------------------------
+  END FUNCTION DirichletFace
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> The bodies of the parent elements of a face that are active for this solver.
+!> A face between two active bodies belongs to both of them.
+!------------------------------------------------------------------------------
+  FUNCTION ActiveParents(Element, Parents) RESULT(nparents)
+!------------------------------------------------------------------------------
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: Parents(2), nparents
+!------------------------------------------------------------------------------
+    TYPE(Element_t), POINTER :: Parent
+    INTEGER :: i, b
+!------------------------------------------------------------------------------
+    nparents = 0
+    IF (.NOT. ASSOCIATED(Element % BoundaryInfo)) RETURN
+
+    DO i=1,2
+      IF (i == 1) THEN
+        Parent => Element % BoundaryInfo % Left
+      ELSE
+        Parent => Element % BoundaryInfo % Right
+      END IF
+      IF (.NOT. ASSOCIATED(Parent)) CYCLE
+
+      b = Parent % BodyId
+      IF (b < 1 .OR. b > SIZE(ActiveBody)) CYCLE
+      IF (.NOT. ActiveBody(b)) CYCLE
+      IF (nparents == 1) THEN
+        IF (Parents(1) == b) CYCLE
+      END IF
+      nparents = nparents + 1
+      Parents(nparents) = b
+    END DO
+!------------------------------------------------------------------------------
+  END FUNCTION ActiveParents
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -513,62 +622,102 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Gather the triangles of all partitions so that every partition holds the
-!> complete surface.
+!> Sort the triangles by the body they belong to and return the body offsets, so
+!> that body b owns the triangles Offset(b)+1 ... Offset(b+1).
 !------------------------------------------------------------------------------
-  SUBROUTINE GatherTriangles(Tri, ntri)
+  SUBROUTINE GroupByBody(Tri, BodyId, ntri, Offset)
 !------------------------------------------------------------------------------
     REAL(KIND=dp), ALLOCATABLE :: Tri(:,:)
+    INTEGER, ALLOCATABLE :: BodyId(:)
+    INTEGER :: ntri, Offset(:)
+!------------------------------------------------------------------------------
+    INTEGER :: b, k
+    INTEGER, ALLOCATABLE :: Pos(:)
+    REAL(KIND=dp), ALLOCATABLE :: Sorted(:,:)
+!------------------------------------------------------------------------------
+    Offset = 0
+    DO k=1,ntri
+      Offset(BodyId(k)+1) = Offset(BodyId(k)+1) + 1
+    END DO
+    DO b=1,SIZE(Offset)-1
+      Offset(b+1) = Offset(b+1) + Offset(b)
+    END DO
+
+    ALLOCATE(Sorted(9,MAX(ntri,1)), Pos(SIZE(Offset)))
+    Pos = Offset
+    DO k=1,ntri
+      b = BodyId(k)
+      Pos(b) = Pos(b) + 1
+      Sorted(:,Pos(b)) = Tri(:,k)
+    END DO
+
+    DEALLOCATE(Tri, Pos)
+    CALL MOVE_ALLOC(Sorted, Tri)
+!------------------------------------------------------------------------------
+  END SUBROUTINE GroupByBody
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Gather the triangles of all partitions, with the body of each triangle, so that
+!> every partition holds the complete surfaces.
+!------------------------------------------------------------------------------
+  SUBROUTINE GatherTriangles(Tri, BodyId, ntri)
+!------------------------------------------------------------------------------
+    REAL(KIND=dp), ALLOCATABLE :: Tri(:,:)
+    INTEGER, ALLOCATABLE :: BodyId(:)
     INTEGER :: ntri
 !------------------------------------------------------------------------------
     INTEGER :: i, ierr, comm, pes
-    INTEGER, ALLOCATABLE :: Counts(:), Displs(:)
+    INTEGER, ALLOCATABLE :: Counts(:), Displs(:), Counts9(:), Displs9(:), AllBodyId(:)
     REAL(KIND=dp), ALLOCATABLE :: AllTri(:,:)
 !------------------------------------------------------------------------------
     comm = ParEnv % ActiveComm
     CALL MPI_COMM_SIZE(comm, pes, ierr)
 
-    ALLOCATE(Counts(pes), Displs(pes))
+    ALLOCATE(Counts(pes), Displs(pes), Counts9(pes), Displs9(pes))
     CALL MPI_ALLGATHER(ntri, 1, MPI_INTEGER, Counts, 1, MPI_INTEGER, comm, ierr)
 
-    Counts = 9 * Counts
     Displs(1) = 0
     DO i=2,pes
       Displs(i) = Displs(i-1) + Counts(i-1)
     END DO
+    Counts9 = 9 * Counts
+    Displs9 = 9 * Displs
 
-    ALLOCATE(AllTri(9,MAX(SUM(Counts)/9,1)))
-    CALL MPI_ALLGATHERV(Tri, 9*ntri, MPI_DOUBLE_PRECISION, AllTri, Counts, Displs, &
+    ALLOCATE(AllTri(9,MAX(SUM(Counts),1)), AllBodyId(MAX(SUM(Counts),1)))
+    CALL MPI_ALLGATHERV(Tri, 9*ntri, MPI_DOUBLE_PRECISION, AllTri, Counts9, Displs9, &
         MPI_DOUBLE_PRECISION, comm, ierr)
+    CALL MPI_ALLGATHERV(BodyId, ntri, MPI_INTEGER, AllBodyId, Counts, Displs, &
+        MPI_INTEGER, comm, ierr)
 
-    ntri = SUM(Counts) / 9
-    DEALLOCATE(Tri)
+    ntri = SUM(Counts)
+    DEALLOCATE(Tri, BodyId, Counts, Displs, Counts9, Displs9)
     CALL MOVE_ALLOC(AllTri, Tri)
-    DEALLOCATE(Counts, Displs)
+    CALL MOVE_ALLOC(AllBodyId, BodyId)
 !------------------------------------------------------------------------------
   END SUBROUTINE GatherTriangles
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Smallest distance from a point to a set of triangles. The bounding spheres give
-!> a lower bound for each triangle, and only the triangles whose lower bound is
-!> below the distance of the most promising one are evaluated exactly.
+!> Smallest distance from a point to the triangles i1 ... i2 of a set. The bounding
+!> spheres give a lower bound for each triangle, and only the triangles whose lower
+!> bound is below the distance of the most promising one are evaluated exactly.
 !------------------------------------------------------------------------------
-  FUNCTION MinTriangleDistance(p, Tri, Cen, Rad, ntri, LowBound) RESULT(dmin)
+  FUNCTION MinTriangleDistance(p, Tri, Cen, Rad, i1, i2, LowBound) RESULT(dmin)
 !------------------------------------------------------------------------------
     REAL(KIND=dp) :: p(3), Tri(:,:), Cen(:,:), Rad(:), LowBound(:), dmin
-    INTEGER :: ntri
+    INTEGER :: i1, i2
 !------------------------------------------------------------------------------
     INTEGER :: k, kbest
 !------------------------------------------------------------------------------
-    kbest = 1
-    DO k=1,ntri
+    kbest = i1
+    DO k=i1,i2
       LowBound(k) = SQRT(SUM((p - Cen(:,k))**2)) - Rad(k)
       IF (LowBound(k) < LowBound(kbest)) kbest = k
     END DO
 
     dmin = PointTriangleDistance(p, Tri(1:3,kbest), Tri(4:6,kbest), Tri(7:9,kbest))
-    DO k=1,ntri
+    DO k=i1,i2
       IF (LowBound(k) >= dmin) CYCLE
       dmin = MIN(dmin, PointTriangleDistance(p, Tri(1:3,k), Tri(4:6,k), Tri(7:9,k)))
     END DO
