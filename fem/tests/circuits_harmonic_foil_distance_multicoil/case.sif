@@ -1,0 +1,125 @@
+! Two nested square rings (rings.grd) sharing one centre: the grouping test for
+! Direction Method = distance (DEV-1497). A transformer model has several
+! windings, and the faces of the neighbouring winding must not be measured.
+!
+! The inner ring spans the half sizes 10..20 mm, the outer one 25..30 mm, with
+! 5 mm of air between them. Alpha = 0 on the outer face of each ring and 1 on
+! its inner face, so a node at |x| = 18 mm of the inner ring is 2 mm from its
+! own Alpha = 0 face and 8 mm from its own Alpha = 1 face: Alpha = 2/10. The
+! outer ring's Alpha = 1 face is only 7 mm away, so without the per-body
+! grouping that node would get 2/9 instead.
+!
+! Solver 1 Reference Norm 0.5675490219 is the Elmer L2 norm sqrt(sum(a^2)/n)
+! over the n = 1056 nodes of the two rings, computed independently in numpy
+! with the faces grouped per body. Pooling the faces of both rings gives
+! 0.5692631298 instead, so this test does guard the grouping.
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "rings"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+End
+
+Solver 1  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Alpha
+  Variable = Alpha
+  Direction Method = String "distance"
+End
+
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Beta
+  Variable = Beta
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+Material 1
+  Name = "copper"
+  Electric Conductivity = 58e6
+End
+
+Material 2
+  Name = "air"
+  Electric Conductivity = 0
+End
+
+Body 1  !---- inner ring
+  Name = "coil inner"
+  Target Bodies(1) = 1
+  Equation = 1
+  Material = 1
+End
+
+Body 2  !---- outer ring
+  Name = "coil outer"
+  Target Bodies(1) = 2
+  Equation = 1
+  Material = 1
+End
+
+Body 3  !---- air between the rings, in the hole and around them
+  Name = "air"
+  Target Bodies(3) = 3 4 5
+  Material = 2
+End
+
+Boundary Condition 1
+  Name = "inner ring outer face"
+  Target Boundaries(1) = 1
+  Alpha = Real 0
+End
+
+Boundary Condition 2
+  Name = "inner ring inner face"
+  Target Boundaries(1) = 2
+  Alpha = Real 1
+End
+
+Boundary Condition 3
+  Name = "outer ring inner face"
+  Target Boundaries(1) = 3
+  Alpha = Real 1
+End
+
+Boundary Condition 4
+  Name = "outer ring outer face"
+  Target Boundaries(1) = 4
+  Alpha = Real 0
+End
+
+Boundary Condition 5
+  Name = "bottom of both rings"
+  Target Boundaries(2) = 6 8
+  Beta = Real 0
+End
+
+Boundary Condition 6
+  Name = "top of both rings"
+  Target Boundaries(2) = 11 13
+  Beta = Real 1
+End
+
+Solver 1 :: Reference Norm = Real 0.5675490219
+Solver 1 :: Reference Norm Tolerance = Real 1E-5
+Solver 2 :: Reference Norm = Real 0.6454972244
+Solver 2 :: Reference Norm Tolerance = Real 1E-5
+$fprintf( stderr, "TEST CASE 1\n");
+RUN
