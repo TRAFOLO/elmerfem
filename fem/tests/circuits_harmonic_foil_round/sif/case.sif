@@ -1,0 +1,358 @@
+! Round foil winding (F-G1 demo choke, half model) with the Alpha direction
+! computed as the relative distance between the coil faces (DEV-1497).
+! Mesh and circuit written by TRAFOLO 1.36.0, adapted from case_laplace_50hz.sif.
+!
+! Geometry (mesh.nodes, mm): axis y, coil r = 9..19, height 18, half of the
+! ring (z >= 0). N = 10 turns over the radial thickness T = 10 mm, copper
+! 58e6 S/m at a foil fill factor of 0.5, so the analytic DC resistance of the
+! FULL coil is
+!    R_dc = (N/T)^2 * pi * (r_out^2 - r_in^2) / (sigma_eff * H) = 1.6851 mOhm
+! with sigma_eff = 29e6 S/m and H = 0.018 m. The same number follows from
+! sum_k 2*pi*r_k / (sigma*t*H) for 10 foils of t = 0.5 mm.
+!
+! The meshed coil is 0.16 % smaller than that ideal annulus, so Elmer's own
+! r_component(1) = 1.6825 mOhm is the number to compare against.
+!
+! At 0 Hz (DEV-1491 DC path) this run gives R = 4*P/|I|^2 = 1.6710 mOhm from
+! 'res: eddy current power' (the factor 4 is 2 for peak -> rms and 2 for the
+! half model), 0.7 % below r_component; with the default Laplace Alpha the same
+! case gives 1.6081 mOhm, 4.4 % low, which is the ln(r) error this method
+! removes. Solver 9 Reference Norm below is that eddy current power.
+INCLUDE mesh/mesh.names
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "mesh"
+End
+
+$ PrimaryRMS = 1.0
+$ ScaleRMS = sqrt(2)
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Steady
+  Output Intervals = 1
+  Steady State Max Iterations = 1
+  Angular Frequency = 0.0
+  Coordinate Scaling = Real 0.001
+End
+
+Solver 1  !---- DirectionSolver, DirectionSolver (Alpha across the foil stack)
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Alpha
+  Variable = Alpha
+  Direction Method = String "distance"
+End
+
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Beta
+  Variable = Beta
+End
+
+Solver 3  !---- CoordinateTransform, RotMSolver
+  Exec Solver = Before All
+  Equation = Transformation matrix
+  Procedure = "CoordinateTransform" "RotMSolver"
+  Variable = -nooutput Dummy
+  Optimize Bandwidth = False
+  Polar Decomposition Determinant Tolerance = Real 1.0e-9
+  Polar Decomposition Max Iterations = Integer 100
+  Exported Variable 1 = -nooutput RotM E[RotM E:9]
+  Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+  Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+  Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+  Discontinuous Galerkin = True
+End
+
+Solver 4  !---- WPotentialSolver, Wsolve
+  Exec Solver = Before All
+  Procedure = "WPotentialSolver" "Wsolve"
+  Equation = "Wire direction"
+  Variable = W
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Max Iterations = 50000
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Preconditioning = None
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+End
+
+Solver 5  !---- CircuitsAndDynamics, CircuitsAndDynamicsHarmonic
+  Exec Solver = Always
+  Equation = Circuits
+  Variable = X
+  No Matrix = Logical True
+  Procedure = "CircuitsAndDynamics" "CircuitsAndDynamicsHarmonic"
+End
+
+Solver 6  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
+  Exec Solver = Always
+  Equation = "MGDynamics"
+  Variable = "AV[AV re:1 AV im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Angular Frequency = 0.0
+  Export Lagrange Multiplier = Logical True
+  Linear System Symmetric = Logical True
+  Linear System Complex = Logical True
+  Linear System Solver = Iterative
+  Linear System Iterative Method = Bicgstabl
+  Linear System preconditioning = Circuit
+  Linear System Convergence Tolerance = 1e-09
+  Linear System Max Iterations = 5000
+  Linear System Residual Output = 100
+  BicgStabL Polynomial Degree = 4
+  Steady State Convergence Tolerance = 1e-08
+End
+
+Solver 7  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
+  Exec Solver = Always
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Linear System Symmetric = True
+  Potential Variable = String "AV"
+  Calculate Current Density = Logical True
+  Calculate Joule Heating = Logical True
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 1000
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+
+Solver 8  !---- CircuitsAndDynamics, CircuitsOutput
+  Exec Solver = Always
+  Equation = Circuits Output
+  Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+
+Solver 9  !---- SaveData, SaveScalars
+  Exec Solver = Always
+  Equation = "sv"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = dat/case.dat
+  Show Norm Name = String "res: eddy current power"
+End
+
+Equation 1
+  Active Solvers(2) = 6 7
+End
+
+Equation 2
+  Active Solvers(9) = 1 2 3 4 5 6 \
+                      7 8 9
+End
+
+Constants
+  Permittivity of Vacuum = 8.8542e-12
+  Permeability of Vacuum = 1.2566e-6
+End
+
+Material 1  !---- core
+  Name = "StudyCore"
+  Electric Conductivity = Real 0.0
+  Relative Permittivity = Real 1.0
+  Relative Permeability = 2000.0
+End
+
+Material 2  !---- coil
+  Name = "StudyCu"
+  Electric Conductivity = Real 29e6 ! 58e6 S/m copper at a foil fill factor of 0.5
+  Relative Permittivity = 1.0
+  Relative Permeability = 1.0
+End
+
+Material 3  !---- gap
+  Name = "Polyvinyl chloride (PVC)"
+  Electric Conductivity = Real 0.0
+  Relative Permittivity = 3.5
+  Relative Permeability = 1.0
+End
+
+Material 4  !---- air
+  Name = "air"
+  Electric Conductivity = 0
+  Relative Permittivity = 1
+  Relative Permeability = 1
+End
+
+Body 1
+  Target Bodies(1) = $ Air1_1
+  Equation = 1
+  Material = 4
+End
+
+Body 2
+  Target Bodies(1) = $ Air1_2
+  Equation = 1
+  Material = 4
+End
+
+Body 3
+  Target Bodies(1) = $ Group1core1
+  Equation = 1
+  Material = 1
+End
+
+Body 4
+  Target Bodies(1) = $ Group1gap1
+  Equation = 1
+  Material = 3
+End
+
+Body 5
+  Target Bodies(1) = $ Group1coil1
+  Equation = 2
+  Material = 2
+  Body Force = 1
+  Alpha reference (3) = Real 1 0 0
+  Beta reference (3) = Real 0 1 0
+End
+
+Component 1
+  Name = String Group1coil1
+  Master Bodies(1) = Integer 5
+  Coil Type = String foil winding
+  Number of Turns = Real 10.0
+  Electrode Boundaries(2) = Integer 4 5
+  Coil Thickness = Real 0.01
+  Circuit Equation Voltage Factor = Real 0.5 ! symmetry (half of the coil is solved)
+End
+
+Body Force 1
+  source2 Re = Real $ ScaleRMS*PrimaryRMS
+  source2 Im = Real 0
+End
+
+Boundary Condition 1
+  Target Boundaries(8) = $ Air1_1Boundary1 Air1_1Boundary2 Air1_1Boundary3 Air1_1Boundary4 Air1_1Boundary5 Air1_1Symmetry1 Air1_2Symmetry1 Air1_2Symmetry2
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+End
+
+Boundary Condition 2
+  Target Boundaries(1) = $ Group1core1Symmetry1
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  AV re = Real 0.0
+  AV im = Real 0.0
+End
+
+Boundary Condition 3
+  Target Boundaries(1) = $ Group1gap1Symmetry1
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  AV re = Real 0.0
+  AV im = Real 0.0
+End
+
+Boundary Condition 4
+  Target Boundaries(1) = $ Group1coil1Terminal1
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  W = Real 1
+End
+
+Boundary Condition 5
+  Target Boundaries(1) = $ Group1coil1Terminal2
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  W = Real 0
+End
+
+Boundary Condition 6
+  Target Boundaries = $ Group1coil1HPos1
+  Beta = Real 1
+End
+
+Boundary Condition 7
+  Target Boundaries = $ Group1coil1HPos2
+  Beta = Real 1
+End
+
+Boundary Condition 8
+  Target Boundaries = $ Group1coil1HNeg1
+  Beta = Real 0
+End
+
+Boundary Condition 9
+  Target Boundaries = $ Group1coil1HNeg2
+  Beta = Real 0
+End
+
+Boundary Condition 10
+  Target Boundaries = $ Group1coil1VOut1
+  Alpha = Real 0
+End
+
+Boundary Condition 11
+  Target Boundaries = $ Group1coil1VOut2
+  Alpha = Real 0
+End
+
+Boundary Condition 12
+  Target Boundaries = $ Group1coil1VIn1
+  Alpha = Real 1
+End
+
+Boundary Condition 13
+  Target Boundaries = $ Group1coil1VIn2
+  Alpha = Real 1
+End
+
+$ Circuits = 1
+! -----------------------------------------------------------------------------
+! Matrix Size Declaration and Matrix Initialization
+! -----------------------------------------------------------------------------
+$ C.1.variables = 5
+$ C.1.perm = zeros(C.1.variables)
+$ C.1.A = zeros(C.1.variables,C.1.variables)
+$ C.1.B = zeros(C.1.variables,C.1.variables)
+
+! -----------------------------------------------------------------------------
+! Dof/Unknown Vector Definition
+! -----------------------------------------------------------------------------
+$ C.1.name.1 = "i_component(1)"
+$ C.1.name.2 = "i_source2"
+$ C.1.name.3 = "v_component(1)"
+$ C.1.name.4 = "v_source2"
+$ C.1.name.5 = "u_2_circuit_1"
+
+! -----------------------------------------------------------------------------
+! Source Vector Definition
+! -----------------------------------------------------------------------------
+$ C.1.source.5 = "source2"
+
+! -----------------------------------------------------------------------------
+! KCL Equations
+! -----------------------------------------------------------------------------
+$ C.1.B(0,0) = 1
+$ C.1.B(0,1) = 1
+
+! -----------------------------------------------------------------------------
+! KVL Equations
+! -----------------------------------------------------------------------------
+$ C.1.B(1,2) = -1
+$ C.1.B(1,4) = 1
+! -----------------------------------------------------------------------------
+! Component Equations
+! -----------------------------------------------------------------------------
+$ C.1.B(3,3) = -1
+$ C.1.B(3,4) = 1
+$ C.1.B(4,1) = 1
+
+Solver 9 :: Reference Norm = Real 8.3546E-04
+Solver 9 :: Reference Norm Tolerance = Real 1E-3
+$fprintf( stderr, "TEST CASE 1\n");
+RUN
