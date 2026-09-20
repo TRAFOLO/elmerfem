@@ -300,7 +300,7 @@ CONTAINS
     LOGICAL, SAVE :: CoilVarsVisited = .FALSE.
     TYPE(Variable_t), POINTER :: PotVar
     INTEGER, POINTER :: NodeIndexes(:)
-    REAL(KIND=dp) :: Mult
+    REAL(KIND=dp) :: Mult, Circ
     INTEGER :: i, j
     LOGICAL :: Found, UseB
     CHARACTER(*), PARAMETER :: Caller = 'GetCoilWBase'
@@ -353,6 +353,11 @@ CONTAINS
 
     IF( .NOT. Found .OR. Mult == 0.0_dp ) CALL Fatal(Caller,&
         'closed coil component needs the CoilSolver with Coil Closed')
+
+    ! The cut potential jumps by 1 but does not circulate by 1. The keyword is
+    ! absent only while ComputeCoilCirculation is measuring that difference.
+    Circ = ListGetConstReal( CompParams,'Coil Circulation', Found )
+    IF( Found ) Mult = Mult * Circ
 
     DO i=1,nn
       j = PotVar % Perm( NodeIndexes(i) )
@@ -1693,13 +1698,22 @@ END FUNCTION isComponentName
         END IF
       END IF
 
+      ! DEV-491: must precede the coil type init, which already reads the
+      ! direction field (ComputeFoilSheetSign).
+      IF (ListGetLogical(CompParams, 'Coil Closed', Found)) THEN
+        SELECT CASE (Comp % CoilType)
+        CASE ('foil winding', 'flat wire', 'foil sheet')
+          CALL ComputeCoilCirculation(CompParams, CompInd)
+        END SELECT
+      END IF
+
       IF (Comp % ComponentType == 'resistor') THEN
        Comp % ivar % dofs = 1
         Comp % vvar % dofs = 1
         Comp % ivar % pdofs = 0
         Comp % vvar % pdofs = 0
       ELSE
-        SELECT CASE (Comp % CoilType) 
+        SELECT CASE (Comp % CoilType)
         CASE ('stranded')
           
           Comp % nofturns = GetConstReal(CompParams, 'Number of Turns', Found)
@@ -3112,6 +3126,82 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetAutoLayout
 !------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+! DEV-491: mean circulation of a closed coil's direction field over its current
+! loops. With t = grad(Alpha) x grad(Beta) the volume integral of u.t is the
+! double integral of the loop circulation of u over (Alpha, Beta), both of which
+! span [0,1], so it is the mean circulation: exactly 1 for the electrode
+! potential W of an open coil. The CoilSolver cut potential of a closed coil is
+! not: its Dirichlet cut pins every node of the element layer it crosses, so the
+! potential ramps over the loop minus that layer and the field is too large by
+! that angular fraction. Measure it once and let GetCoilWBase divide it out.
+!------------------------------------------------------------------------------
+  SUBROUTINE ComputeCoilCirculation(CompParams, CompInd)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: CompInd
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), Wloc(:), Aloc(:), Bloc(:)
+    REAL(KIND=dp) :: detJ, gw(3), ga(3), gb(3), tv(3), circ
+    INTEGER :: e, n, gp, nmax
+    LOGICAL :: stat
+    REAL(KIND=dp), PARAMETER :: MinCirculation = 0.5_dp, MaxCirculation = 2.0_dp
+!------------------------------------------------------------------------------
+
+    ! Measuring it again on the already normalized field would just return 1.
+    IF (ListCheckPresent(CompParams, 'Coil Circulation')) RETURN
+
+    nmax = CurrentModel % Mesh % MaxElementNodes
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), Wloc(nmax), Aloc(nmax), Bloc(nmax))
+
+    circ = 0._dp
+    DO e = 1, GetNOFActive()
+      Element => GetActiveElement(e)
+      IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+      n = GetElementNOFNodes(Element)
+      CALL GetElementNodes(Nodes, Element)
+      CALL GetCoilWBase(Element, n, CompParams, Wloc)
+      CALL GetScalarLocalSolution(Aloc, 'Alpha', UElement=Element)
+      CALL GetScalarLocalSolution(Bloc, 'Beta', UElement=Element)
+      IP = GaussPoints(Element)
+      DO gp = 1, IP % n
+        stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
+            detJ, Basis, dBasisdx)
+        gw = MATMUL(Wloc(1:n), dBasisdx(1:n,:))
+        ga = MATMUL(Aloc(1:n), dBasisdx(1:n,:))
+        gb = MATMUL(Bloc(1:n), dBasisdx(1:n,:))
+        tv = CrossProduct(ga, gb)
+        circ = circ + IP % s(gp) * detJ * SUM(gw*tv)
+      END DO
+    END DO
+
+    ! The sign is the coil's winding sense, which ComputeFoilSheetSign owns.
+    circ = ABS(ParallelReduction(circ))
+
+    WRITE(Message,'(A,ES13.6)') 'Component '//I2S(CompInd)// &
+        ' closed coil mean circulation: ', circ
+    CALL Info('Circuits_Init', Message, Level=5)
+
+    IF (circ < MinCirculation .OR. circ > MaxCirculation) THEN
+      WRITE(Message,'(A,ES13.6,A)') 'Component '//I2S(CompInd)// &
+          ' closed coil circulation is ', circ, ', expected near 1. The CoilSolver '// &
+          'cut potential is not a valid direction field: check "Coil Normal", '// &
+          '"Coil Center" and that the coil really is a closed loop.'
+      CALL Fatal('Circuits_Init', Message)
+    END IF
+
+    CALL ListAddConstReal(CompParams, 'Coil Circulation', circ)
+
+    DEALLOCATE(Basis, dBasisdx, Wloc, Aloc, Bloc)
+!------------------------------------------------------------------------------
+  END SUBROUTINE ComputeCoilCirculation
+!------------------------------------------------------------------------------
+
 !------------------------------------------------------------------------------
   SUBROUTINE ComputeFoilSheetSign(Comp, CompParams)
 !------------------------------------------------------------------------------
