@@ -2229,7 +2229,7 @@
                    IF ( k1>0 ) Var % Values(k1) = SUM( Work(1:n) ) / n
                  END IF
                END IF
-
+               
              ELSE IF( Var % TYPE == Variable_on_gauss_points ) THEN
                ! We do this elsewhere in a more efficient manner
                CONTINUE

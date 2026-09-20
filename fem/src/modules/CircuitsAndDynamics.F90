@@ -76,7 +76,7 @@ MODULE TransientHomogCircuitState
   LOGICAL, SAVE       :: state_allocated = .FALSE.
 
   !----------------------------------------------------------------------------
-  ! DEV-1513 E2: foil sheet strand skin ladder.
+  ! Foil sheet strand skin ladder.
   !
   ! The strand impedance is R_dc * u coth u with u^2 = s tau0, tau0 = mu0 sigma
   ! t^2 / 4. Its exact partial fraction expansion is
@@ -169,8 +169,8 @@ CONTAINS
       FSkin(i) % nSegments = GetInteger(CompParams, 'Foil Sheet Segments', found)
       IF (.NOT. found) CYCLE
       ! One state per strand, and a strand is a (sub-layer, segment) pair. The
-      ! transient sheet only accepts one sub-layer per turn today, but sizing
-      ! this from the cells alone would overrun the moment that changes.
+      ! transient sheet accepts one sub-layer per turn only, but sizing this
+      ! from the cells alone would overrun the moment that changes.
       nsub = GetInteger(CompParams, 'Foil Sheet Sublayers', found)
       IF (.NOT. found .OR. nsub < 1) nsub = 1
       ns = FSkin(i) % nCells * nsub * FSkin(i) % nSegments
@@ -640,7 +640,7 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     ! the rest as has_skin_ladder = False. Hard-fail on missing keywords.
     CALL InitSkinLadderState()
 
-    ! DEV-1513 E2: the foil sheet strand skin ladder, N states per strand.
+    ! The foil sheet strand skin ladder, N states per strand.
     CALL InitFoilSkinLadder()
 
     ! Create CRS matrix structures for the circuit equations:
@@ -907,7 +907,7 @@ CONTAINS
       Comp => Circuit % Components(CompInd)
 
       Comp % Resistance = 0._dp 
-      Comp % Conductance = 0._dp
+      Comp % Conductance = 0._dp 
       IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
       ! The strand resistance weights are re-accumulated with the matrix.
       IF (fskin_allocated) THEN
@@ -1641,9 +1641,10 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Foil sheet winding, transient version. Stage E1 uses the DC value of
-!> 'Sigma 33' as the sheet conductivity; the skin ladder of stage E2 will
-!> replace 1/sigma_s by a per-strand conductance with a history term.
+!> Foil sheet winding, transient version. The sheet conductivity is the DC one;
+!> the frequency dependence of the intra-turn skin effect is carried by the
+!> per-strand skin ladder, which replaces 1/sigma_s by a conductance with a
+!> history term on the right hand side.
 !> Rows, per strand (k,j) of cell k (see the harmonic version for the model):
 !>   (1/sigma_s)(t,gradW) c_kj - f (t,gradW) V_k - (da/dt, t) = 0
 !>   sum_j (t,gradW) c_kj - m_k I = 0
@@ -1690,7 +1691,9 @@ CONTAINS
     IF (.NOT. Found) sigma_s = GetConstReal(CompParams, 'Sigma 33', Found)
     IF (.NOT. Found) CALL Fatal('Add_foil_sheet', &
         'Foil sheet needs "Sheet Conductivity" with "Fill Factor", or "Sigma 33"!')
-    IF (sigma_s <= 0._dp) CALL Fatal('Add_foil_sheet','Foil sheet DC sheet conductivity must be positive!')
+    IF (sigma_s <= 0._dp) CALL Fatal('Add_foil_sheet', &
+        'Foil sheet: the DC sheet conductivity is not positive, check "Sheet Conductivity" '// &
+        'and "Fill Factor" (or the explicit "Sigma 33")!')
 
     ASolver => CurrentModel % Asolver
     IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')
@@ -1730,11 +1733,9 @@ CONTAINS
     END IF
 
     ! Every element scales its strand dofs, whether or not this component has
-    ! skin ladder state, so this must be set on every path. It used to sit
-    ! inside the block above and was left undefined wherever that block was not
-    ! entered - on a partition holding no element of the component, for one.
-    ! The value then divided a matrix entry, and the garbage reached the
-    ! parallel glue as a nonzero where none was expected.
+    ! skin ladder state, so this must be set on every path: the value divides a
+    ! matrix entry, and an undefined one reaches the parallel glue as a nonzero
+    ! where none is expected.
     sdofscl = 1._dp
     IF (TransientSimulation .AND. dt > 0._dp) &
         sdofscl = SQRT(Comp % SigmaRef * dt / tscl)
@@ -2349,10 +2350,10 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
   CM % RHS = 0._dp
   IF(ASSOCIATED(CM % Values)) CM % Values = 0._dp
 
-  ! DEV-1513: 'Sheet Conductivity' may be a function of Temperature, and a
-  ! thermal iteration calls this solver again with an updated temperature field,
-  ! so the derived sheet material has to be re-evaluated here rather than once
-  ! at init. A constant keyword makes this a no-op.
+  ! 'Sheet Conductivity' may be a function of Temperature, and a thermal
+  ! iteration calls this solver again with an updated temperature field, so the
+  ! derived sheet material is re-evaluated here rather than once at init. A
+  ! constant keyword makes this a no-op.
   DO i=1,Model % NumberOfComponents
     CompParams => Model % Components(i) % Values
     IF(.NOT. ASSOCIATED(CompParams)) CYCLE
@@ -2426,13 +2427,11 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
       CoilType = ListGetString(CompParams,'Coil Type',FoundType)
       IF(.NOT. FoundType) CYCLE
-      ! DEV-1513: 'foil sheet' is deliberately NOT here. Its source is a set of
-      ! strand currents along the Euler direction t = s grad(Alpha) x grad(Beta),
-      ! which is exactly solenoidal and exactly tangential to the strand
-      ! interfaces, so it is discretely solenoidal at DC as well and the edge
-      ! only system stays consistent. Measured: the 1.0 mm acceptance case at
-      ! 0 Hz converges below 100 iterations to 1.8e-8 without the constraint,
-      ! and the sheet kernel has no nodal couplings to give it if it were on.
+      ! 'foil sheet' is deliberately not here. Its source is a set of strand
+      ! currents along the Euler direction t = s grad(Alpha) x grad(Beta), which
+      ! is exactly solenoidal and exactly tangential to the strand interfaces,
+      ! so the edge only system stays consistent at DC and needs no nodal
+      ! potential. The sheet kernel has no nodal couplings to give it either.
       IF(CoilType /= 'foil winding' .AND. CoilType /= 'flat wire') CYCLE
 
       FlagValue = ListGetLogical(CompParams,'Activate Constraint',FoundFlag)
@@ -2451,8 +2450,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF(ListGetLogical(CompParams,'Activate Constraint',FoundFlag)) THEN
         IF(.NOT. ListCheckPresent(CompParams,'Electrode Boundaries')) THEN
           IF(ListGetLogical(CompParams,'Coil Closed',FoundFlag)) THEN
-            ! DEV-491: a closed coil has no electrodes by construction. The AV
-            ! solver pins one single node of its bodies instead.
+            ! A closed coil has no electrodes by construction. The AV solver
+            ! pins one single node of its bodies instead.
             CALL Info(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): closed '&
                 //'coil, so the nodal potential is pinned at one node of the coil.',Level=4)
           ELSE
@@ -2577,7 +2576,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       Comp => Circuit % Components(CompInd)
 
       Comp % Resistance = 0._dp 
-      Comp % Conductance = 0._dp
+      Comp % Conductance = 0._dp 
       IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
 
       Cvar => Comp % vvar
@@ -3479,7 +3478,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
       sigma_s = SUM( Tcoef(3,3,1:nn) * Basis(1:nn) )
       IF (sigma_s == CMPLX(0._dp,0._dp,KIND=dp)) &
-          CALL Fatal('Add_foil_sheet','Foil sheet conductivity "Sigma 33" is zero!')
+          CALL Fatal('Add_foil_sheet','Foil sheet: "Sigma 33" is zero; give '// &
+              '"Sheet Conductivity" with "Fill Factor", or "Sigma 33" directly!')
 
       CALL FoilSheetQuadStrand(FsQ, Comp, t, sStack, sAcross, Basis, nn, kc, js)
       IF (kc <= 0) CYCLE
@@ -4079,11 +4079,11 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
      END IF
    END IF
 
-   !IF( ListGetLogical( Solver % Values,'Store Cyclic System',Found ) ) THEN
-   !  Solver % Variable => LagrangeVar
+   !IF( ListGetLogical( Solver % Values,'Store Cyclic System',Found ) ) THEN 
+   !  Solver % Variable => LagrangeVar 
    !END IF
-
-   ! DEV-1513 E2: advance the foil sheet strand skin ladder now that the strand
+   
+   ! Advance the foil sheet strand skin ladder now that the strand
    ! currents of this timestep are known. crt is already reduced over the
    ! partitions, so every partition advances the same states.
    IF (Transient .AND. fskin_allocated) THEN

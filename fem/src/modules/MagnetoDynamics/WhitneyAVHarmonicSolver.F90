@@ -746,7 +746,7 @@ BLOCK
       IF(ASSOCIATED(Electrodes)) THEN
         IF(ALL(Electrodes/=Element % BoundaryInfo % Constraint)) CYCLE
       ELSE IF(GetLogical(CompParams,'Coil Closed',Found)) THEN
-        ! DEV-491: a closed coil has no electrodes, so without the list this
+        ! A closed coil has no electrodes, so without the list this
         ! would pin the whole coil surface. One node is pinned below instead.
         CYCLE
       END IF
@@ -757,7 +757,7 @@ BLOCK
       END DO
     END DO
 
-    ! DEV-491: fix the constant of the nodal potential of every closed coil at
+    ! Fix the constant of the nodal potential of every closed coil at
     ! exactly one node. The smallest global node index of the coil's bodies is
     ! the same choice on every partition; all partitions holding it constrain
     ! it, so the shared row stays consistent.

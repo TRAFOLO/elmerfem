@@ -317,10 +317,10 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
       END DO
     END IF
   END IF
-
-  ! DEV-1513 E2-B: a transient foil sheet with Homogenization Model needs an
-  ! elemental Xi state per in-plane direction, with one dof per ladder pole.
-  ! The SIF writer supplies physics, not solver plumbing, so declare them here.
+  
+  ! A transient foil sheet with Homogenization Model needs an elemental Xi state
+  ! per in-plane direction, with one dof per ladder pole. The SIF writer
+  ! supplies physics, not solver plumbing, so declare them here.
   IF (Transient) THEN
     BLOCK
       TYPE(ValueList_t), POINTER :: CPar
@@ -466,7 +466,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   INTEGER :: FsDirStack, FsDirPlane(2)
   INTEGER :: HomogLadderOrder, HomogLadderOrder_alloc = 0
   REAL(KIND=dp) :: nu_air
-  ! DEV-1513 E2-B: one Foster ladder per LOCAL direction,
+  ! One Foster ladder per LOCAL direction,
   !   nu_d(s) = y0_d + sum_k r_dk / (1 + s T_dk),   d = 1..3 (Alpha, Beta, Gamma).
   ! A stranded winding uses directions 1 and 2 and leaves 3 at the air value; a
   ! foil sheet uses 2 and 3 and keeps 1 at 1/mu0. dir_active says which carry a
@@ -829,7 +829,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
 CONTAINS
 
 !------------------------------------------------------------------------------
-!> Locate the -elem Xi variable of one homogenisation direction and size its
+!> Locate the -elem Xi variable of one homogenization direction and size its
 !> BDF-2 history. The variable must carry Homogenization Ladder Order dofs per
 !> element, which for order 1 is the plain scalar the older SIFs declare.
 !------------------------------------------------------------------------------
@@ -1003,10 +1003,10 @@ CONTAINS
          CASE ('foil winding','flat wire','foil sheet')
             CoilBody = .TRUE.
             CALL GetElementRotM(Element, RotM, n)
-            ! DEV-1513 E2-B: a foil sheet in transient carries the same kind of
-            ! ladder, but on the two in-plane directions; the stacking normal
-            ! stays at 1/mu0. The Foster keywords are written at init by
-            ! InitFoilSheetMaterial, so their presence is the gate.
+            ! A foil sheet in transient carries the same kind of ladder, but on
+            ! the two in-plane directions; the stacking normal stays at 1/mu0.
+            ! The Foster keywords are written at init by InitFoilSheetMaterial,
+            ! so their presence is the gate.
             IF (CoilType == 'foil sheet' .AND. Transient) THEN
               IF (GetLogical(CompParams, 'Homogenization Model', Found) .AND. Found) THEN
                 ! Gamma is in the turn plane for either stacking direction, so
@@ -1025,12 +1025,11 @@ CONTAINS
      END IF
 
      IF (StrandedTransientHomog) THEN
-       ! DEV-1513 E2-B. Which local directions carry a ladder: a stranded
-       ! winding homogenises the two directions across the wire (Alpha, Beta)
-       ! and leaves the wire axis at the air value, while a foil sheet
-       ! homogenises the two directions in the turn plane and keeps the stacking
-       ! normal at 1/mu0. DEV-1520: which two those are follows the component's
-       ! 'Stacking Direction'.
+       ! Which local directions carry a ladder: a stranded winding homogenizes
+       ! the two directions across the wire (Alpha, Beta) and leaves the wire
+       ! axis at the air value, while a foil sheet homogenizes the two
+       ! directions in the turn plane and keeps the stacking normal at 1/mu0.
+       ! Which two those are follows the component's 'Stacking Direction'.
        IF (FoilSheetTransientHomog) THEN
          FsStackAlongAlpha = GetLogical(CompParams, 'Foil Sheet Stack Along Alpha', Found)
          IF (.NOT. Found) FsStackAlongAlpha = .TRUE.
@@ -1096,8 +1095,8 @@ CONTAINS
        ! and  nu b = y0 b + sum_k r_k xi_k  becomes
        !   nu_eff  = y0 + sum_k r_k / M_k
        !   history = sum_k (r_k T_k)/(M_k dt) * (a2 xi^n + a3 xi^{n-1}),  subtracted.
-       ! At one pole this is identically the old y0 + alpha e1^T M^-1 e1 and
-       ! Sigma M^-1 e1 (-a2/dt), so the order-1 results are unchanged.
+       ! At one pole this is identically y0 + alpha e1^T M^-1 e1 and
+       ! Sigma M^-1 e1 (-a2/dt), the form the alpha/Sigma triplet describes.
        nu_air = 1.0_dp / (PI * 4.0e-7_dp)
        nu_eff_dir = nu_air
        hcoef_n  = 0._dp
@@ -3652,14 +3651,12 @@ END SUBROUTINE LocalConstraintMatrix
 ! storage. It avoids the inter-element smoothing artifact that inflated the
 ! (dxi/dt)^2 loss in cells where b varies sharply across cell boundaries.
 !
-! Hardcoded for HomogLadderOrder = 1. For n > 1, replace scalar updates with
-! a vector solve against M_k (already factored in Mk_a / Mk_ipiv from host)
-! AND extend the -elem storage to n components per element.
+! One pole per dof: the -elem Xi variable carries Homogenization Ladder Order
+! components per element and the poles decouple, so each is a scalar update.
 !
-! Multi-Component safe: the ladder triplets are re-read from the element's own
-! Component here (mirroring the per-element reads in the assembly loop), and
-! the n = 1 Schur quantities are recomputed as scalars per element. The BDF
-! stencil coefficients are global (same dt for every Component).
+! Multi-Component safe: the ladder is re-read from the element's own Component
+! here, mirroring the per-element reads in the assembly loop. The BDF stencil
+! coefficients are global (same dt for every Component).
 !------------------------------------------------------------------------------
   SUBROUTINE UpdateTransientHomogXiState()
 !------------------------------------------------------------------------------

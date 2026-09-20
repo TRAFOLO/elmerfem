@@ -1658,8 +1658,8 @@ Component:Real:      'Nu 22 Sigma'
 Component:Real:      'Sigma 33 y0'
 Component:Real:      'Sigma 33 alpha'
 Component:Real:      'Sigma 33 Sigma'
-! Foster form of the same ladders (DEV-1513 E2-B): y0 + sum_k r_k/(1 + s T_k).
-! Accepted alongside the alpha/Sigma triplet, which stays valid for order 1.
+! Foster form of the same ladders: y0 + sum_k r_k/(1 + s T_k). Accepted
+! alongside the alpha/Sigma triplet, which stays valid for order 1.
 Component:Real:      'Nu 33 y0'
 Component:Real:      'Nu 11 Residues'
 Component:Real:      'Nu 11 Taus'
@@ -1686,10 +1686,10 @@ Component:String:    'Stacking Direction'
 Component:Real:      'Fill Factor'
 Component:Real:      'Conductor Thickness'
 Component:Real:      'Conductor Width'
-! Foil sheet winding (DEV-1513): conducting sheets, not a conducting continuum.
+! Foil sheet winding: conducting sheets, not a conducting continuum.
 Component:Integer:   'Sheet Cells'
 Component:Integer:   'Sheet Segments'
-! DEV-1520: strand layers through the thickness of one turn, 0 = automatic.
+! Strand layers through the thickness of one turn, 0 = automatic.
 Component:Integer:   'Sheet Sublayers'
 Component:Integer:   'Foil Sheet Sublayers'
 ! Fallback quadrature for coil meshes that are not linear tetrahedra, where the
@@ -1704,7 +1704,7 @@ Component:Real:      'Foil Sheet Sigma DC'
 Component:Logical:   'Foil Sheet Derive Sigma 33'
 Component:Logical:   'Foil Sheet Derive Nu'
 Component:Logical:   'Foil Sheet Sigma Varies'
-! DEV-1520: 'Stacking Direction' of a foil sheet, published for the solvers.
+! 'Stacking Direction' of a foil sheet, published for the solvers.
 Component:Logical:   'Foil Sheet Stack Along Alpha'
 Component:Real:      'Foil Sheet Stack Extent'
 Component:Real:      'Foil Sheet Element Size'

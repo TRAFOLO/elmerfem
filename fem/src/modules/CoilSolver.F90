@@ -2046,7 +2046,7 @@ CONTAINS
       WRITE( Message,'(A,ES12.4)') 'Coil potential multiplier:',Coeff
       CALL Info(Caller,Message,Level=5)
 
-      ! DEV-491: closed-coil circuit components use this potential as a direction
+      ! Closed-coil circuit components use this potential as a direction
       ! field of unit circulation, so they have to be able to undo this scaling.
       ! Part 2 (CoilPotB) is cut elsewhere and gets its own multiplier.
       IF( Part == 2 ) THEN

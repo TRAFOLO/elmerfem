@@ -1418,7 +1418,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
        CASE ('foil winding')
          CALL GetLocalSolution(alpha,'Alpha')
-
+         
          IF (dim == 3) CALL GetElementRotM(Element, RotM, n)
 
          VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
@@ -1679,7 +1679,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END IF
 
          CASE ('foil winding')
-           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np))
+           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 
            DO k = 1, VvarDofs-1
              Reindex = 2*k
              Imindex = Reindex+1
@@ -1818,7 +1818,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END IF
 
          CASE ('foil winding')
-           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np))
+           localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 
            DO k = 1, VvarDofs-1
              localV(1) = localV(1) + LagrangeVar % Values(VvarId+k) * localAlpha**(k-1) * CircEqVoltageFactor
            END DO

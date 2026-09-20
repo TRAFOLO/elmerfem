@@ -293,10 +293,10 @@ CONTAINS
   END SUBROUTINE GetWPotentialVar
 !------------------------------------------------------------------------------
 
-
+  
 !------------------------------------------------------------------------------
-! DEV-491: nodal direction potential of a coil component, normalized so that
-! grad of it has unit circulation along every current path of the coil.
+! Nodal direction potential of a coil component, normalized so that grad of it
+! has unit circulation along every current path of the coil.
 ! Open coil: the electrode potential W of WPotentialSolver. Closed coil (a full
 ! ring, no electrodes, no single valued W): the CoilSolver cut potential, which
 ! is CoilPot or CoilPotB depending on PotSelect exactly as in the CoilSolver's
@@ -632,7 +632,7 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Foster form of a homogenisation ladder: y(s) = y0 + sum_k r_k/(1 + s T_k).
+!> Foster form of a homogenization ladder: y(s) = y0 + sum_k r_k/(1 + s T_k).
 !> Reads '<name> Residues(N)' and '<name> Taus(N)'. For N = 1 it also accepts the
 !> older triplet '<name> alpha' / '<name> Sigma(1,1)', which is the same thing
 !> with r_1 = alpha and T_1 = Sigma(1,1), so existing SIFs keep working bit for
@@ -740,7 +740,8 @@ CONTAINS
     INTEGER :: n, k, i, j, info
 
     IF (n_ladder < 1 .OR. n_ladder > MAXN) &
-        CALL Fatal('FoilSheetNuFoster','Ladder order must be between 1 and 6')
+        CALL Fatal('FoilSheetNuFoster', &
+            'Foil sheet: "Homogenization Ladder Order" must be between 1 and 6!')
     mu0 = 4.0d-7 * PI
 
     DO n = 1, n_ladder
@@ -774,7 +775,8 @@ CONTAINS
 
     leadD = den(n_ladder)
     leadN = num(n_ladder)
-    IF (ABS(leadN) <= 0._dp) CALL Fatal('FoilSheetNuFoster','Degenerate reluctivity polynomial')
+    IF (ABS(leadN) <= 0._dp) CALL Fatal('FoilSheetNuFoster', &
+        'Foil sheet: degenerate reluctivity polynomial, lower "Homogenization Ladder Order"!')
     nu_inf = (leadD/leadN)/mu0
 
     ! Roots of num via the companion matrix of its monic form.
@@ -786,13 +788,16 @@ CONTAINS
       cmat(i,i-1) = 1._dp
     END DO
     CALL DGEEV('N','N', n_ladder, cmat, MAXN, wr, wi, vdum, 1, vdum, 1, work, 8*MAXN, info)
-    IF (info /= 0) CALL Fatal('FoilSheetNuFoster','DGEEV failed on the reluctivity polynomial')
+    IF (info /= 0) CALL Fatal('FoilSheetNuFoster', &
+        'Foil sheet: cannot factor the reluctivity polynomial, lower "Homogenization Ladder Order"!')
 
     DO k = 1, n_ladder
       IF (ABS(wi(k)) > 1.0d-8*MAX(ABS(wr(k)),1._dp)) &
-          CALL Fatal('FoilSheetNuFoster','Complex pole in the reluctivity ladder')
+          CALL Fatal('FoilSheetNuFoster', &
+              'Foil sheet: complex pole in the reluctivity ladder, lower "Homogenization Ladder Order"!')
       sk = wr(k)
-      IF (sk >= 0._dp) CALL Fatal('FoilSheetNuFoster','Non-negative pole in the reluctivity ladder')
+      IF (sk >= 0._dp) CALL Fatal('FoilSheetNuFoster', &
+          'Foil sheet: unstable pole in the reluctivity ladder, lower "Homogenization Ladder Order"!')
       taus(k) = -1._dp/sk
       dval = 0._dp
       DO i = n_ladder, 0, -1
@@ -1127,7 +1132,7 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> tanh(u)/u for complex u, the one transcendental the foil sheet homogenisation
+!> tanh(u)/u for complex u, the one transcendental the foil sheet homogenization
 !> needs: the sheet conductivity is ff*sigma*tanh(u)/u and the in-plane
 !> permeability is mu0[(1-ff) + ff tanh(u)/u], with u = (1+i) t/(2 delta).
 !> The series keeps it accurate as u -> 0, where tanh(u)/u is 0/0.
@@ -1436,7 +1441,7 @@ CONTAINS
 
         ! One element can straddle as many strands as the layout is fine, and
         ! sub-layers multiply that. Say so instead of running off the caller's
-        ! buffer, which is what a silent overflow used to do.
+        ! buffer.
         IF (nPiece >= SIZE(pCell)) THEN
           WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'An element straddles more than ', SIZE(pCell), &
               ' strands of the ', nCells, ' x ', nSegments, ' layout'
@@ -2002,10 +2007,10 @@ END FUNCTION isComponentName
         END IF
       END IF
 
-      ! DEV-491: must precede the coil type init, which already reads the
+      ! Must precede the coil type init, which already reads the
       ! direction field (ComputeFoilSheetSign).
       IF (ListGetLogical(CompParams, 'Coil Closed', Found)) THEN
-        SELECT CASE (Comp % CoilType)
+        SELECT CASE (Comp % CoilType) 
         CASE ('foil winding', 'flat wire', 'foil sheet')
           CALL ComputeCoilCirculation(CompParams, CompInd)
         END SELECT
@@ -2017,7 +2022,7 @@ END FUNCTION isComponentName
         Comp % ivar % pdofs = 0
         Comp % vvar % pdofs = 0
       ELSE
-        SELECT CASE (Comp % CoilType)
+        SELECT CASE (Comp % CoilType) 
         CASE ('stranded')
           
           Comp % nofturns = GetConstReal(CompParams, 'Number of Turns', Found)
@@ -2607,10 +2612,10 @@ END FUNCTION isComponentName
       First = .FALSE.
       dim = CoordinateSystemDimension()
     END IF
-
-    support = .TRUE.
+    
+    support = .TRUE. 
     IF (dim == 3) THEN
-      ! DEV-491: a closed coil has no electrode potential W at all; its
+      ! A closed coil has no electrode potential W at all; its
       ! direction field is the CoilSolver cut potential, which is defined on
       ! every element of the coil.
       CompParams => GetComponentParams(Element)
@@ -2841,7 +2846,7 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Foil sheet winding: the turn stack is modelled as conducting SHEETS, not as a
+!> Foil sheet winding: the turn stack is modeled as conducting SHEETS, not as a
 !> conducting continuum. The block is split into nCells cells along the stacking
 !> direction (the turn normal) and each cell into nSegments strands across it
 !> (the turn width). Cell k lumps foilsPerCell = N/nCells turns; strand (k,j)
@@ -3039,20 +3044,17 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> How many strand layers one turn needs at this frequency, and whether the
-!> mesh can carry them. One uniform current layer per turn homogenizes the
-!> through-thickness redistribution away, which is exact while the turn is thin
-!> against the skin depth and wrong once it is not: on W-G1 one layer loses 10 %
-!> of Rac at t/delta = 1.4 and 12 % at 4.3, while three layers hold 1 % and five
-!> hold 2 % (DEV-1520 FEMM study). The thresholds are that study's B3 and B5
-!> columns.
+!> How many strand layers one turn needs at this frequency, and whether the mesh
+!> can carry them. One uniform current layer per turn is exact while the turn is
+!> thin against the skin depth; past that the current redistributes through the
+!> thickness and the single layer under-predicts Rac, so the layer count follows
+!> the thickness in skin depths.
 !>
 !> Sub-layers only pay off when the FE field resolves the flux between the
-!> bands, which is what drives the current from one of them to the next, so
-!> they need an element no larger than the skin depth. On W-G1 h/delta = 0.83 at
-!> 10 kHz gives Rac within 2 % of FEMM, while 2.6 at 100 kHz is 44 % high and
-!> three layers instead of five still leaves 31 % - the criterion is the element
-!> against the skin depth, not the band thickness against the element.
+!> bands, which is what drives the current from one band to the next. The
+!> criterion is therefore the element size against the skin depth, not the band
+!> thickness against the element: on a coarser mesh the layers are vetoed and
+!> the single-layer model, with its own known error, is the better of the two.
 !------------------------------------------------------------------------------
   FUNCTION FoilSheetAutoSublayers(tfoil, sgm, elemH) RESULT(m)
 !------------------------------------------------------------------------------
@@ -3134,11 +3136,8 @@ END FUNCTION isComponentName
     INTEGER :: dStack, dPlane(2), d
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
 
-    ! Every strand is one sub-layer of a turn, so the 1-D skin solution that the
+    ! Every strand is one sub-layer of a turn, so the 1-D skin solution the
     ! sheet coefficients come from is the one of a plate of thickness t/nSub.
-    ! The block is still the same continuum, so the fill factor of the slab a
-    ! sub-layer smears over is unchanged - that is where this differs from the
-    ! FEMM study, which draws copper-only regions and therefore uses ff = 1.
     mu0 = 4.0d-7 * PI
     tsub = tfoil / nSub
     tau0 = mu0 * sgm * tsub**2 / 4._dp
@@ -3156,12 +3155,10 @@ END FUNCTION isComponentName
     IF (.NOT. FoundFreq) omega = 0._dp
     IF (omega < 0._dp) RETURN
 
-    ! DEV-1513: TRAFOLO drives the harmonic solver at Frequency = 0 for the DC
-    ! resistance and inductance points, so omega = 0 has to be an ordinary case.
-    ! FoilSheetTanhOverU is 1 there, which leaves the real DC sheet conductivity
-    ! ff*sigma and the plain air reluctivity -- the exact DC limit. Before, this
-    ! path returned without ever writing 'Sigma 33' and the assembly Fataled
-    ! with "Foil sheet: Sigma 33 not found!".
+    ! Frequency = 0 is an ordinary case: the harmonic solver is driven there for
+    ! the DC resistance and inductance points. FoilSheetTanhOverU is 1 at omega
+    ! = 0, which leaves the real DC sheet conductivity ff*sigma and the plain air
+    ! reluctivity, the exact DC limit.
     u  = SQRT(im * omega * tau0)
     th = FoilSheetTanhOverU(u)
 
@@ -3231,7 +3228,7 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 !> Derive everything the foil sheet needs from the three physical keywords
 !> 'Foil Thickness', 'Fill Factor' and 'Sheet Conductivity', so that the SIF
-!> writer supplies physics and Elmer owns the homogenisation formulas. tau0 and
+!> writer supplies physics and Elmer owns the homogenization formulas. tau0 and
 !> the DC sheet conductivity are stored for the transient ladders. In harmonic
 !> mode the complex sheet conductivity and in-plane reluctivity are filled in
 !> here, but only where the SIF did not give them explicitly: an explicit
@@ -3297,12 +3294,6 @@ END FUNCTION isComponentName
 
     Transient = (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient')
 
-    ! DEV-1513 reported that the time-domain solve does not converge from a zero
-    ! start on production meshes (handover item 1o). That was the acceptance
-    ! twins, not the kernel: the harmonic-to-transient converter renamed the AV
-    ! variable but left the Dirichlet conditions spelled for the two-component
-    ! complex one, so the twins ran with no condition on A at all. With the
-    ! conditions translated the production F-G1 half model converges.
     IF (Transient) THEN
       IF (nSub /= 1) CALL Fatal('Circuits_Init', &
           'Foil sheet transient supports "Sheet Sublayers = 1" only; the strand '// &
@@ -3410,7 +3401,7 @@ END FUNCTION isComponentName
         CALL Fatal('Circuits_Init','Foil sheet needs the direction field "Beta"!')
 
     ! 0 asks for the sub-layer count to be chosen from the skin depth; it needs
-    ! the thickness, so it is resolved after the geometry has been measured.
+    ! the turn thickness, so it is resolved once the geometry is known.
     Comp % nSublayers = GetInteger(CompParams, 'Sheet Sublayers', Found)
     IF (.NOT. Found) Comp % nSublayers = 1
 
@@ -3618,11 +3609,10 @@ END FUNCTION isComponentName
     ! V_e^(1/3) is about half a tetrahedron's edge length, so one strand per
     ! V_e^(1/3) is about half an element edge. Strands narrower than an element
     ! are legitimate: FoilSheetPieces clips them exactly, so each still carries
-    ! its own volume and its own current. DEV-1520: the across direction of an
-    ! edgewise flat wire is the wide side of the turn, where the current crowds
-    ! into the inner edge, and resolving it is worth 9 points of Rac at 10 kHz
-    ! and 17 at 100 kHz on W-G1. A foil stack, whose across direction carries no
-    ! such gradient, moves by less than 0.1 %.
+    ! its own volume and its own current. Resolving the across direction matters
+    ! for an edgewise flat wire, whose across direction is the wide side of the
+    ! turn and carries the current crowding into the inner edge; for a foil
+    ! stack, which has no such gradient across the width, it is nearly free.
     IF (Comp % nSegments <= 0) THEN
       nSegAuto = NINT(blkH / elemH)
       Comp % nSegments = MIN(40, MAX(4, nSegAuto))
@@ -3658,8 +3648,8 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-! DEV-491: mean circulation of a closed coil's direction field over its current
-! loops. With t = grad(Alpha) x grad(Beta) the volume integral of u.t is the
+! Mean circulation of a closed coil's direction field over its current loops.
+! With t = grad(Alpha) x grad(Beta) the volume integral of u.t is the
 ! double integral of the loop circulation of u over (Alpha, Beta), both of which
 ! span [0,1], so it is the mean circulation: exactly 1 for the electrode
 ! potential W of an open coil. The CoilSolver cut potential of a closed coil is
