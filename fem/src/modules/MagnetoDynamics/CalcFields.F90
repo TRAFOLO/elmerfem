@@ -1662,25 +1662,20 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            FsK = FoilSheetBandIndex(FsCells, FsSublayers, FsFillFactor, &
                SUM(alpha(1:np)*Basis(1:np)))
            IF (FsK > 0) THEN
-           CALL FoilSheetStrand(1, FsSegments, 0._dp, SUM(beta(1:np)*Basis(1:np)), FsDof, FsJ)
-           FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
-           FsK = FoilSheetLayerCell(FsSublayers, FsK)
-           IF (CoilUseWvec) THEN
-             wvec = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
-           ELSE
-             wvec = MATMUL(Wbase(1:np), dBasisdx(1:np,:))
-           END IF
-           wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
-           ! J = -SigmaRef y_kj t (the circuit sign convention of the flat wire
-           ! and foil winding kernels), so E = J/sigma_s.
-           IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
-             imag_value = LagrangeVar % Values(VvarId+FsDof) + im * LagrangeVar % Values(VvarId+FsDof+1)
-             imag_value = -FsSigmaRef * imag_value / CMat_ip(3,3)
-             E(1,:) = E(1,:) + REAL(imag_value) * wvec
-             E(2,:) = E(2,:) + AIMAG(imag_value) * wvec
-           END IF
-           localV(1) = LagrangeVar % Values(VvarId+2*FsK) * CircEqVoltageFactor
-           localV(2) = LagrangeVar % Values(VvarId+2*FsK+1) * CircEqVoltageFactor
+             CALL FoilSheetStrand(1, FsSegments, 0._dp, SUM(beta(1:np)*Basis(1:np)), FsDof, FsJ)
+             FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+             FsK = FoilSheetLayerCell(FsSublayers, FsK)
+             wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
+             ! J = -SigmaRef y_kj t (the circuit sign convention of the flat wire
+             ! and foil winding kernels), so E = J/sigma_s.
+             IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
+               imag_value = LagrangeVar % Values(VvarId+FsDof) + im * LagrangeVar % Values(VvarId+FsDof+1)
+               imag_value = -FsSigmaRef * imag_value / CMat_ip(3,3)
+               E(1,:) = E(1,:) + REAL(imag_value) * wvec
+               E(2,:) = E(2,:) + AIMAG(imag_value) * wvec
+             END IF
+             localV(1) = LagrangeVar % Values(VvarId+2*FsK) * CircEqVoltageFactor
+             localV(2) = LagrangeVar % Values(VvarId+2*FsK+1) * CircEqVoltageFactor
            END IF
 
          CASE ('foil winding')

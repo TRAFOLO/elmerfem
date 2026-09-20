@@ -45,6 +45,22 @@ MODULE CircuitUtils
     USE DefUtils
     IMPLICIT NONE
 
+    ! Largest number of strand pieces one element may be cut into. An element
+    ! straddles as many strands as the layout is fine; FoilSheetPieces is fatal
+    ! above this instead of running off the buffer.
+    INTEGER, PARAMETER :: MaxFoilSheetPieces = 1024
+
+    !> Element quadrature of the foil sheet strand integrals, shared by the
+    !> harmonic and the transient kernel and by the strand checks.
+    TYPE FoilSheetQuad_t
+      LOGICAL :: Exact = .TRUE.
+      INTEGER :: nItem = 0
+      INTEGER :: pCell(MaxFoilSheetPieces) = 0, pSeg(MaxFoilSheetPieces) = 0
+      REAL(KIND=dp) :: pVol(MaxFoilSheetPieces) = 0._dp
+      REAL(KIND=dp) :: pBary(4,MaxFoilSheetPieces) = 0._dp
+      TYPE(GaussIntegrationPoints_t) :: IP
+    END TYPE FoilSheetQuad_t
+
 CONTAINS
 
 !------------------------------------------------------------------------------
@@ -1437,6 +1453,115 @@ CONTAINS
     END DO
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetPieces
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Set up the strand quadrature of one element. By default the element is cut
+!> exactly along the strand interfaces and each piece is integrated at its
+!> centroid, which is exact because every strand integrand is affine on a linear
+!> tet. 'Sheet Integration Points' > 0 selects an ordinary Gauss rule with the
+!> strand picked at the point instead: the fallback for coil meshes that are not
+!> linear tetrahedra. It is not a substitute for the clipping, because on a mesh
+!> whose elements are as large as the strands it mis-estimates the strand volume
+!> fractions by percents and leaves the assembled source that far from
+!> solenoidal.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetQuadrature(Comp, CompParams, Element, nn, sStack, sAcross, Q)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Component_t) :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: nn
+    REAL(KIND=dp) :: sStack(:), sAcross(:)
+    TYPE(FoilSheetQuad_t) :: Q
+
+    INTEGER :: ngp
+    LOGICAL :: Found
+
+    ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
+    IF (.NOT. Found) ngp = 0
+
+    Q % Exact = (ngp <= 0)
+    IF (Q % Exact) THEN
+      IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('FoilSheetQuadrature', &
+          'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" '// &
+          'to integrate this coil mesh with a Gauss rule instead!')
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
+          Q % nItem, Q % pCell, Q % pSeg, Q % pVol, Q % pBary, Comp % nSublayers, Comp % FillFactor)
+    ELSE
+      Q % IP = GaussPoints(Element, np=ngp)
+      Q % nItem = Q % IP % n
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetQuadrature
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Local coordinates of quadrature item t: the centroid of the clipped piece or
+!> the Gauss point of the fallback rule.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetQuadPoint(Q, t, u, v, w)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    INTEGER :: t
+    REAL(KIND=dp) :: u, v, w
+
+    IF (Q % Exact) THEN
+      u = Q % pBary(2,t); v = Q % pBary(3,t); w = Q % pBary(4,t)
+    ELSE
+      u = Q % IP % U(t); v = Q % IP % V(t); w = Q % IP % W(t)
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetQuadPoint
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Integration weight of quadrature item t, given the Jacobian at its point.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetQuadWeight(Q, t, detJ) RESULT(wgt)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    INTEGER :: t
+    REAL(KIND=dp) :: detJ, wgt
+
+    IF (Q % Exact) THEN
+      wgt = Q % pVol(t) * detJ / 6._dp
+    ELSE
+      wgt = Q % IP % s(t) * detJ
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetQuadWeight
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Strand of quadrature item t: the band index along the stack and the segment
+!> across it. A band index of zero means the point lies in the insulation margin
+!> of a turn and belongs to no strand.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetQuadStrand(Q, Comp, t, sStack, sAcross, Basis, nn, kc, js)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    TYPE(Component_t) :: Comp
+    INTEGER :: t, nn, kc, js
+    REAL(KIND=dp) :: sStack(:), sAcross(:), Basis(:)
+
+    INTEGER :: idummy
+
+    js = 0
+    IF (Q % Exact) THEN
+      kc = Q % pCell(t); js = Q % pSeg(t)
+    ELSE
+      kc = FoilSheetBandIndex(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
+          SUM(sStack(1:nn)*Basis(1:nn)))
+      IF (kc <= 0) RETURN
+      CALL FoilSheetStrand(1, Comp % nSegments, 0._dp, SUM(sAcross(1:nn)*Basis(1:nn)), idummy, js)
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetQuadStrand
 !------------------------------------------------------------------------------
 
 
@@ -3621,10 +3746,10 @@ END FUNCTION isComponentName
     REAL(KIND=dp), ALLOCATABLE :: dNode(:), aNode(:)
     LOGICAL, ALLOCATABLE :: inBlk(:), skipn(:)
     REAL(KIND=dp) :: detJ, gw(3), tv(3), flux, sgn
-    INTEGER, PARAMETER :: MaxPiece = 1024
     INTEGER :: e, n, gp, nmax, nno, i, v, gnode, ind, nPiece
-    INTEGER :: pCell(MaxPiece), pSeg(MaxPiece)
-    REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), volerr, dmax, amax, cval, contr, Vpar
+    INTEGER :: pCell(MaxFoilSheetPieces), pSeg(MaxFoilSheetPieces)
+    REAL(KIND=dp) :: pVol(MaxFoilSheetPieces), pBary(4,MaxFoilSheetPieces)
+    REAL(KIND=dp) :: volerr, dmax, amax, cval, contr, Vpar
     REAL(KIND=dp) :: scov, tcov
     TYPE(Mesh_t), POINTER :: Mesh
     LOGICAL :: stat

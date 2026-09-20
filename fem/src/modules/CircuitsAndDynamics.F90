@@ -1666,17 +1666,11 @@ CONTAINS
     REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s
     REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
     INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
-    INTEGER :: i_dummy
     LOGICAL :: stat, PiolaVersion, Found
     TYPE(Nodes_t), SAVE :: Nodes
-    TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: RotM(3,3,nn), gres, DirSign
-    INTEGER :: ngp
-    INTEGER, PARAMETER :: MaxPiece = 1024
-    INTEGER :: nItem, pCell(MaxPiece), pSeg(MaxPiece)
-    REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), wgt, uu, vv, ww
-    LOGICAL :: Exact
+    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww
+    TYPE(FoilSheetQuad_t) :: FsQ
     INTEGER :: CompId
     LOGICAL :: SkinLadder, HaveSkinState
     REAL(KIND=dp) :: Kfac
@@ -1720,13 +1714,8 @@ CONTAINS
     END IF
 
     CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
-    CALL GetElementRotM(Element, RotM, nn)
     DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
     IF (.NOT. Found) DirSign = 1._dp
-    ! Exact strand clipping by default; 'Sheet Integration Points' > 0 is the
-    ! debug fallback to the old indicator rule. See the harmonic Add_foil_sheet.
-    ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
-    IF (.NOT. Found) ngp = 0
     ncdofs = nd - nn
     vvarId = Comp % vvar % ValueId
 
@@ -1751,42 +1740,19 @@ CONTAINS
         sdofscl = SQRT(Comp % SigmaRef * dt / tscl)
     IF (HaveSkinState) FSkin(CompId) % DofScale = sdofscl
 
-    Exact = (ngp <= 0)
-    IF (Exact) THEN
-      IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
-          'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
-          nItem, pCell, pSeg, pVol, pBary, Comp % nSublayers, Comp % FillFactor)
-    ELSE
-      IP = GaussPoints(Element, np=ngp)
-      nItem = IP % n
-    END IF
+    CALL FoilSheetQuadrature(Comp, CompParams, Element, nn, sStack, sAcross, FsQ)
 
-    DO t=1,nItem
-      IF (Exact) THEN
-        uu = pBary(2,t); vv = pBary(3,t); ww = pBary(4,t)
-      ELSE
-        uu = IP % U(t); vv = IP % V(t); ww = IP % W(t)
-      END IF
+    DO t=1,FsQ % nItem
+      CALL FoilSheetQuadPoint(FsQ, t, uu, vv, ww)
       stat = ElementInfo( Element, Nodes, uu, vv, ww, &
           detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
-      IF (Exact) THEN
-        wgt = pVol(t) * detJ / 6._dp
-      ELSE
-        wgt = IP % s(t) * detJ
-      END IF
+      wgt = FoilSheetQuadWeight(FsQ, t, detJ)
       gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
       ! Euler potential strand direction; see the harmonic Add_foil_sheet.
       tvec = FoilSheetDirection(sStack, sAcross, dBasisdx, nn, DirSign)
 
-      IF (Exact) THEN
-        kc = pCell(t); js = pSeg(t)
-      ELSE
-        kc = FoilSheetBandIndex(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
-            SUM(sStack(1:nn)*Basis(1:nn)))
-        IF (kc <= 0) CYCLE
-        CALL FoilSheetStrand(1, Comp % nSegments, 0._dp, SUM(sAcross(1:nn)*Basis(1:nn)), i_dummy, js)
-      END IF
+      CALL FoilSheetQuadStrand(FsQ, Comp, t, sStack, sAcross, Basis, nn, kc, js)
+      IF (kc <= 0) CYCLE
       sInd = (kc-1) * Comp % nSegments + js
       sdof = vvarId + FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
       vdof = vvarId + FoilSheetLayerCell(Comp % nSublayers, kc)
@@ -3450,20 +3416,14 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     REAL(KIND=dp) :: Basis(nd), DetJ, Omega, g
     REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
     INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
-    INTEGER :: i_dummy
     LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
     TYPE(Nodes_t), SAVE :: Nodes
-    TYPE(GaussIntegrationPoints_t) :: IP
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
     CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname
     TYPE(VariableHandle_t), SAVE :: Wvec_h
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: RotM(3,3,nn), gres, DirSign
-    INTEGER :: ngp
-    INTEGER, PARAMETER :: MaxPiece = 1024
-    INTEGER :: nItem, pCell(MaxPiece), pSeg(MaxPiece)
-    REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), wgt, uu, vv, ww
-    LOGICAL :: Exact
+    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww
+    TYPE(FoilSheetQuad_t) :: FsQ
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     LOGICAL, SAVE :: First = .TRUE., CoilUseWvec0 = .FALSE.
 
@@ -3493,46 +3453,19 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
     IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
     IF (.NOT. CoilUseWvec) CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
-    CALL GetElementRotM(Element, RotM, nn)
     DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
     IF (.NOT. Found) DirSign = 1._dp
-    ! By default the element is cut exactly along the strand interfaces and each
-    ! piece is integrated at its centroid, which is exact because every strand
-    ! integrand is affine on a linear tet. 'Sheet Integration Points' > 0 falls
-    ! back to the old indicator-at-quadrature-point rule; it is a debug knob and
-    ! is off by default, because on a mesh whose elements are as large as the
-    ! strands that rule mis-estimates the strand volume fractions by percents
-    ! and leaves the assembled source that far from solenoidal.
-    ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
-    IF (.NOT. Found) ngp = 0
     ncdofs = nd - nn
 
     vvarId = Comp % vvar % ValueId
 
-    Exact = (ngp <= 0)
-    IF (Exact) THEN
-      IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
-          'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
-          nItem, pCell, pSeg, pVol, pBary, Comp % nSublayers, Comp % FillFactor)
-    ELSE
-      IP = GaussPoints(Element, np=ngp)
-      nItem = IP % n
-    END IF
+    CALL FoilSheetQuadrature(Comp, CompParams, Element, nn, sStack, sAcross, FsQ)
 
-    DO t=1,nItem
-      IF (Exact) THEN
-        uu = pBary(2,t); vv = pBary(3,t); ww = pBary(4,t)
-      ELSE
-        uu = IP % U(t); vv = IP % V(t); ww = IP % W(t)
-      END IF
+    DO t=1,FsQ % nItem
+      CALL FoilSheetQuadPoint(FsQ, t, uu, vv, ww)
       stat = ElementInfo( Element, Nodes, uu, vv, ww, &
           detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
-      IF (Exact) THEN
-        wgt = pVol(t) * detJ / 6._dp
-      ELSE
-        wgt = IP % s(t) * detJ
-      END IF
+      wgt = FoilSheetQuadWeight(FsQ, t, detJ)
       IF (CoilUseWvec) THEN
         gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = 3 )
       ELSE
@@ -3548,14 +3481,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (sigma_s == CMPLX(0._dp,0._dp,KIND=dp)) &
           CALL Fatal('Add_foil_sheet','Foil sheet conductivity "Sigma 33" is zero!')
 
-      IF (Exact) THEN
-        kc = pCell(t); js = pSeg(t)
-      ELSE
-        kc = FoilSheetBandIndex(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
-            SUM(sStack(1:nn)*Basis(1:nn)))
-        IF (kc <= 0) CYCLE
-        CALL FoilSheetStrand(1, Comp % nSegments, 0._dp, SUM(sAcross(1:nn)*Basis(1:nn)), i_dummy, js)
-      END IF
+      CALL FoilSheetQuadStrand(FsQ, Comp, t, sStack, sAcross, Basis, nn, kc, js)
+      IF (kc <= 0) CYCLE
       ! kc is the sub-layer; the sub-layers of one turn are that turn's conductor
       ! in parallel, so they share its voltage dof and its current constraint.
       sInd = (kc-1) * Comp % nSegments + js
@@ -4165,7 +4092,7 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
        LOGICAL :: gotid, gotp, anyskin
        TYPE(ValueList_t), POINTER :: CPar
        REAL(KIND=dp), ALLOCATABLE :: ynew(:)
-       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pexcess, Pprox, Pedd
+       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pexcess, Pprox
        bdf = FoilSkinBDFOrder()
        Pstrand = 0._dp; Pexcess = 0._dp; anyskin = .FALSE.
        DO ci = 1, SIZE(FSkin)

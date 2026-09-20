@@ -381,7 +381,7 @@ CONTAINS
 !------------------------------------------------------------------------------
     REAL(KIND=dp) :: Basis(nd),dBasisdx(nd,3),DetJ,LoadAtIP, C(3,3), &
                      RotMLoc(3,3), RotM(3,3,n)
-    CHARACTER(LEN=MAX_NAME_LEN):: CoilType, WCoilType
+    CHARACTER(LEN=MAX_NAME_LEN):: CoilType
     LOGICAL :: Stat, CoilBody, NoRotM
     INTEGER :: i,j,t
     TYPE(GaussIntegrationPoints_t) :: IP
@@ -626,7 +626,7 @@ CONTAINS
     INTEGER :: Active, t, n, i
     TYPE(Element_t),POINTER :: Element
     LOGICAL :: CoilBody, Found, stat
-    CHARACTER(LEN=MAX_NAME_LEN):: CoilType, WCoilType
+    CHARACTER(LEN=MAX_NAME_LEN):: CoilType
     TYPE(ValueList_t), POINTER :: CompParams
 
     Wnorms = 0._dp
