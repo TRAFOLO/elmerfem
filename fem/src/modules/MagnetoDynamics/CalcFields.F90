@@ -612,6 +612,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    INTEGER :: FwStack, FwAcross
    LOGICAL :: FwStackAlongAlpha, FsStackAlongAlpha
    INTEGER :: FsCells, FsSegments, FsSublayers, FsK, FsJ, FsDof
+   REAL(KIND=dp) :: FsFillFactor
    REAL(KIND=dp) :: FsSigmaRef, FsSign
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
@@ -1356,6 +1357,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Segments not found!')
          FsSublayers = GetInteger(CompParams, 'Foil Sheet Sublayers', Found)
          IF (.NOT. Found) FsSublayers = 1
+         FsFillFactor = GetConstReal(CompParams, 'Fill Factor', Found)
+         IF (.NOT. Found) FsFillFactor = 1._dp
          FsSigmaRef = GetConstReal(CompParams, 'Foil Sheet Sigma Ref', Found)
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Sigma Ref not found!')
          FsSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
@@ -1653,8 +1656,12 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            E(2,:) = E(2,:)-localV(2) * wvec
 
          CASE ('foil sheet')
-           CALL FoilSheetStrand(FsCells * FsSublayers, FsSegments, &
-               SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
+           ! A point in the insulation margin of a turn belongs to no strand:
+           ! it carries no current and no cell voltage.
+           FsK = FoilSheetBandIndex(FsCells, FsSublayers, FsFillFactor, &
+               SUM(alpha(1:np)*Basis(1:np)))
+           IF (FsK > 0) THEN
+           CALL FoilSheetStrand(1, FsSegments, 0._dp, SUM(beta(1:np)*Basis(1:np)), FsDof, FsJ)
            FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
            FsK = FoilSheetLayerCell(FsSublayers, FsK)
            IF (CoilUseWvec) THEN
@@ -1673,6 +1680,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END IF
            localV(1) = LagrangeVar % Values(VvarId+2*FsK) * CircEqVoltageFactor
            localV(2) = LagrangeVar % Values(VvarId+2*FsK+1) * CircEqVoltageFactor
+           END IF
 
          CASE ('foil winding')
            localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np))
@@ -1801,14 +1809,17 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
 
          CASE ('foil sheet')
-           CALL FoilSheetStrand(FsCells * FsSublayers, FsSegments, &
-               SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)), FsK, FsJ)
-           FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
-           FsK = FoilSheetLayerCell(FsSublayers, FsK)
-           wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
-           IF (REAL(CMat_ip(3,3)) /= 0._dp) &
-               E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec
-           localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
+           FsK = FoilSheetBandIndex(FsCells, FsSublayers, FsFillFactor, &
+               SUM(alpha(1:np)*Basis(1:np)))
+           IF (FsK > 0) THEN
+             CALL FoilSheetStrand(1, FsSegments, 0._dp, SUM(beta(1:np)*Basis(1:np)), FsDof, FsJ)
+             FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+             FsK = FoilSheetLayerCell(FsSublayers, FsK)
+             wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
+             IF (REAL(CMat_ip(3,3)) /= 0._dp) &
+                 E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec
+             localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
+           END IF
 
          CASE ('foil winding')
            localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np))

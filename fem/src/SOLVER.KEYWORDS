@@ -1692,6 +1692,7 @@ Component:Integer:   'Sheet Segments'
 ! DEV-1520: strand layers through the thickness of one turn, 0 = automatic.
 Component:Integer:   'Sheet Sublayers'
 Component:Integer:   'Foil Sheet Sublayers'
+Component:Logical:   'Sheet Sublayer Nu Isotropic'
 Component:Integer:   'Sheet Integration Points'
 Component:Real:      'Sheet Regularization'
 ! Physics the SIF writer supplies; Elmer derives tau0, the sheet conductivity

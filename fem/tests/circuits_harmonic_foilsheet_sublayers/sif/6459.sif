@@ -1,15 +1,15 @@
 ! Foil sheet with strand sub-layers through the turn (DEV-1520).
 ! circuits_harmonic_foilsheet_beta with "Sheet Sublayers = 3": each of the 8
-! turn cells is cut into 3 strand layers along the stacking direction, so the
-! block carries 24 x 4 strand currents but still 8 voltage dofs - the three
-! sub-layers of a turn are that turn's conductor in parallel and share its
-! current constraint. The skin factor and the stack reluctivity are evaluated
-! with the sub-layer thickness t/3, and with several layers the complex
-! reluctivity is isotropic, as the FEMM variant B of the DEV-1520 study is.
+! turn cells carries 3 strand layers, so the block has 24 x 4 strand currents
+! but still 8 voltage dofs - the three sub-layers of a turn are that turn's
+! conductor in parallel and share its current constraint. The bands are the
+! copper itself: they sit in the central Fill Factor of each pitch cell, t/3
+! apart, and the two margins carry no strand. The run prints the checks that
+! go with that: the strand volume is 0.5000228 of the block against a fill
+! factor of 0.5, the strand flux ratio is exactly 1.0000000000, and
+! Sigma 33 = 3.59989E+07 is the copper conductivity, not the smeared one.
 ! The turn thickness is still derived by Elmer from the block geometry.
-! CheckFoilSheetStrands reports a strand flux ratio of exactly 1.0000000000,
-! which is what proves the 24 sub-layer bands tile the block.
-! Reference: three identical serial runs, 3.280777948464E-04 every time.
+! Reference: three identical serial runs, 3.176629506778E-04 every time.
 ! Based on the geometry of circuits_harmonic_foil.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: May 2017
@@ -261,7 +261,7 @@ Boundary Condition 7  !---- Beta0
    Target Boundaries = $ A1_beta0
    Body 3: Beta = Real 0
 End
-Solver 10 :: Reference Norm = Real 3.280777948464E-04
+Solver 10 :: Reference Norm = Real 3.176629506778E-04
 Solver 10 :: Reference Norm Tolerance = Real 1E-7
 $fprintf( stderr, "TEST CASE 1\n");
 RUN

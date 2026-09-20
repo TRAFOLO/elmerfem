@@ -1669,6 +1669,7 @@ CONTAINS
     REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s
     REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
     INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    INTEGER :: i_dummy
     LOGICAL :: stat, PiolaVersion, Found
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
@@ -1757,8 +1758,8 @@ CONTAINS
     IF (Exact) THEN
       IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
           'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
-          sStack(1:4), sAcross(1:4), nItem, pCell, pSeg, pVol, pBary)
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
+          nItem, pCell, pSeg, pVol, pBary, Comp % nSublayers, Comp % FillFactor)
     ELSE
       IP = GaussPoints(Element, np=ngp)
       nItem = IP % n
@@ -1784,8 +1785,10 @@ CONTAINS
       IF (Exact) THEN
         kc = pCell(t); js = pSeg(t)
       ELSE
-        CALL FoilSheetStrand(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
-            SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)), kc, js)
+        kc = FoilSheetBandIndex(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
+            SUM(sStack(1:nn)*Basis(1:nn)))
+        IF (kc <= 0) CYCLE
+        CALL FoilSheetStrand(1, Comp % nSegments, 0._dp, SUM(sAcross(1:nn)*Basis(1:nn)), i_dummy, js)
       END IF
       sInd = (kc-1) * Comp % nSegments + js
       sdof = vvarId + FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
@@ -3450,6 +3453,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     REAL(KIND=dp) :: Basis(nd), DetJ, Omega, g
     REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
     INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    INTEGER :: i_dummy
     LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
@@ -3512,8 +3516,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     IF (Exact) THEN
       IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('Add_foil_sheet', &
           'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" for this mesh!')
-      CALL FoilSheetPieces(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
-          sStack(1:4), sAcross(1:4), nItem, pCell, pSeg, pVol, pBary)
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
+          nItem, pCell, pSeg, pVol, pBary, Comp % nSublayers, Comp % FillFactor)
     ELSE
       IP = GaussPoints(Element, np=ngp)
       nItem = IP % n
@@ -3550,8 +3554,10 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (Exact) THEN
         kc = pCell(t); js = pSeg(t)
       ELSE
-        CALL FoilSheetStrand(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
-            SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)), kc, js)
+        kc = FoilSheetBandIndex(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
+            SUM(sStack(1:nn)*Basis(1:nn)))
+        IF (kc <= 0) CYCLE
+        CALL FoilSheetStrand(1, Comp % nSegments, 0._dp, SUM(sAcross(1:nn)*Basis(1:nn)), i_dummy, js)
       END IF
       ! kc is the sub-layer; the sub-layers of one turn are that turn's conductor
       ! in parallel, so they share its voltage dof and its current constraint.

@@ -942,6 +942,66 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Stacking coordinate edges of strand band l of a foil sheet. With one band per
+!> turn the band fills the pitch and the current is smeared over it, which is
+!> the validated model. With nSublayers > 1 the bands are the copper itself: the
+!> m of them sit in the central 'Fill Factor' of the pitch, t/m apart, and the
+!> two margins of (1-ff)/2 carry no strand. That spacing is the whole point -
+!> the loop area between two sub-layers of a turn is what drives the intra-turn
+!> circulating current, and over the pitch it would be 1/ff too large.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetBand(nCells, nSublayers, ff, l, s1, s2)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSublayers, l
+    REAL(KIND=dp) :: ff, s1, s2
+    INTEGER :: k, ls
+    REAL(KIND=dp) :: pitch
+
+    pitch = 1._dp / nCells
+    IF (nSublayers == 1) THEN
+      s1 = (l-1) * pitch
+      s2 = l * pitch
+    ELSE
+      k  = (l-1) / nSublayers + 1
+      ls = l - (k-1) * nSublayers
+      s1 = (k-1) * pitch + 0.5_dp * (1._dp - ff) * pitch + (ls-1) * ff * pitch / nSublayers
+      s2 = s1 + ff * pitch / nSublayers
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetBand
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Strand band of a stacking coordinate, 0 when the point is in the insulation
+!> margin of its turn and carries no strand.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetBandIndex(nCells, nSublayers, ff, s) RESULT(l)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSublayers, l
+    REAL(KIND=dp) :: ff, s
+    INTEGER :: k, ls
+    REAL(KIND=dp) :: u, marg
+
+    k = MIN(nCells, MAX(1, FLOOR(s * nCells) + 1))
+    IF (nSublayers == 1) THEN
+      l = k
+      RETURN
+    END IF
+    u = s * nCells - (k-1)
+    marg = 0.5_dp * (1._dp - ff)
+    IF (u < marg .OR. u > 1._dp - marg) THEN
+      l = 0
+      RETURN
+    END IF
+    ls = MIN(nSublayers, MAX(1, FLOOR((u - marg) * nSublayers / ff) + 1))
+    l = (k-1) * nSublayers + ls
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetBandIndex
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Turn cell of a sub-layer: sub-layers (k-1)*nSublayers+1 .. k*nSublayers are
 !> the same conductor in parallel and share the voltage dof of turn cell k.
 !------------------------------------------------------------------------------
@@ -999,7 +1059,7 @@ CONTAINS
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     TYPE(Component_t), POINTER :: Comp
-    REAL(KIND=dp) :: w, wmax
+    REAL(KIND=dp) :: w, wmax, bs1, bs2, bandflux
     INTEGER :: k, j, ind, nempty, nLayers
 
     IF (.NOT. ALLOCATED(Comp % StrandWeight)) RETURN
@@ -1036,9 +1096,15 @@ CONTAINS
     ! to the quadrature error of the elements cut by a strand interface. It is
     ! the sharpest check that the strand bookkeeping and the direction sign are
     ! right, and it is mesh independent.
-    WRITE(Message,'(A,F14.10,A,F14.10)') 'Foil sheet strand flux / (dAlpha dBeta): min ', &
-        MINVAL(Comp % StrandWeight) * nLayers * Comp % nSegments, &
-        '  max ', MAXVAL(Comp % StrandWeight) * nLayers * Comp % nSegments
+    ! The flux of a band is its own stacking width times its segment width, so
+    ! this ratio is 1 up to quadrature error whatever the layout. With copper
+    ! only bands the width carries the fill factor, which is why it is taken
+    ! from FoilSheetBand rather than assumed uniform.
+    CALL FoilSheetBand(Comp % nCells, Comp % nSublayers, Comp % FillFactor, 1, bs1, bs2)
+    bandflux = (bs2 - bs1) / Comp % nSegments
+    WRITE(Message,'(A,F14.10,A,F14.10)') 'Foil sheet strand flux / (dStack dAcross): min ', &
+        MINVAL(Comp % StrandWeight) / bandflux, &
+        '  max ', MAXVAL(Comp % StrandWeight) / bandflux
     CALL Info('CheckFoilSheetStrands', Message, Level=5)
 !------------------------------------------------------------------------------
   END SUBROUTINE CheckFoilSheetStrands
@@ -1225,15 +1291,24 @@ CONTAINS
 !> FoilSheetStrand, so nodes that fall slightly outside [0,1] still belong to
 !> the first or last strand instead of being dropped.
 !------------------------------------------------------------------------------
-  SUBROUTINE FoilSheetPieces(nCells, nSegments, aNod, bNod, nPiece, pCell, pSeg, pVol, pBary)
+  SUBROUTINE FoilSheetPieces(nCells, nSegments, aNod, bNod, nPiece, pCell, pSeg, pVol, pBary, &
+      nSublayers, ff)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     INTEGER :: nCells, nSegments, nPiece, pCell(:), pSeg(:)
     REAL(KIND=dp) :: aNod(4), bNod(4), pVol(:), pBary(:,:)
+    INTEGER, OPTIONAL :: nSublayers
+    REAL(KIND=dp), OPTIONAL :: ff
 
     INTEGER, PARAMETER :: MaxTet = 96
     REAL(KIND=dp) :: tets(4,4,MaxTet), da, db, vol, vtot, ctot(4), plane(4)
-    INTEGER :: k, j, kmin, kmax, jmin, jmax, i, v, ntet
+    REAL(KIND=dp) :: fillf, s1, s2
+    INTEGER :: k, j, l, ls, msub, kmin, kmax, jmin, jmax, i, v, ntet
+
+    msub = 1
+    IF (PRESENT(nSublayers)) msub = nSublayers
+    fillf = 1._dp
+    IF (PRESENT(ff)) fillf = ff
 
     da = 1._dp / nCells
     db = 1._dp / nSegments
@@ -1242,6 +1317,68 @@ CONTAINS
     CALL FoilSheetStrand(nCells, nSegments, MAXVAL(aNod), MAXVAL(bNod), kmax, jmax)
 
     nPiece = 0
+    IF (msub > 1) THEN
+      ! Copper only bands. Both band faces are hard planes - the insulation
+      ! margins of a turn belong to no strand and are simply not emitted, so
+      ! the pieces cover the fill factor of the element, not all of it.
+      DO k = kmin, kmax
+        DO ls = 1, msub
+          l = (k-1) * msub + ls
+          CALL FoilSheetBand(nCells, msub, fillf, l, s1, s2)
+          DO j = jmin, jmax
+
+            ntet = 1
+            tets(:,:,1) = 0._dp
+            DO v = 1, 4
+              tets(v,v,1) = 1._dp
+            END DO
+
+            plane = aNod - s1
+            CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+            IF (ntet > 0) THEN
+              plane = s2 - aNod
+              CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+            END IF
+            IF (ntet > 0 .AND. j > 1) THEN
+              plane = bNod - REAL(j-1,dp) * db
+              CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+            END IF
+            IF (ntet > 0 .AND. j < nSegments) THEN
+              plane = REAL(j,dp) * db - bNod
+              CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+            END IF
+            IF (ntet <= 0) CYCLE
+
+            vtot = 0._dp
+            ctot = 0._dp
+            DO i = 1, ntet
+              vol = TetVolumeFraction(tets(:,:,i))
+              IF (vol <= 0._dp) CYCLE
+              vtot = vtot + vol
+              DO v = 1, 4
+                ctot = ctot + 0.25_dp * vol * tets(:,v,i)
+              END DO
+            END DO
+            IF (vtot <= 1.0d-14) CYCLE
+
+            IF (nPiece >= SIZE(pCell)) THEN
+              WRITE(Message,'(A,I0,A,I0,A,I0,A,I0,A)') 'An element straddles more than ', &
+                  SIZE(pCell), ' strands of the ', nCells, ' x ', msub, ' x ', nSegments, ' layout'
+              CALL Error('FoilSheetPieces', Message)
+              CALL Fatal('FoilSheetPieces', &
+                  'Lower "Sheet Sublayers" / "Sheet Segments" or refine the coil mesh!')
+            END IF
+            nPiece = nPiece + 1
+            pCell(nPiece) = l
+            pSeg(nPiece)  = j
+            pVol(nPiece)  = vtot
+            pBary(:,nPiece) = ctot / vtot
+          END DO
+        END DO
+      END DO
+      RETURN
+    END IF
+
     DO k = kmin, kmax
       DO j = jmin, jmax
 
@@ -2790,9 +2927,18 @@ END FUNCTION isComponentName
     REAL(KIND=dp) :: tfoil, sgm
     INTEGER :: m
     REAL(KIND=dp) :: omega, delta, ratio, mu0
+    REAL(KIND=dp), POINTER :: fptr(:,:)
     LOGICAL :: Found
 
     mu0 = 4.0d-7 * PI
+    ! The count fixes the circuit dof layout, so it is resolved once at init.
+    ! A SIF that scans several frequencies would keep the first one's choice.
+    fptr => ListGetConstRealArray(CurrentModel % Simulation, 'Frequency', Found)
+    IF (Found) THEN
+      IF (SIZE(fptr) > 1) CALL Warn('Circuits_Init', &
+          'Foil sheet: "Sheet Sublayers = 0" is resolved once at init, but this '// &
+          'simulation carries several frequencies; give "Sheet Sublayers" explicitly.')
+    END IF
     omega = GetAngularFrequency(Found = Found)
     IF (.NOT. Found) omega = 0._dp
     ratio = 0._dp
@@ -2832,7 +2978,7 @@ END FUNCTION isComponentName
     INTEGER :: nSub
     REAL(KIND=dp) :: tau0, sdc, omega, mu0, tsub
     COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
-    LOGICAL :: Homog, Found, FoundFreq
+    LOGICAL :: Homog, Found, FoundFreq, NuIso
     INTEGER :: dStack, dPlane(2), d
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
 
@@ -2844,7 +2990,13 @@ END FUNCTION isComponentName
     mu0 = 4.0d-7 * PI
     tsub = tfoil / nSub
     tau0 = mu0 * sgm * tsub**2 / 4._dp
-    sdc  = ff * sgm
+    ! One band per turn smears the copper over the pitch, so its conductivity
+    ! carries the fill factor. Copper only bands are the copper itself.
+    IF (nSub > 1) THEN
+      sdc = sgm
+    ELSE
+      sdc = ff * sgm
+    END IF
     CALL ListAddConstReal(CompParams, 'Foil Sheet Tau0', tau0)
     CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma DC', sdc)
 
@@ -2862,7 +3014,7 @@ END FUNCTION isComponentName
     th = FoilSheetTanhOverU(u)
 
     IF (GetLogical(CompParams, 'Foil Sheet Derive Sigma 33', Found)) THEN
-      sigs = ff * sgm * th
+      sigs = sdc * th
       CALL ListAddConstReal(CompParams, 'Sigma 33', REAL(sigs, KIND=dp))
       CALL ListAddConstReal(CompParams, 'Sigma 33 im', AIMAG(sigs))
       WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Sigma 33 = ', &
@@ -2876,11 +3028,12 @@ END FUNCTION isComponentName
       mue = mu0 * ((1._dp - ff) + ff * th)
       nue = 1._dp / mue
       CALL FoilSheetNuDirections(StackAlongAlpha, dStack, dPlane)
-      IF (nSub > 1) THEN
-        ! With several strand layers per turn the through-thickness current
-        ! redistribution is carried by the strands, and what is left for the
-        ! material law is the sub-layer's own plate response, which the FEMM
-        ! study's variant B applies to every field component.
+      NuIso = .FALSE.
+      IF (nSub > 1) NuIso = GetLogical(CompParams, 'Sheet Sublayer Nu Isotropic', Found)
+      IF (NuIso) THEN
+        ! Diagnostic form: the FEMM study's variant B puts the sub-layer plate
+        ! response on every field component. Physically the stacking normal
+        ! drives no eddy loop in a thin layer, so this is not the default.
         DO d = 1, 3
           CALL ListAddConstReal(CompParams, FoilSheetNuKey(d), REAL(nue, KIND=dp))
           CALL ListAddConstReal(CompParams, FoilSheetNuKey(d)//' im', AIMAG(nue))
@@ -3156,6 +3309,12 @@ END FUNCTION isComponentName
     IF (Comp % nSublayers < 1) &
         CALL Fatal('Circuits_Init','Foil sheet: Sheet Sublayers must be positive!')
     CALL ListAddInteger(CompParams, 'Foil Sheet Sublayers', Comp % nSublayers)
+
+    Comp % FillFactor = GetConstReal(CompParams, 'Fill Factor', Found)
+    IF (.NOT. Found) Comp % FillFactor = 1._dp
+    IF (Comp % nSublayers > 1 .AND. (Comp % FillFactor <= 0._dp .OR. Comp % FillFactor > 1._dp)) &
+        CALL Fatal('Circuits_Init', &
+            'Foil sheet: "Sheet Sublayers" > 1 needs "Fill Factor" in (0,1]!')
 
     CALL InitFoilSheetMaterial(CompParams, Comp % StackAlongAlpha, Comp % nSublayers)
 
@@ -3445,6 +3604,7 @@ END FUNCTION isComponentName
     INTEGER :: e, n, gp, nmax, nno, i, v, gnode, ind, nPiece
     INTEGER :: pCell(MaxPiece), pSeg(MaxPiece)
     REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), volerr, dmax, amax, cval, contr, Vpar
+    REAL(KIND=dp) :: scov, tcov
     TYPE(Mesh_t), POINTER :: Mesh
     LOGICAL :: stat
 
@@ -3456,6 +3616,8 @@ END FUNCTION isComponentName
     dNode = 0._dp; aNode = 0._dp; inBlk = .FALSE.; skipn = .FALSE.
     flux = 0._dp
     volerr = 0._dp
+    scov = 0._dp
+    tcov = 0._dp
 
     ! A node is interior to the coil block when every element that carries its
     ! basis function is a block element, it is not on a mesh boundary, and it is
@@ -3503,9 +3665,13 @@ END FUNCTION isComponentName
       ! currents. The currents are a fixed function of the strand index so that
       ! every partition uses the same ones.
       IF (n /= 4 .OR. Element % TYPE % ElementCode /= 504) CYCLE
-      CALL FoilSheetPieces(Comp % nCells * Comp % nSublayers, Comp % nSegments, &
-          sStack(1:4), sAcross(1:4), nPiece, pCell, pSeg, pVol, pBary)
-      volerr = MAX(volerr, ABS(SUM(pVol(1:nPiece)) - 1._dp))
+      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
+          nPiece, pCell, pSeg, pVol, pBary, Comp % nSublayers, Comp % FillFactor)
+      ! One band per turn tiles the element; copper only bands cover the fill
+      ! factor of it, so the global coverage is the check there.
+      IF (Comp % nSublayers == 1) volerr = MAX(volerr, ABS(SUM(pVol(1:nPiece)) - 1._dp))
+      scov = scov + SUM(pVol(1:nPiece)) * detJ
+      tcov = tcov + detJ
       stat = ElementInfo(Element, Nodes, 0.25_dp, 0.25_dp, 0.25_dp, detJ, Basis, dBasisdx)
       tv = FoilSheetDirection(sStack, sAcross, dBasisdx, n, 1._dp)
       Vpar = detJ / 6._dp
@@ -3539,7 +3705,14 @@ END FUNCTION isComponentName
         ', int gradW . (gA x gB) = ', flux
     CALL Info('Circuits_Init', Message, Level=5)
 
-    WRITE(Message,'(A,ES10.3)') 'Foil sheet clipping, max |sum(piece vol)/V - 1| over block: ', volerr
+    scov = ParallelReduction(scov)
+    tcov = ParallelReduction(tcov)
+    IF (Comp % nSublayers == 1) THEN
+      WRITE(Message,'(A,ES10.3)') 'Foil sheet clipping, max |sum(piece vol)/V - 1| over block: ', volerr
+    ELSE
+      WRITE(Message,'(A,F10.7,A,F10.7)') 'Foil sheet clipping, strand volume / block volume: ', &
+          scov / MAX(tcov, TINY(tcov)), ', fill factor ', Comp % FillFactor
+    END IF
     CALL Info('Circuits_Init', Message, Level=5)
     WRITE(Message,'(A,ES10.3,A,ES10.3,A,ES10.3)') &
         'Foil sheet source divergence at interior nodes: max ', dmax, &
