@@ -3332,16 +3332,30 @@ END FUNCTION isComponentName
         CALL Fatal('Circuits_Init','Foil sheet: Sheet Segments must be positive!')
 
     IF (Comp % nSublayers <= 0) THEN
-      tfoil = GetConstReal(CompParams, 'Foil Thickness', Found)
-      sgm = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
-      IF (.NOT. (Found .AND. FoundS)) CALL Fatal('Circuits_Init', &
-          'Foil sheet: "Sheet Sublayers = 0" needs the thickness and "Sheet Conductivity"!')
-      elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
-      IF (.NOT. Found) elemH = 0._dp
-      Comp % nSublayers = FoilSheetAutoSublayers(tfoil / Comp % foilsPerCell, sgm, elemH)
+      IF (Comp % foilsPerCell > 1) THEN
+        ! The copper only bands of a sub-layered cell are the conductor of ONE
+        ! turn: they sit in the central fill factor of the cell and are spaced
+        ! t/m. A cell that lumps several turns has that copper in several
+        ! separate turns instead, with insulation between them, so the bands
+        ! would be laid over the wrong geometry.
+        Comp % nSublayers = 1
+        CALL Info('Circuits_Init', &
+            'Foil sheet: cells lump several turns, sub-layers off', Level=3)
+      ELSE
+        tfoil = GetConstReal(CompParams, 'Foil Thickness', Found)
+        sgm = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
+        IF (.NOT. (Found .AND. FoundS)) CALL Fatal('Circuits_Init', &
+            'Foil sheet: "Sheet Sublayers = 0" needs the thickness and "Sheet Conductivity"!')
+        elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
+        IF (.NOT. Found) elemH = 0._dp
+        Comp % nSublayers = FoilSheetAutoSublayers(tfoil, sgm, elemH)
+      END IF
     END IF
     IF (Comp % nSublayers < 1) &
         CALL Fatal('Circuits_Init','Foil sheet: Sheet Sublayers must be positive!')
+    IF (Comp % nSublayers > 1 .AND. Comp % foilsPerCell > 1) &
+        CALL Fatal('Circuits_Init','Foil sheet: cells lump several turns, sub-layers off; '// &
+            'raise "Sheet Cells" to one cell per turn or set "Sheet Sublayers = 1"!')
     CALL ListAddInteger(CompParams, 'Foil Sheet Sublayers', Comp % nSublayers)
 
     Comp % FillFactor = GetConstReal(CompParams, 'Fill Factor', Found)
