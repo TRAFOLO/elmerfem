@@ -3134,6 +3134,9 @@ END FUNCTION isComponentName
       IF (ff <= 0._dp .OR. ff > 1._dp) CALL Fatal('Circuits_Init','Foil sheet: "Fill Factor" must be in (0,1]!')
       IF (sgm <= 0._dp) CALL Fatal('Circuits_Init','Foil sheet: "Sheet Conductivity" must be positive!')
       tau0 = mu0 * sgm * tfoil**2 / 4._dp
+      ! SetFoilSheetHarmonicMaterial writes the values the run actually uses,
+      ! with the sub-layer thickness and, for copper bands, no ff smearing.
+      ! These are the one-band-per-turn defaults the transient ladder needs.
       sdc  = ff * sgm
       CALL ListAddConstReal(CompParams, 'Foil Sheet Tau0', tau0)
       CALL ListAddConstReal(CompParams, 'Foil Sheet Sigma DC', sdc)
@@ -3145,9 +3148,11 @@ END FUNCTION isComponentName
             ' per turn, the sheet coefficients use t/nSub = ', tfoil / nSub, ' m'
         CALL Info('Circuits_Init', Message, Level=3)
       END IF
-      WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Foil sheet derived: tau0 = ', tau0, &
-          ' s, DC sheet conductivity = ', sdc
-      CALL Info('Circuits_Init', Message, Level=3)
+      IF (nSub == 1) THEN
+        WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Foil sheet derived: tau0 = ', tau0, &
+            ' s, DC sheet conductivity = ', sdc
+        CALL Info('Circuits_Init', Message, Level=3)
+      END IF
     END IF
 
     Transient = (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient')
