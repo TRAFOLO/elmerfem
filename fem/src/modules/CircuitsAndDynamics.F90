@@ -129,7 +129,7 @@ CONTAINS
   !----------------------------------------------------------------------------
   SUBROUTINE InitFoilSkinLadder()
     IMPLICIT NONE
-    INTEGER :: i, n_comp, nn, ns, k
+    INTEGER :: i, n_comp, nn, ns, nsub, k
     TYPE(ValueList_t), POINTER :: CompParams
     LOGICAL :: found
     CHARACTER(LEN=MAX_NAME_LEN) :: ctype
@@ -171,7 +171,12 @@ CONTAINS
       IF (.NOT. found) CYCLE
       FSkin(i) % nSegments = GetInteger(CompParams, 'Foil Sheet Segments', found)
       IF (.NOT. found) CYCLE
-      ns = FSkin(i) % nCells * FSkin(i) % nSegments
+      ! One state per strand, and a strand is a (sub-layer, segment) pair. The
+      ! transient sheet only accepts one sub-layer per turn today, but sizing
+      ! this from the cells alone would overrun the moment that changes.
+      nsub = GetInteger(CompParams, 'Foil Sheet Sublayers', found)
+      IF (.NOT. found .OR. nsub < 1) nsub = 1
+      ns = FSkin(i) % nCells * nsub * FSkin(i) % nSegments
       IF (ns < 1) CYCLE
 
       FSkin(i) % Active  = ladderon
@@ -1735,12 +1740,18 @@ CONTAINS
         SkinLadder    = FSkin(CompId) % Active
         HaveSkinState = FSkin(CompId) % Alloc
       END IF
+    END IF
 
+    ! Every element scales its strand dofs, whether or not this component has
+    ! skin ladder state, so this must be set on every path. It used to sit
+    ! inside the block above and was left undefined wherever that block was not
+    ! entered - on a partition holding no element of the component, for one.
+    ! The value then divided a matrix entry, and the garbage reached the
+    ! parallel glue as a nonzero where none was expected.
     sdofscl = 1._dp
     IF (TransientSimulation .AND. dt > 0._dp) &
         sdofscl = SQRT(Comp % SigmaRef * dt / tscl)
     IF (HaveSkinState) FSkin(CompId) % DofScale = sdofscl
-    END IF
 
     Exact = (ngp <= 0)
     IF (Exact) THEN
