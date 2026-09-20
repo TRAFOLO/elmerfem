@@ -1246,7 +1246,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            WvecInitHandle = .FALSE.
          END IF
        ELSE
-         Call GetWPotential(Wbase)
+         CALL GetCoilWBase(Element, n, CompParams, Wbase)
        END IF
   
        SELECT CASE (CoilType)

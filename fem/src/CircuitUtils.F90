@@ -277,7 +277,94 @@ CONTAINS
   END SUBROUTINE GetWPotentialVar
 !------------------------------------------------------------------------------
 
-  
+
+!------------------------------------------------------------------------------
+! DEV-491: nodal direction potential of a coil component, normalized so that
+! grad of it has unit circulation along every current path of the coil.
+! Open coil: the electrode potential W of WPotentialSolver. Closed coil (a full
+! ring, no electrodes, no single valued W): the CoilSolver cut potential, which
+! is CoilPot or CoilPotB depending on PotSelect exactly as in the CoilSolver's
+! own LocalFluxMatrix, divided by the multiplier ScalePotential applied to it.
+!------------------------------------------------------------------------------
+  SUBROUTINE GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: nn
+    TYPE(ValueList_t), POINTER :: CompParams
+    REAL(KIND=dp) :: Wbase(:)
+    TYPE(Variable_t), POINTER, OPTIONAL :: Wpot
+
+    TYPE(Variable_t), POINTER, SAVE :: PotVarA => NULL(), PotVarB => NULL(), &
+        PotSelect => NULL()
+    LOGICAL, SAVE :: CoilVarsVisited = .FALSE.
+    TYPE(Variable_t), POINTER :: PotVar
+    INTEGER, POINTER :: NodeIndexes(:)
+    REAL(KIND=dp) :: Mult
+    INTEGER :: i, j
+    LOGICAL :: Found, UseB
+    CHARACTER(*), PARAMETER :: Caller = 'GetCoilWBase'
+!------------------------------------------------------------------------------
+
+    IF( .NOT. ListGetLogical( CompParams,'Coil Closed', Found ) ) THEN
+      IF( PRESENT( Wpot ) ) THEN
+        IF( ASSOCIATED( Wpot ) ) THEN
+          CALL GetLocalSolution( Wbase, UElement=Element, UVariable=Wpot, Found=Found )
+          RETURN
+        END IF
+      END IF
+      CALL GetWPotential( Wbase )
+      RETURN
+    END IF
+
+    IF( .NOT. CoilVarsVisited ) THEN
+      CoilVarsVisited = .TRUE.
+      PotVarA => VariableGet( CurrentModel % Mesh % Variables,'CoilPot' )
+      PotVarB => VariableGet( CurrentModel % Mesh % Variables,'CoilPotB' )
+      PotSelect => VariableGet( CurrentModel % Mesh % Variables,'PotSelect' )
+    END IF
+
+    IF( .NOT. ( ASSOCIATED(PotVarA) .AND. ASSOCIATED(PotVarB) .AND. &
+        ASSOCIATED(PotSelect) ) ) CALL Fatal(Caller,&
+        'closed coil component needs the CoilSolver with Coil Closed')
+
+    NodeIndexes => Element % NodeIndexes
+
+    ! Same branch as the CoilSolver's LocalFluxMatrix: the cut of CoilPotB is
+    ! elsewhere, so it is the smooth branch where PotSelect marks it.
+    UseB = .TRUE.
+    DO i=1,nn
+      j = PotSelect % Perm( NodeIndexes(i) )
+      IF( j == 0 ) CALL Fatal(Caller,&
+          'closed coil component needs the CoilSolver with Coil Closed')
+      IF( PotSelect % Values(j) <= 0.0_dp ) THEN
+        UseB = .FALSE.
+        EXIT
+      END IF
+    END DO
+
+    IF( UseB ) THEN
+      PotVar => PotVarB
+      Mult = ListGetConstReal( CompParams,'Coil Potential Multiplier B', Found )
+    ELSE
+      PotVar => PotVarA
+      Mult = ListGetConstReal( CompParams,'Coil Potential Multiplier', Found )
+    END IF
+
+    IF( .NOT. Found .OR. Mult == 0.0_dp ) CALL Fatal(Caller,&
+        'closed coil component needs the CoilSolver with Coil Closed')
+
+    DO i=1,nn
+      j = PotVar % Perm( NodeIndexes(i) )
+      IF( j == 0 ) CALL Fatal(Caller,&
+          'closed coil component needs the CoilSolver with Coil Closed')
+      Wbase(i) = PotVar % Values(j) / Mult
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE GetCoilWBase
+!------------------------------------------------------------------------------
+
+
 !------------------------------------------------------------------------------
   SUBROUTINE AddComponentsToBodyLists()
 !------------------------------------------------------------------------------
@@ -2189,20 +2276,30 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
    FUNCTION HasSupport(Element, nn) RESULT(support)
 !------------------------------------------------------------------------------
+    USE CircuitUtils
     IMPLICIT NONE
     INTEGER :: nn, dim
-    TYPE(Element_t) :: Element
-    LOGICAL :: support, First=.TRUE.
+    TYPE(Element_t), POINTER :: Element
+    LOGICAL :: support, First=.TRUE., Found
     REAL(KIND=dp) :: wBase(nn)
+    TYPE(ValueList_t), POINTER :: CompParams
     SAVE dim, First
 
     IF (First) THEN
       First = .FALSE.
       dim = CoordinateSystemDimension()
     END IF
-    
-    support = .TRUE. 
+
+    support = .TRUE.
     IF (dim == 3) THEN
+      ! DEV-491: a closed coil has no electrode potential W at all; its
+      ! direction field is the CoilSolver cut potential, which is defined on
+      ! every element of the coil.
+      CompParams => GetComponentParams(Element)
+      IF (ASSOCIATED(CompParams)) THEN
+        IF (ListGetLogical(CompParams,'Coil Closed',Found)) RETURN
+      END IF
+
       support = .FALSE.
       CALL GetLocalSolution(Wbase,'W')
       IF ( ANY(Wbase .ne. 0d0) ) support = .TRUE.
@@ -3074,7 +3171,7 @@ END FUNCTION isComponentName
       n = GetElementNOFNodes(Element)
       CALL GetElementNodes(Nodes, Element)
       CALL GetFlatWireLocalFields(.TRUE., Element, n, sAlpha, sBeta)
-      CALL GetScalarLocalSolution(Wloc, 'W', UElement=Element)
+      CALL GetCoilWBase(Element, n, CompParams, Wloc)
       IP = GaussPoints(Element)
       DO gp = 1, IP % n
         stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &

@@ -1565,7 +1565,7 @@ CONTAINS
       pPot = 2*pPOT - 0.5_dp*ppPOT
     END IF
 
-    CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
     CALL GetElementRotM(Element, RotM, nn)
     ncdofs = nd - nn
 
@@ -1721,7 +1721,7 @@ CONTAINS
       pPot = 2*pPOT - 0.5_dp*ppPOT
     END IF
 
-    CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
     CALL GetElementRotM(Element, RotM, nn)
     DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
     IF (.NOT. Found) DirSign = 1._dp
@@ -1868,7 +1868,11 @@ CONTAINS
                      RotMLoc(3,3), RotM(3,3,nn)
     INTEGER :: i,ncdofs,q,EdgeBasisDegree,ni
     TYPE(Variable_t), POINTER, SAVE :: Wpot
-    
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname, CoilType
+    TYPE(VariableHandle_t), SAVE :: Wvec_h
+    LOGICAL :: CoilUseWvec, Found2
+    LOGICAL, SAVE :: CoilUseWvec0 = .FALSE.
+
     SAVE CSymmetry, dim, First
 
     IF (First) THEN
@@ -1876,6 +1880,32 @@ CONTAINS
       CSymmetry = ( CurrentCoordinateSystem() == AxisSymmetric .OR. &
       CurrentCoordinateSystem() == CylindricSymmetric )
       dim = CoordinateSystemDimension()
+
+      CoilUseWvec0 = GetLogical(CurrentModel % Solver % Values, 'Coil Use W Vector', Found2 )
+      DO i=1,CurrentModel % NumberOfComponents
+        CoilType = ListGetString(CurrentModel % Components(i) % Values, 'Coil Type',Found)
+        IF(.NOT. Found) CYCLE
+        IF(CoilType == 'foil winding') THEN
+          CoilWVecVarName = GetString(CurrentModel % Components(i) % Values,'W Vector Variable Name', Found)
+          IF(Found) EXIT
+        END IF
+      END DO
+      IF(.NOT. Found) THEN
+        CoilWVecVarName = GetString(CurrentModel % Solver % Values,'W Vector Variable Name', Found)
+        IF(.NOT. Found) THEN
+          IF( GetLogical(CurrentModel % Solver % Values,'Use Nodal CoilCurrent',Found ) ) &
+              CoilWVecVarname = 'CoilCurrent'
+        END IF
+        IF(.NOT. Found) THEN
+          IF( GetLogical(CurrentModel % Solver % Values,'Use Elemental CoilCurrent',Found ) ) &
+              CoilWVecVarname = 'CoilCurrent e'
+        END IF
+        IF(Found) CALL Info('Add_foil_winding','Setting coil current to: '//TRIM(CoilWVecVarname),Level=6)
+        ! If we did not find w vector named in any component it is fair to assume that it is globally used!
+        IF(.NOT. Found2) CoilUseWvec0 = Found
+      END IF
+      IF(.NOT. Found) CoilWVecVarname = 'W Vector E'
+      CALL ListInitElementVariable(Wvec_h, CoilWVecVarname)
 
       CALL GetWPotentialVar(Wpot)
     END IF
@@ -1905,8 +1935,12 @@ CONTAINS
 
     ncdofs=nd
     IF (dim == 3) THEN
-      CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
-      !CALL GetLocalSolution(Wbase, 'w')
+      ! If we do not have a local flag then use the one from the solver section
+      CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
+      IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
+
+      IF (.NOT. CoilUseWvec) CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
+
       CALL GetElementRotM(Element, RotM, nn)
       ncdofs=nd-nn
     END IF
@@ -1951,7 +1985,13 @@ CONTAINS
       CASE(3)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
             detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
-        gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+
+        IF (CoilUseWvec) THEN
+          gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
+        ELSE
+          gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+        END IF
+
         ! Compute the conductivity tensor
         ! -------------------------------
         DO i=1,3
@@ -2444,9 +2484,16 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
       IF(ListGetLogical(CompParams,'Activate Constraint',FoundFlag)) THEN
         IF(.NOT. ListCheckPresent(CompParams,'Electrode Boundaries')) THEN
-          CALL Warn(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): no '&
-              //'"Electrode Boundaries" given, so the automatic electrode BC has no '&
-              //'place to pin the nodal potential (or pins it on the whole coil surface).')
+          IF(ListGetLogical(CompParams,'Coil Closed',FoundFlag)) THEN
+            ! DEV-491: a closed coil has no electrodes by construction. The AV
+            ! solver pins one single node of its bodies instead.
+            CALL Info(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): closed '&
+                //'coil, so the nodal potential is pinned at one node of the coil.',Level=4)
+          ELSE
+            CALL Warn(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): no '&
+                //'"Electrode Boundaries" given, so the automatic electrode BC has no '&
+                //'place to pin the nodal potential (or pins it on the whole coil surface).')
+          END IF
         END IF
       END IF
     END DO
@@ -3287,7 +3334,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
     IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
-    IF (.NOT. CoilUseWvec) CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    IF (.NOT. CoilUseWvec) CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
     CALL GetElementRotM(Element, RotM, nn)
     ncdofs = nd - nn
 
@@ -3444,7 +3491,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
     IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
-    IF (.NOT. CoilUseWvec) CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+    IF (.NOT. CoilUseWvec) CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
     CALL GetElementRotM(Element, RotM, nn)
     DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
     IF (.NOT. Found) DirSign = 1._dp
@@ -3648,9 +3695,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
 
       IF (.NOT. CoilUseWvec) THEN
-        !CALL GetLocalSolution(Wbase, 'w')
-        !CALL GetWPotential(WBase)
-        CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+        CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
       END IF
 
       FoilUseJvec = GetLogical(CompParams, 'Foil Winding Use J Vector', Found)
