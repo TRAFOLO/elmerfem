@@ -178,12 +178,17 @@ SUBROUTINE DirectionSolver( Model,Solver,dt,TransientSimulation )
   LOGICAL :: AllocationsDone = .FALSE., Found, PosEl, NegEl
   TYPE(Element_t), POINTER :: Element
 
-  CHARACTER(LEN=MAX_NAME_LEN) :: varname, Namespace, VNWithNS
+  CHARACTER(LEN=MAX_NAME_LEN) :: varname, Namespace, VNWithNS, DirMethod
   REAL(KIND=dp) :: Norm
   INTEGER :: n, nb, nd, t, istat, active, NofNameSpaces, ns_iter
   TYPE(Mesh_t), POINTER :: Mesh
   TYPE(ValueList_t), POINTER :: BodyForce, BC
   REAL(KIND=dp), ALLOCATABLE :: STIFF(:,:), LOAD(:), FORCE(:)
+
+  ! Boundary values closer than this are the same value, and a wall thinner than
+  ! this times the bounding box diagonal has no direction.
+  REAL(KIND=dp), PARAMETER :: BC_VALUE_TOL = 1.0e-12_dp
+  REAL(KIND=dp), PARAMETER :: REL_THICKNESS_TOL = 1.0e-14_dp
 
   SAVE STIFF, LOAD, FORCE, AllocationsDone
 !------------------------------------------------------------------------------
@@ -194,6 +199,22 @@ SUBROUTINE DirectionSolver( Model,Solver,dt,TransientSimulation )
   !Allocate some permanent storage, this is done first time only:
   !--------------------------------------------------------------
   Mesh => GetMesh()
+
+  DirMethod = GetString(GetSolverParams(), 'Direction Method', Found)
+  IF (.NOT. Found) DirMethod = 'laplace'
+
+  SELECT CASE(DirMethod)
+  CASE('laplace')
+    CONTINUE
+  CASE('distance')
+    CALL DirectionByDistance()
+    DO ns_iter=1,Model % NumberOfBodies
+      CALL SaveSolutionWithBodyMethod(ns_iter)
+    END DO
+    RETURN
+  CASE DEFAULT
+    CALL Fatal('DirectionSolver','Unknown Direction Method: '//TRIM(DirMethod))
+  END SELECT
 
   IF ( .NOT. AllocationsDone ) THEN
      N = Solver % Mesh % MaxElementDOFs  ! just big enough for elemental arrays
@@ -266,6 +287,357 @@ SUBROUTINE DirectionSolver( Model,Solver,dt,TransientSimulation )
   END DO ! namespaces
 !------------------------------------------------------------------------------
 CONTAINS
+
+!------------------------------------------------------------------------------
+!> Set the direction variable to the relative distance between its two Dirichlet
+!> faces: value = v_lo + (v_hi-v_lo)*d_lo/(d_lo+d_hi). This gives |grad var| = 1/T
+!> for a wall of constant thickness T of any shape, whereas the Laplace solution
+!> of the default method behaves like ln(r) in a round coil.
+!> The 'body N:' namespace trick of the Laplace path is not supported here: the
+!> boundary values are read without a namespace, so one field is computed for the
+!> whole variable.
+!------------------------------------------------------------------------------
+  SUBROUTINE DirectionByDistance()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+!------------------------------------------------------------------------------
+    INTEGER, PARAMETER :: TriCorners(3,2) = RESHAPE([1,2,3,1,3,4],[3,2])
+    TYPE(Element_t), POINTER :: Element
+    TYPE(ValueList_t), POINTER :: BC
+    TYPE(Variable_t), POINTER :: Var
+    INTEGER, POINTER :: Perm(:), Indexes(:)
+    INTEGER :: i, j, k, t, n, pass, family, ntri, nlo, nhi, nfaces
+    LOGICAL :: IsLo
+    REAL(KIND=dp) :: BVals(Mesh % MaxElementNodes)
+    REAL(KIND=dp), ALLOCATABLE :: TriLo(:,:), TriHi(:,:), CenLo(:,:), CenHi(:,:), &
+        RadLo(:), RadHi(:), LowBound(:)
+    REAL(KIND=dp) :: vlo, vhi, v, dlo, dhi, dsum, dsmin, dsmax, bbox, p(3), t0
+!------------------------------------------------------------------------------
+    t0 = RealTime()
+
+    Var => Solver % Variable
+    IF (Var % DOFs /= 1) CALL Fatal('DirectionSolver', &
+        'Direction Method = distance needs a scalar variable')
+    Perm => Var % Perm
+
+    ! Pass over the Dirichlet faces of the variable to find the two boundary values
+    !------------------------------------------------------------------------------
+    nfaces = 0
+    vlo = HUGE(vlo)
+    vhi = -HUGE(vhi)
+    DO t=1,Mesh % NumberOfBoundaryElements
+      Element => GetBoundaryElement(t)
+      IF (GetElementFamily() == 1) CYCLE
+      IF (.NOT. ActiveBoundaryElement()) CYCLE
+      BC => GetBC()
+      IF (.NOT. ASSOCIATED(BC)) CYCLE
+      IF (.NOT. ListCheckPresent(BC, varname)) CYCLE
+
+      family = GetElementFamily()
+      IF (family == 2) CALL Fatal('DirectionSolver', &
+          'Direction Method = distance is 3D only')
+      IF (family /= 3 .AND. family /= 4) CALL Fatal('DirectionSolver', &
+          'Direction Method = distance cannot triangulate boundary element type '&
+          //I2S(Element % TYPE % ElementCode))
+
+      n = GetElementNOFNodes()
+      BVals(1:n) = GetReal(BC, varname, Found)
+      IF (.NOT. Found) CYCLE
+      IF (MAXVAL(BVals(1:n)) - MINVAL(BVals(1:n)) > BC_VALUE_TOL) THEN
+        WRITE(Message,'(A,ES15.8,A,ES15.8)') 'Direction Method = distance needs constant &
+            &boundary values, but '//TRIM(varname)//' varies from ', &
+            MINVAL(BVals(1:n)),' to ',MAXVAL(BVals(1:n))
+        CALL Fatal('DirectionSolver', Message)
+      END IF
+
+      nfaces = nfaces + 1
+      vlo = MIN(vlo, BVals(1))
+      vhi = MAX(vhi, BVals(1))
+    END DO
+
+    IF (ParallelReduction(nfaces) == 0) CALL Fatal('DirectionSolver', &
+        'Direction Method = distance found no boundary conditions for '//TRIM(varname))
+
+    IF (ParEnv % PEs > 1) THEN
+      vlo = ParallelReduction(vlo,1)
+      vhi = ParallelReduction(vhi,2)
+    END IF
+    IF (vhi - vlo <= BC_VALUE_TOL) THEN
+      WRITE(Message,'(A,ES12.5)') 'Direction Method = distance needs two distinct &
+          &boundary values, found only ', vlo
+      CALL Fatal('DirectionSolver', Message)
+    END IF
+
+    ! Collect the faces of both sets as triangles, counting them first
+    !------------------------------------------------------------------------------
+    DO pass=1,2
+      nlo = 0
+      nhi = 0
+      DO t=1,Mesh % NumberOfBoundaryElements
+        Element => GetBoundaryElement(t)
+        IF (GetElementFamily() == 1) CYCLE
+        IF (.NOT. ActiveBoundaryElement()) CYCLE
+        BC => GetBC()
+        IF (.NOT. ASSOCIATED(BC)) CYCLE
+        IF (.NOT. ListCheckPresent(BC, varname)) CYCLE
+
+        n = GetElementNOFNodes()
+        BVals(1:n) = GetReal(BC, varname, Found)
+        IF (.NOT. Found) CYCLE
+        v = BVals(1)
+
+        IF (ABS(v-vlo) <= BC_VALUE_TOL) THEN
+          IsLo = .TRUE.
+        ELSE IF (ABS(v-vhi) <= BC_VALUE_TOL) THEN
+          IsLo = .FALSE.
+        ELSE
+          WRITE(Message,'(A,ES15.8,A,ES15.8,A,ES15.8)') 'Direction Method = distance needs &
+              &exactly two boundary values, found ',vlo,' and ',vhi,' and ',v
+          CALL Fatal('DirectionSolver', Message)
+        END IF
+
+        ntri = 1
+        IF (GetElementFamily() == 4) ntri = 2
+        Indexes => Element % NodeIndexes
+
+        DO i=1,ntri
+          IF (IsLo) THEN
+            nlo = nlo + 1
+            IF (pass == 2) CALL SetTriangle(TriLo(:,nlo), Indexes(TriCorners(:,i)))
+          ELSE
+            nhi = nhi + 1
+            IF (pass == 2) CALL SetTriangle(TriHi(:,nhi), Indexes(TriCorners(:,i)))
+          END IF
+        END DO
+      END DO
+
+      IF (pass == 1) THEN
+        ALLOCATE(TriLo(9,MAX(nlo,1)), TriHi(9,MAX(nhi,1)))
+      END IF
+    END DO
+
+    ! Every partition needs the complete surfaces; duplicated faces are harmless
+    ! for a minimum distance.
+    !------------------------------------------------------------------------------
+    IF (ParEnv % PEs > 1) THEN
+      CALL GatherTriangles(TriLo, nlo)
+      CALL GatherTriangles(TriHi, nhi)
+    END IF
+
+    ALLOCATE(CenLo(3,MAX(nlo,1)), RadLo(MAX(nlo,1)), CenHi(3,MAX(nhi,1)), RadHi(MAX(nhi,1)), &
+        LowBound(MAX(nlo,nhi,1)))
+    CALL BoundingSpheres(TriLo, nlo, CenLo, RadLo)
+    CALL BoundingSpheres(TriHi, nhi, CenHi, RadHi)
+
+    n = Mesh % NumberOfNodes
+    bbox = (MAXVAL(Mesh % Nodes % x(1:n)) - MINVAL(Mesh % Nodes % x(1:n)))**2 + &
+           (MAXVAL(Mesh % Nodes % y(1:n)) - MINVAL(Mesh % Nodes % y(1:n)))**2 + &
+           (MAXVAL(Mesh % Nodes % z(1:n)) - MINVAL(Mesh % Nodes % z(1:n)))**2
+    bbox = SQRT(bbox)
+    IF (ParEnv % PEs > 1) bbox = ParallelReduction(bbox,2)
+
+    dsmin = HUGE(dsmin)
+    dsmax = 0.0_dp
+    DO i=1,n
+      j = Perm(i)
+      IF (j == 0) CYCLE
+      p = [Mesh % Nodes % x(i), Mesh % Nodes % y(i), Mesh % Nodes % z(i)]
+      dlo = MinTriangleDistance(p, TriLo, CenLo, RadLo, nlo, LowBound)
+      dhi = MinTriangleDistance(p, TriHi, CenHi, RadHi, nhi, LowBound)
+      dsum = dlo + dhi
+      IF (dsum < REL_THICKNESS_TOL * bbox) THEN
+        Var % Values(j) = 0.5_dp * (vlo + vhi)
+      ELSE
+        Var % Values(j) = vlo + (vhi - vlo) * dlo / dsum
+      END IF
+      dsmin = MIN(dsmin, dsum)
+      dsmax = MAX(dsmax, dsum)
+    END DO
+
+    Var % Norm = ComputeNorm(Solver, SIZE(Var % Values), Var % Values)
+
+    IF (ParEnv % PEs > 1) THEN
+      dsmin = ParallelReduction(dsmin,1)
+      dsmax = ParallelReduction(dsmax,2)
+    END IF
+
+    WRITE(Message,'(A,I0,A,I0,A)') 'Distance direction for '//TRIM(varname)//' from ', &
+        nlo,' and ',nhi,' boundary triangles'
+    CALL Info('DirectionSolver', Message, Level=5)
+    WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Wall thickness between the faces ranges from ', &
+        dsmin,' to ',dsmax
+    CALL Info('DirectionSolver', Message, Level=5)
+    WRITE(Message,'(A,F8.3,A)') 'Distance direction computed in ',RealTime()-t0,' s'
+    CALL Info('DirectionSolver', Message, Level=5)
+
+    DEALLOCATE(TriLo, TriHi, CenLo, RadLo, CenHi, RadHi, LowBound)
+!------------------------------------------------------------------------------
+  END SUBROUTINE DirectionByDistance
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+  SUBROUTINE SetTriangle(Tri, Indexes)
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: Tri(9)
+    INTEGER :: Indexes(3)
+!------------------------------------------------------------------------------
+    INTEGER :: i, j
+!------------------------------------------------------------------------------
+    DO i=1,3
+      j = Indexes(i)
+      Tri(3*i-2) = Mesh % Nodes % x(j)
+      Tri(3*i-1) = Mesh % Nodes % y(j)
+      Tri(3*i)   = Mesh % Nodes % z(j)
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE SetTriangle
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+  SUBROUTINE BoundingSpheres(Tri, ntri, Cen, Rad)
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: Tri(:,:), Cen(:,:), Rad(:)
+    INTEGER :: ntri
+!------------------------------------------------------------------------------
+    INTEGER :: i, k
+!------------------------------------------------------------------------------
+    DO k=1,ntri
+      Cen(:,k) = (Tri(1:3,k) + Tri(4:6,k) + Tri(7:9,k)) / 3.0_dp
+      Rad(k) = 0.0_dp
+      DO i=1,3
+        Rad(k) = MAX(Rad(k), SQRT(SUM((Tri(3*i-2:3*i,k) - Cen(:,k))**2)))
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE BoundingSpheres
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Gather the triangles of all partitions so that every partition holds the
+!> complete surface.
+!------------------------------------------------------------------------------
+  SUBROUTINE GatherTriangles(Tri, ntri)
+!------------------------------------------------------------------------------
+    REAL(KIND=dp), ALLOCATABLE :: Tri(:,:)
+    INTEGER :: ntri
+!------------------------------------------------------------------------------
+    INTEGER :: i, ierr, comm, pes
+    INTEGER, ALLOCATABLE :: Counts(:), Displs(:)
+    REAL(KIND=dp), ALLOCATABLE :: AllTri(:,:)
+!------------------------------------------------------------------------------
+    comm = ParEnv % ActiveComm
+    CALL MPI_COMM_SIZE(comm, pes, ierr)
+
+    ALLOCATE(Counts(pes), Displs(pes))
+    CALL MPI_ALLGATHER(ntri, 1, MPI_INTEGER, Counts, 1, MPI_INTEGER, comm, ierr)
+
+    Counts = 9 * Counts
+    Displs(1) = 0
+    DO i=2,pes
+      Displs(i) = Displs(i-1) + Counts(i-1)
+    END DO
+
+    ALLOCATE(AllTri(9,MAX(SUM(Counts)/9,1)))
+    CALL MPI_ALLGATHERV(Tri, 9*ntri, MPI_DOUBLE_PRECISION, AllTri, Counts, Displs, &
+        MPI_DOUBLE_PRECISION, comm, ierr)
+
+    ntri = SUM(Counts) / 9
+    DEALLOCATE(Tri)
+    CALL MOVE_ALLOC(AllTri, Tri)
+    DEALLOCATE(Counts, Displs)
+!------------------------------------------------------------------------------
+  END SUBROUTINE GatherTriangles
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Smallest distance from a point to a set of triangles. The bounding spheres give
+!> a lower bound for each triangle, and only the triangles whose lower bound is
+!> below the distance of the most promising one are evaluated exactly.
+!------------------------------------------------------------------------------
+  FUNCTION MinTriangleDistance(p, Tri, Cen, Rad, ntri, LowBound) RESULT(dmin)
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: p(3), Tri(:,:), Cen(:,:), Rad(:), LowBound(:), dmin
+    INTEGER :: ntri
+!------------------------------------------------------------------------------
+    INTEGER :: k, kbest
+!------------------------------------------------------------------------------
+    kbest = 1
+    DO k=1,ntri
+      LowBound(k) = SQRT(SUM((p - Cen(:,k))**2)) - Rad(k)
+      IF (LowBound(k) < LowBound(kbest)) kbest = k
+    END DO
+
+    dmin = PointTriangleDistance(p, Tri(1:3,kbest), Tri(4:6,kbest), Tri(7:9,kbest))
+    DO k=1,ntri
+      IF (LowBound(k) >= dmin) CYCLE
+      dmin = MIN(dmin, PointTriangleDistance(p, Tri(1:3,k), Tri(4:6,k), Tri(7:9,k)))
+    END DO
+!------------------------------------------------------------------------------
+  END FUNCTION MinTriangleDistance
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Exact distance from a point to a triangle. The closest point is picked by the
+!> barycentric region tests of Ericson, Real-Time Collision Detection, 5.1.5.
+!------------------------------------------------------------------------------
+  PURE FUNCTION PointTriangleDistance(p, a, b, c) RESULT(dist)
+!------------------------------------------------------------------------------
+    REAL(KIND=dp), INTENT(IN) :: p(3), a(3), b(3), c(3)
+    REAL(KIND=dp) :: dist
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: ab(3), ac(3), ap(3), bp(3), cp(3), q(3)
+    REAL(KIND=dp) :: d1, d2, d3, d4, d5, d6, va, vb, vc, denom
+!------------------------------------------------------------------------------
+    ab = b - a
+    ac = c - a
+    ap = p - a
+    d1 = SUM(ab*ap)
+    d2 = SUM(ac*ap)
+
+    IF (d1 <= 0.0_dp .AND. d2 <= 0.0_dp) THEN
+      q = a
+    ELSE
+      bp = p - b
+      d3 = SUM(ab*bp)
+      d4 = SUM(ac*bp)
+      IF (d3 >= 0.0_dp .AND. d4 <= d3) THEN
+        q = b
+      ELSE
+        vc = d1*d4 - d3*d2
+        IF (vc <= 0.0_dp .AND. d1 >= 0.0_dp .AND. d3 <= 0.0_dp) THEN
+          q = a + (d1/(d1-d3)) * ab
+        ELSE
+          cp = p - c
+          d5 = SUM(ab*cp)
+          d6 = SUM(ac*cp)
+          IF (d6 >= 0.0_dp .AND. d5 <= d6) THEN
+            q = c
+          ELSE
+            vb = d5*d2 - d1*d6
+            IF (vb <= 0.0_dp .AND. d2 >= 0.0_dp .AND. d6 <= 0.0_dp) THEN
+              q = a + (d2/(d2-d6)) * ac
+            ELSE
+              va = d3*d6 - d5*d4
+              IF (va <= 0.0_dp .AND. d4-d3 >= 0.0_dp .AND. d5-d6 >= 0.0_dp) THEN
+                q = b + ((d4-d3)/((d4-d3)+(d5-d6))) * (c-b)
+              ELSE
+                denom = va + vb + vc
+                IF (denom > 0.0_dp) THEN
+                  q = a + ab*(vb/denom) + ac*(vc/denom)
+                ELSE
+                  q = a  ! zero area face, the vertex regions already cover it
+                END IF
+              END IF
+            END IF
+          END IF
+        END IF
+      END IF
+    END IF
+
+    dist = SQRT(SUM((p-q)**2))
+!------------------------------------------------------------------------------
+  END FUNCTION PointTriangleDistance
+!------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
   SUBROUTINE SaveSolutionWithBodyMethod(ns_iter)
