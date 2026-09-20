@@ -1471,6 +1471,41 @@ CONTAINS
 !> fractions by percents and leaves the assembled source that far from
 !> solenoidal.
 !------------------------------------------------------------------------------
+!> Nodal values of a complex component keyword, given as 'name' and 'name im'.
+!> A missing part reads as zero, and Found is true when either was given.
+!------------------------------------------------------------------------------
+  SUBROUTINE GetComponentCmplxNodal(CompParams, Name, n, re, im, Found)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    CHARACTER(*) :: Name
+    INTEGER :: n
+    REAL(KIND=dp) :: re(:), im(:)
+    LOGICAL :: Found
+
+    REAL(KIND=dp), POINTER CONTIG :: p(:)
+    LOGICAL :: FoundIm
+
+    p => GetReal(CompParams, Name, Found)
+    IF (Found) THEN
+      re(1:n) = p(1:n)
+    ELSE
+      re(1:n) = 0._dp
+    END IF
+
+    p => GetReal(CompParams, Name//' im', FoundIm)
+    IF (FoundIm) THEN
+      im(1:n) = p(1:n)
+    ELSE
+      im(1:n) = 0._dp
+    END IF
+
+    Found = Found .OR. FoundIm
+!------------------------------------------------------------------------------
+  END SUBROUTINE GetComponentCmplxNodal
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
   SUBROUTINE FoilSheetQuadrature(Comp, CompParams, Element, nn, sStack, sAcross, Q)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
@@ -4449,7 +4484,7 @@ CONTAINS
         END IF
      CASE('foil sheet')
         IF (HasSupport(Element,nn)) THEN
-          CALL CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Done,Rows)
+          CALL CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Rows)
         END IF
       END SELECT
     END IF
@@ -4490,7 +4525,7 @@ CONTAINS
         END IF
      CASE('foil sheet')
         IF (HasSupport(Element,nn)) THEN
-          CALL CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Done,Rows,Cols=Cols)
+          CALL CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Rows,Cols=Cols)
         END IF
       END SELECT
     END IF
@@ -4844,7 +4879,7 @@ CONTAINS
 !> versa. The circuit-internal couplings (c_kj with V_k and with itself) are
 !> created once per component in CreateComponentEquations.
 !------------------------------------------------------------------------------
-  SUBROUTINE CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Done,Rows,Cols,Harmonic)
+  SUBROUTINE CountAndCreateFoilSheet(Element,nn,nd,Comp,Cnts,Rows,Cols,Harmonic)
 !------------------------------------------------------------------------------
     USE CircuitUtils
     IMPLICIT NONE
@@ -4856,7 +4891,6 @@ CONTAINS
     INTEGER :: Indexes(nd)
     INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs, nLayers
     INTEGER, POINTER :: PS(:)
-    LOGICAL*1 :: Done(:)
     LOGICAL, OPTIONAL :: Harmonic
     LOGICAL :: harm
     REAL(KIND=dp) :: sStack(nn), sAcross(nn)

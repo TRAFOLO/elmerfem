@@ -1092,6 +1092,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    Magnetization = 0._dp
 
    Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp; HomogPowerSeen = 0
+   ! Foil sheet layout of the element at hand; read per element in the coil
+   ! type branch below, but the reconstruction runs for every coil type.
+   FsCells = 1; FsSegments = 1; FsSublayers = 1
+   FsFillFactor = 1._dp; FsSigmaRef = 1._dp; FsSign = 1._dp
    IF(.NOT. ConstantMassMatrixInUse ) THEN
      CALL DefaultInitialize()
    END IF
@@ -1377,11 +1381,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          HomogenizationModel = GetLogical(CompParams, 'Homogenization Model', Found)
          BLOCK
            REAL(KIND=dp) :: sigma_33(n), sigmaim_33(n)
-           sigma_33 = GetReal(CompParams, 'sigma 33', Found)
-           IF ( .NOT. Found ) sigma_33 = 0._dp
-           sigmaim_33 = GetReal(CompParams, 'sigma 33 im', FoundIm)
-           IF ( .NOT. FoundIm ) sigmaim_33 = 0._dp
-           IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: Sigma 33 not found!')
+           CALL GetComponentCmplxNodal(CompParams, 'sigma 33', n, sigma_33, sigmaim_33, Found)
+           IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: Sigma 33 not found!')
            Tcoef = CMPLX(0._dp, 0._dp, KIND=dp)
            Tcoef(1,1,1:n) = CMPLX(sigma_33, sigmaim_33, KIND=dp)
            Tcoef(2,2,1:n) = Tcoef(1,1,1:n)
@@ -1391,21 +1392,12 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          IF (HomogenizationModel) THEN
            BLOCK
              REAL(KIND=dp) :: nu_11(n), nuim_11(n), nu_22(n), nuim_22(n), nu_33(n), nuim_33(n)
-             nu_11 = GetReal(CompParams, 'nu 11', Found)
-             nuim_11 = GetReal(CompParams, 'nu 11 im', FoundIm)
-             IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: nu 11 not found!')
-             IF ( .NOT. Found ) nu_11 = 0._dp
-             IF ( .NOT. FoundIm ) nuim_11 = 0._dp
-             nu_22 = GetReal(CompParams, 'nu 22', Found)
-             nuim_22 = GetReal(CompParams, 'nu 22 im', FoundIm)
-             IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: nu 22 not found!')
-             IF ( .NOT. Found ) nu_22 = 0._dp
-             IF ( .NOT. FoundIm ) nuim_22 = 0._dp
-             nu_33 = GetReal(CompParams, 'nu 33', Found)
-             nuim_33 = GetReal(CompParams, 'nu 33 im', FoundIm)
-             IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal (Caller,'Foil sheet: nu 33 not found!')
-             IF ( .NOT. Found ) nu_33 = 0._dp
-             IF ( .NOT. FoundIm ) nuim_33 = 0._dp
+             CALL GetComponentCmplxNodal(CompParams, 'nu 11', n, nu_11, nuim_11, Found)
+             IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: nu 11 not found!')
+             CALL GetComponentCmplxNodal(CompParams, 'nu 22', n, nu_22, nuim_22, Found)
+             IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: nu 22 not found!')
+             CALL GetComponentCmplxNodal(CompParams, 'nu 33', n, nu_33, nuim_33, Found)
+             IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: nu 33 not found!')
              Nu_el = CMPLX(0.0d0, 0.0d0, kind=dp)
              Nu_el(1,1,1:n) = nu_11(1:n) + im * nuim_11(1:n)
              Nu_el(2,2,1:n) = nu_22(1:n) + im * nuim_22(1:n)

@@ -762,7 +762,7 @@ BLOCK
     ! the same choice on every partition; all partitions holding it constrain
     ! it, so the shared row stays consistent.
     BLOCK
-      INTEGER, PARAMETER :: NoNode = HUGE(1)/2
+      INTEGER, PARAMETER :: NoNode = HUGE(1)
       INTEGER :: c, e, ni, gnode, MinGNode
       TYPE(Element_t), POINTER :: BulkElement
       LOGICAL :: Parallel

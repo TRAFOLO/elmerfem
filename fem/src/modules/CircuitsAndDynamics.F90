@@ -1901,6 +1901,7 @@ CONTAINS
     END IF
 
     ncdofs=nd
+    CoilUseWvec = CoilUseWvec0
     IF (dim == 3) THEN
       ! If we do not have a local flag then use the one from the solver section
       CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
@@ -2783,11 +2784,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         IF (HasSupport(Element,nn_elem)) THEN
           ! The block has no volumetric conductivity; the strands conduct with
           ! the complex sheet conductivity sigma_s = Sigma 33 + i Sigma 33 im.
-          sigma_33 = GetReal(CompParams, 'sigma 33', Found)
-          IF ( .NOT. Found ) sigma_33 = 0._dp
-          sigmaim_33 = GetReal(CompParams, 'sigma 33 im', FoundIm)
-          IF ( .NOT. FoundIm ) sigmaim_33 = 0._dp
-          IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal ('AddComponentElementContributions', &
+          CALL GetComponentCmplxNodal(CompParams, 'sigma 33', nn_elem, sigma_33, sigmaim_33, Found)
+          IF ( .NOT. Found ) CALL Fatal ('AddComponentElementContributions', &
               'Foil sheet: Sigma 33 not found!')
           Tcoef = CMPLX(0._dp, 0._dp, KIND=dp)
           Tcoef(3,3,1:nn_elem) = CMPLX(sigma_33, sigmaim_33, KIND=dp)
