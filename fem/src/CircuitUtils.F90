@@ -1281,6 +1281,16 @@ CONTAINS
         END DO
         IF (vtot <= 1.0d-14) CYCLE
 
+        ! One element can straddle as many strands as the layout is fine, and
+        ! sub-layers multiply that. Say so instead of running off the caller's
+        ! buffer, which is what a silent overflow used to do.
+        IF (nPiece >= SIZE(pCell)) THEN
+          WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'An element straddles more than ', SIZE(pCell), &
+              ' strands of the ', nCells, ' x ', nSegments, ' layout'
+          CALL Error('FoilSheetPieces', Message)
+          CALL Fatal('FoilSheetPieces', &
+              'Lower "Sheet Sublayers" / "Sheet Segments" or refine the coil mesh!')
+        END IF
         nPiece = nPiece + 1
         pCell(nPiece) = k
         pSeg(nPiece)  = j
@@ -3431,9 +3441,10 @@ END FUNCTION isComponentName
     REAL(KIND=dp), ALLOCATABLE :: dNode(:), aNode(:)
     LOGICAL, ALLOCATABLE :: inBlk(:), skipn(:)
     REAL(KIND=dp) :: detJ, gw(3), tv(3), flux, sgn
+    INTEGER, PARAMETER :: MaxPiece = 1024
     INTEGER :: e, n, gp, nmax, nno, i, v, gnode, ind, nPiece
-    INTEGER :: pCell(64), pSeg(64)
-    REAL(KIND=dp) :: pVol(64), pBary(4,64), volerr, dmax, amax, cval, contr, Vpar
+    INTEGER :: pCell(MaxPiece), pSeg(MaxPiece)
+    REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), volerr, dmax, amax, cval, contr, Vpar
     TYPE(Mesh_t), POINTER :: Mesh
     LOGICAL :: stat
 

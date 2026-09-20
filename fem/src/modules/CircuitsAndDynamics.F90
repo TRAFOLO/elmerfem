@@ -1675,7 +1675,7 @@ CONTAINS
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
     REAL(KIND=dp) :: RotM(3,3,nn), gres, DirSign
     INTEGER :: ngp
-    INTEGER, PARAMETER :: MaxPiece = 64
+    INTEGER, PARAMETER :: MaxPiece = 1024
     INTEGER :: nItem, pCell(MaxPiece), pSeg(MaxPiece)
     REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), wgt, uu, vv, ww
     LOGICAL :: Exact
@@ -3459,7 +3459,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
     REAL(KIND=dp) :: RotM(3,3,nn), gres, DirSign
     INTEGER :: ngp
-    INTEGER, PARAMETER :: MaxPiece = 64
+    INTEGER, PARAMETER :: MaxPiece = 1024
     INTEGER :: nItem, pCell(MaxPiece), pSeg(MaxPiece)
     REAL(KIND=dp) :: pVol(MaxPiece), pBary(4,MaxPiece), wgt, uu, vv, ww
     LOGICAL :: Exact
