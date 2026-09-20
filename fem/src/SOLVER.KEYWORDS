@@ -1672,6 +1672,15 @@ Component:Real:      'Nu 33 Taus'
 Component:Logical:   'Activate Constraint'
 Component:Logical:   'Automatic Electrode BC'
 Component:Integer:   'Electrode Boundaries'
+Component:Real:      'Electrode Area'
+Component:Real:      'Circuit Equation Voltage Factor'
+Component:Integer:   'Circuit Voltage Variable Id'
+! Take the coil direction field from a precomputed vector variable instead of
+! from grad(W). Accepted on the Component and on the circuits Solver section.
+Component:Logical:   'Coil Use W Vector'
+Component:String:    'W Vector Variable Name'
+Solver:Logical:      'Coil Use W Vector'
+Solver:String:       'W Vector Variable Name'
 ! Closed (full 360 degree) coil: no electrodes and no single valued W, so the
 ! direction field is the CoilSolver cut potential normalized to unit
 ! circulation. The multipliers and the measured circulation are written by
@@ -1686,6 +1695,11 @@ Component:String:    'Stacking Direction'
 Component:Real:      'Fill Factor'
 Component:Real:      'Conductor Thickness'
 Component:Real:      'Conductor Width'
+! Resolved layout, written back into the Component by Elmer.
+Component:Real:      'Flat Wire Fill Factor'
+Component:Integer:   'Flat Wire Stack Cells'
+Component:Integer:   'Flat Wire Across Cells'
+Component:Logical:   'Flat Wire Stack Along Alpha'
 ! Foil sheet winding: conducting sheets, not a conducting continuum.
 Component:Integer:   'Sheet Cells'
 Component:Integer:   'Sheet Segments'
@@ -1708,6 +1722,14 @@ Component:Logical:   'Foil Sheet Sigma Varies'
 Component:Logical:   'Foil Sheet Stack Along Alpha'
 Component:Real:      'Foil Sheet Stack Extent'
 Component:Real:      'Foil Sheet Element Size'
+! Resolved layout and strand scaling, written back into the Component by Elmer.
+Component:Integer:   'Foil Sheet Cells'
+Component:Integer:   'Foil Sheet Segments'
+Component:Integer:   'Foil Sheet Foils Per Cell'
+Component:Real:      'Foil Sheet Sigma Ref'
+Component:Real:      'Foil Sheet Direction Sign'
+! Marks the transient Xi variables as already declared by the AV solver.
+Solver:Logical:      'Foil Sheet Xi Declared'
 ! Transient strand skin ladder.
 Component:Integer:   'Sheet Skin Ladder Order'
 Component:Logical:   'Homogenization Model'
