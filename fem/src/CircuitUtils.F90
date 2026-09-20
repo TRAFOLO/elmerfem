@@ -2914,23 +2914,41 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> How many strand layers one turn needs at this frequency. One uniform current
-!> layer per turn homogenizes the through-thickness redistribution away, which
-!> is exact while the turn is thin against the skin depth and wrong once it is
-!> not: on W-G1 one layer loses 10 % of Rac at t/delta = 1.4 and 12 % at 4.3,
-!> while three layers hold 1 % and five hold 2 % (DEV-1520 FEMM study). The
-!> thresholds are that study's B3 and B5 columns.
+!> How many strand layers one turn needs at this frequency, and whether the
+!> mesh can carry them. One uniform current layer per turn homogenizes the
+!> through-thickness redistribution away, which is exact while the turn is thin
+!> against the skin depth and wrong once it is not: on W-G1 one layer loses 10 %
+!> of Rac at t/delta = 1.4 and 12 % at 4.3, while three layers hold 1 % and five
+!> hold 2 % (DEV-1520 FEMM study). The thresholds are that study's B3 and B5
+!> columns.
+!>
+!> Sub-layers only pay off when the FE field resolves the flux between the
+!> bands, which is what drives the current from one of them to the next, so
+!> they need an element no larger than the skin depth. On W-G1 h/delta = 0.83 at
+!> 10 kHz gives Rac within 2 % of FEMM, while 2.6 at 100 kHz is 44 % high and
+!> three layers instead of five still leaves 31 % - the criterion is the element
+!> against the skin depth, not the band thickness against the element.
 !------------------------------------------------------------------------------
-  FUNCTION FoilSheetAutoSublayers(tfoil, sgm) RESULT(m)
+  FUNCTION FoilSheetAutoSublayers(tfoil, sgm, elemH) RESULT(m)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    REAL(KIND=dp) :: tfoil, sgm
+    REAL(KIND=dp) :: tfoil, sgm, elemH
     INTEGER :: m
     REAL(KIND=dp) :: omega, delta, ratio, mu0
     REAL(KIND=dp), POINTER :: fptr(:,:)
     LOGICAL :: Found
 
     mu0 = 4.0d-7 * PI
+
+    ! Transient has no single frequency to size the layers with, and the strand
+    ! skin ladder and the reluctivity ladder are derived for one layer per turn.
+    IF (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient') THEN
+      m = 1
+      CALL Info('Circuits_Init', &
+          'Foil sheet transient: automatic sub-layers resolve to one layer per turn', Level=3)
+      RETURN
+    END IF
+
     ! The count fixes the circuit dof layout, so it is resolved once at init.
     ! A SIF that scans several frequencies would keep the first one's choice.
     fptr => ListGetConstRealArray(CurrentModel % Simulation, 'Frequency', Found)
@@ -2942,6 +2960,7 @@ END FUNCTION isComponentName
     omega = GetAngularFrequency(Found = Found)
     IF (.NOT. Found) omega = 0._dp
     ratio = 0._dp
+    delta = HUGE(delta)
     IF (omega > 0._dp .AND. sgm > 0._dp) THEN
       delta = SQRT(2._dp / (omega * mu0 * sgm))
       ratio = tfoil / delta
@@ -2957,6 +2976,14 @@ END FUNCTION isComponentName
     WRITE(Message,'(A,F8.3,A,I0)') 'Foil sheet automatic sub-layers: t/delta = ', ratio, &
         ' gives Sheet Sublayers = ', m
     CALL Info('Circuits_Init', Message, Level=3)
+
+    IF (m > 1 .AND. elemH > delta) THEN
+      WRITE(Message,'(A,F8.3,A)') 'Foil sheet: the coil mesh is too coarse for sub-layers, ' // &
+          'element / skin depth = ', elemH / delta, &
+          '; using one layer per turn and its own skin factor'
+      CALL Info('Circuits_Init', Message, Level=3)
+      m = 1
+    END IF
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetAutoSublayers
 !------------------------------------------------------------------------------
@@ -3309,7 +3336,9 @@ END FUNCTION isComponentName
       sgm = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
       IF (.NOT. (Found .AND. FoundS)) CALL Fatal('Circuits_Init', &
           'Foil sheet: "Sheet Sublayers = 0" needs the thickness and "Sheet Conductivity"!')
-      Comp % nSublayers = FoilSheetAutoSublayers(tfoil / Comp % foilsPerCell, sgm)
+      elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
+      IF (.NOT. Found) elemH = 0._dp
+      Comp % nSublayers = FoilSheetAutoSublayers(tfoil / Comp % foilsPerCell, sgm, elemH)
     END IF
     IF (Comp % nSublayers < 1) &
         CALL Fatal('Circuits_Init','Foil sheet: Sheet Sublayers must be positive!')
