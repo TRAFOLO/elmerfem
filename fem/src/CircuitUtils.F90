@@ -3170,10 +3170,16 @@ END FUNCTION isComponentName
       Comp % nCells = nCellAuto
     END IF
 
-    ! V_e^(1/3) is about half a tetrahedron's edge length, so 3 V_e^(1/3) is
-    ! about one and a half element edges: the narrowest strand the mesh resolves.
+    ! V_e^(1/3) is about half a tetrahedron's edge length, so one strand per
+    ! V_e^(1/3) is about half an element edge. Strands narrower than an element
+    ! are legitimate: FoilSheetPieces clips them exactly, so each still carries
+    ! its own volume and its own current. DEV-1520: the across direction of an
+    ! edgewise flat wire is the wide side of the turn, where the current crowds
+    ! into the inner edge, and resolving it is worth 9 points of Rac at 10 kHz
+    ! and 17 at 100 kHz on W-G1. A foil stack, whose across direction carries no
+    ! such gradient, moves by less than 0.1 %.
     IF (Comp % nSegments <= 0) THEN
-      nSegAuto = NINT(blkH / (3._dp * elemH))
+      nSegAuto = NINT(blkH / elemH)
       Comp % nSegments = MIN(40, MAX(4, nSegAuto))
     END IF
 
