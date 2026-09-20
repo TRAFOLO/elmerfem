@@ -3679,11 +3679,12 @@ END SUBROUTINE LocalConstraintMatrix
     REAL(KIND=dp) :: detJ_loc, rml(3,3), curlA_ip(3), wt, elem_volume
     REAL(KIND=dp) :: bbar(3), y0l(3), rl(6,3), Tl(6,3), mki(6,3)
     REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem, prox_total
-    LOGICAL :: dloc(3), stackalpha_loc
+    LOGICAL :: dloc(3), stackalpha_loc, sheet_loc
     INTEGER :: dstack_loc, dplane_loc(2)
-    INTEGER :: nlad, d, k, idx, eperm(3), elem_perm_pl
+    INTEGER :: nlad, d, k, idx, eperm(3), elem_perm_pl, any_sheet
 
     prox_total = 0._dp
+    any_sheet = 0
 
     DO el_idx = 1, GetNOFActive()
       el => GetActiveElement(el_idx)
@@ -3694,11 +3695,13 @@ END SUBROUTINE LocalConstraintMatrix
       IF (.NOT. found_loc) CYCLE
 
       ! Same gates and direction choice as the assembly.
+      sheet_loc = .FALSE.
       IF (coil_type_loc == 'stranded') THEN
         IF (.NOT. (GetLogical(cParams, 'Homogenization Model', found_loc) .AND. found_loc)) CYCLE
         IF (.NOT. (GetLogical(cParams, 'Transient Homogenization', found_loc) .AND. found_loc)) CYCLE
         dloc = [ .TRUE., .TRUE., .FALSE. ]
       ELSE IF (coil_type_loc == 'foil sheet') THEN
+        sheet_loc = .TRUE.
         IF (.NOT. (GetLogical(cParams, 'Homogenization Model', found_loc) .AND. found_loc)) CYCLE
         IF (.NOT. ListCheckPresent(cParams, 'Nu 33 Residues')) CYCLE
         stackalpha_loc = GetLogical(cParams, 'Foil Sheet Stack Along Alpha', found_loc)
@@ -3837,7 +3840,10 @@ END SUBROUTINE LocalConstraintMatrix
             p_loss_elem = p_loss_elem - rl(k,d) * Tl(k,d) * xdot**2
           END DO
         END DO
-        prox_total = prox_total + p_loss_elem * elem_volume
+        IF (sheet_loc) THEN
+          prox_total = prox_total + p_loss_elem * elem_volume
+          any_sheet = 1
+        END IF
         IF (ASSOCIATED(prox_loss_var)) THEN
           elem_perm_pl = prox_loss_var % Perm(el % ElementIndex)
           IF (elem_perm_pl > 0) prox_loss_var % Values(elem_perm_pl) = p_loss_elem
@@ -3845,10 +3851,14 @@ END SUBROUTINE LocalConstraintMatrix
       END IF
     END DO
 
-    ! Publish the block total so the circuit side can fold it into the terminal
-    ! power. Each partition holds its own share.
-    prox_total = ParallelReduction(prox_total)
-    CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet proximity loss', prox_total)
+    ! Publish the foil sheet block total so the circuit side can fold it into
+    ! the terminal power. Each partition holds its own share. A model without a
+    ! foil sheet keeps exactly the scalars it had before.
+    any_sheet = ParallelReduction(any_sheet, 2)
+    IF (any_sheet > 0) THEN
+      prox_total = ParallelReduction(prox_total)
+      CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet proximity loss', prox_total)
+    END IF
 
     ! Record the dt just used, so the next Schur block can form k = dt/dt_prev.
     dt_prev = dt

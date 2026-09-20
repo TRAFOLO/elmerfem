@@ -622,6 +622,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: B(2,3), E(2,3), JatIP(2,3), VP_ip(2,3), JXBatIP(2,3), CC_J(2,3), HdotB, LMSol(2)
    REAL(KIND=dp) :: ldetJ,detJ, C_ip, ST(3,3), Omega, ThinLinePower, Power, Energy(3), w_dens
    REAL(KIND=dp) :: HomogPower   ! Im(Nu) proximity loss, a part of Power
+   INTEGER :: HomogPowerSeen     ! 1 where a foil sheet contributed to it
    REAL(KIND=dp) :: localThickness
    REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ValAtIP
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
@@ -1090,7 +1091,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    C = 0._dp; PR=0._dp
    Magnetization = 0._dp
 
-   Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp
+   Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp; HomogPowerSeen = 0
    IF(.NOT. ConstantMassMatrixInUse ) THEN
      CALL DefaultInitialize()
    END IF
@@ -2335,6 +2336,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            IF (CoilType == 'foil sheet') THEN
              Power = Power + Coeff
              HomogPower = HomogPower + Coeff
+             HomogPowerSeen = 1
            END IF
 
            IF ( ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL) ) THEN
@@ -2921,10 +2923,14 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
    ! The Im(Nu) homogenization loss of foil sheet blocks. It is already inside
    ! 'res: Eddy current power'; this splits it out so that the strand Joule loss
-   ! can be read off as the difference.
-   WRITE(Message,'(A,ES15.6)') 'Homogenization loss: ', HomogPower
-   CALL Info( Caller, Message )
-   CALL ListAddConstReal( Model % Simulation, 'res: Homogenization loss', HomogPower )
+   ! can be read off as the difference. Published only when a foil sheet block
+   ! produced it, so that every other model keeps the scalars it had before.
+   IF( Parallel ) HomogPowerSeen = ParallelReduction(HomogPowerSeen, 2)
+   IF( HomogPowerSeen > 0 ) THEN
+     WRITE(Message,'(A,ES15.6)') 'Homogenization loss: ', HomogPower
+     CALL Info( Caller, Message )
+     CALL ListAddConstReal( Model % Simulation, 'res: Homogenization loss', HomogPower )
+   END IF
 
    IF( LayerBC ) THEN
      WRITE(Message,*) 'Surface current power (the Joule effect): ', SurfPower
