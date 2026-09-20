@@ -2756,17 +2756,13 @@ END FUNCTION isComponentName
     END IF
 
     Transient = (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient')
-    IF (Transient) THEN
-      ! DEV-1513: be honest about where this is validated. A-C of the transient
-      ! work are verified against the harmonic twin on small meshes, but the
-      ! time-domain solve does not converge from a zero start on production
-      ! meshes; see handover item 1o for the measurements and the closed routes.
-      CALL Warn('Circuits_Init', 'Transient foil sheet: validated on small ' // &
-          'meshes only; the time-domain solve on production meshes does not ' // &
-          'converge from a zero start (see DEV-1513 handover 1o); use ' // &
-          'harmonic for production results')
-    END IF
 
+    ! DEV-1513 reported that the time-domain solve does not converge from a zero
+    ! start on production meshes (handover item 1o). That was the acceptance
+    ! twins, not the kernel: the harmonic-to-transient converter renamed the AV
+    ! variable but left the Dirichlet conditions spelled for the two-component
+    ! complex one, so the twins ran with no condition on A at all. With the
+    ! conditions translated the production F-G1 half model converges.
     IF (Transient) THEN
       IF (.NOT. HavePhys) CALL Fatal('Circuits_Init', &
           'Foil sheet transient needs "Foil Thickness", "Fill Factor" and "Sheet Conductivity"!')
