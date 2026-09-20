@@ -149,13 +149,10 @@ CONTAINS
       IF (.NOT. found) CYCLE
       IF (TRIM(ctype) /= 'foil sheet') CYCLE
 
-      ! On by default in transient; the keyword only switches the ladder maths
-      ! off. The per strand state is allocated either way, because the loss
-      ! bookkeeping uses its resistance weights.
+      ! Without a foil time constant there is no ladder, but the per strand
+      ! state is still allocated: the loss bookkeeping uses its resistance
+      ! weights whether the ladder runs or not.
       ladderon = .TRUE.
-      IF (ListCheckPresent(CompParams,'Sheet Skin Ladder')) &
-          ladderon = GetLogical(CompParams,'Sheet Skin Ladder', found)
-
       tau0 = GetConstReal(CompParams, 'Foil Sheet Tau0', found)
       IF (.NOT. found .OR. tau0 <= 0._dp) THEN
         ladderon = .FALSE.

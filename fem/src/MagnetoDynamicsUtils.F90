@@ -94,7 +94,11 @@
       CASE ('flat wire')
         CALL FlatWireConductivity(Element, n, Tcoef)
       CASE ('foil sheet')
-        CALL FoilSheetConductivity(Element, n, Tcoef)
+        ! The block carries no volumetric eddy current: the sheets conduct
+        ! through the circuit coupling with the complex sheet conductivity
+        ! 'Sigma 33', and their intra-turn proximity loss is in 'Nu 22' /
+        ! 'Nu 33'. The material 'Electric Conductivity' is not used here.
+        Tcoef = 0._dp
       END SELECT
     END IF
  
@@ -140,58 +144,6 @@
   END SUBROUTINE FlatWireConductivity
 !------------------------------------------------------------------------------
 
-!------------------------------------------------------------------------------
-!> Foil sheet: the block carries no physical volumetric eddy current. Its
-!> conduction is in the circuit coupling (the complex sheet conductivity
-!> Sigma 33) and its intra-foil proximity loss in Nu 22 / Nu 33, so the material
-!> 'Electric Conductivity' is deliberately ignored here.
-!>
-!> 'Sheet Regularization' (default 0) adds back an in-plane conductivity of that
-!> fraction of Sigma 33. It is a knob for the known E1 limitation that the strand
-!> source is piecewise constant over the strands and hence not exactly divergence
-!> free, which leaves the coupled solve stagnating around 1e-6 for more than one
-!> cell. Measured on circuits_harmonic_foilsheet: 1e-4 does not help and 1e-1 and
-!> above short the coil out, so the default is off; kept for experiments.
-!------------------------------------------------------------------------------
-  SUBROUTINE FoilSheetConductivity(Element, n, Tcoef)
-!------------------------------------------------------------------------------
-    USE CircuitUtils, ONLY: GetComponentParams
-    IMPLICIT NONE
-    TYPE(Element_t), POINTER :: Element
-    INTEGER :: n
-    REAL(KIND=dp) :: Tcoef(3,3,n)
-    TYPE(ValueList_t), POINTER :: CompParams
-    REAL(KIND=dp) :: eps, sig, signorm
-    LOGICAL :: Found
-
-    Tcoef = 0._dp
-    CompParams => GetComponentParams(Element)
-    IF (.NOT. ASSOCIATED(CompParams)) RETURN
-
-    ! Local directions: 1 = across the stack, 2 and 3 in the foil plane.
-    ! The two knobs below are independent and both default to off.
-
-    ! In-plane regularisation. Kept for experiments; it shorts the winding at
-    ! any useful size, so it is not a production setting.
-    eps = GetConstReal(CompParams, 'Sheet Regularization', Found)
-    IF (Found .AND. eps > 0._dp) THEN
-      sig = GetConstReal(CompParams, 'Sigma 33', Found)
-      IF (Found) THEN
-        Tcoef(2,2,1:n) = eps * sig
-        Tcoef(3,3,1:n) = eps * sig
-      END IF
-    END IF
-
-    ! Conductivity along the stacking normal only. It cannot short the coil
-    ! because there is no in-plane path, and in an axisymmetric winding E_alpha
-    ! vanishes so it carries no current at all. Numerically it supplies the
-    ! sigma dA/dt mass term on the alpha component inside the block, which is a
-    ! gauge condition in the shape of a material.
-    signorm = GetConstReal(CompParams, 'Sheet Normal Conductivity', Found)
-    IF (Found .AND. signorm > 0._dp) Tcoef(1,1,1:n) = signorm
-!------------------------------------------------------------------------------
-  END SUBROUTINE FoilSheetConductivity
-!------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------ 
   FUNCTION GetCMPLXElectricConductivityTensor(Element, n, CoilBody, CoilType) &

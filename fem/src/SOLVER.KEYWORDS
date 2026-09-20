@@ -1692,9 +1692,9 @@ Component:Integer:   'Sheet Segments'
 ! DEV-1520: strand layers through the thickness of one turn, 0 = automatic.
 Component:Integer:   'Sheet Sublayers'
 Component:Integer:   'Foil Sheet Sublayers'
-Component:Logical:   'Sheet Sublayer Nu Isotropic'
+! Fallback quadrature for coil meshes that are not linear tetrahedra, where the
+! exact strand clipping does not apply. Unset (0) selects the clipping.
 Component:Integer:   'Sheet Integration Points'
-Component:Real:      'Sheet Regularization'
 ! Physics the SIF writer supplies; Elmer derives tau0, the sheet conductivity
 ! and the in-plane reluctivity from these.
 Component:Real:      'Foil Thickness'
@@ -1708,10 +1708,7 @@ Component:Logical:   'Foil Sheet Sigma Varies'
 Component:Logical:   'Foil Sheet Stack Along Alpha'
 Component:Real:      'Foil Sheet Stack Extent'
 Component:Real:      'Foil Sheet Element Size'
-! Transient strand skin ladder (DEV-1513 E2).
-Component:Logical:   'Sheet Skin Ladder'
-Component:Logical:   'Sheet Nu Ladder'
-Component:Real   :   'Sheet Normal Conductivity'
+! Transient strand skin ladder.
 Component:Integer:   'Sheet Skin Ladder Order'
 Component:Logical:   'Homogenization Model'
 Component:Real:      'Nu 11'

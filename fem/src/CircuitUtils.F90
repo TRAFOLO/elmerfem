@@ -3005,7 +3005,7 @@ END FUNCTION isComponentName
     INTEGER :: nSub
     REAL(KIND=dp) :: tau0, sdc, omega, mu0, tsub
     COMPLEX(KIND=dp) :: u, th, sigs, mue, nue
-    LOGICAL :: Homog, Found, FoundFreq, NuIso
+    LOGICAL :: Homog, Found, FoundFreq
     INTEGER :: dStack, dPlane(2), d
     COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
 
@@ -3055,27 +3055,15 @@ END FUNCTION isComponentName
       mue = mu0 * ((1._dp - ff) + ff * th)
       nue = 1._dp / mue
       CALL FoilSheetNuDirections(StackAlongAlpha, dStack, dPlane)
-      NuIso = .FALSE.
-      IF (nSub > 1) NuIso = GetLogical(CompParams, 'Sheet Sublayer Nu Isotropic', Found)
-      IF (NuIso) THEN
-        ! Diagnostic form: the FEMM study's variant B puts the sub-layer plate
-        ! response on every field component. Physically the stacking normal
-        ! drives no eddy loop in a thin layer, so this is not the default.
-        DO d = 1, 3
-          CALL ListAddConstReal(CompParams, FoilSheetNuKey(d), REAL(nue, KIND=dp))
-          CALL ListAddConstReal(CompParams, FoilSheetNuKey(d)//' im', AIMAG(nue))
-        END DO
-        WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet Nu (isotropic, sub-layers) = ', &
-            REAL(nue, KIND=dp), AIMAG(nue), ' i'
-      ELSE
-        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dStack), 1._dp / mu0)
-        DO d = 1, 2
-          CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d)), REAL(nue, KIND=dp))
-          CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d))//' im', AIMAG(nue))
-        END DO
-        WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet '//FoilSheetNuKey(dPlane(1))// &
-            ' = '//FoilSheetNuKey(dPlane(2))//' = ', REAL(nue, KIND=dp), AIMAG(nue), ' i'
-      END IF
+      ! A thin layer drives no eddy loop for a field along its own normal, so
+      ! only the two in-plane directions get the complex stack permeability.
+      CALL ListAddConstReal(CompParams, FoilSheetNuKey(dStack), 1._dp / mu0)
+      DO d = 1, 2
+        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d)), REAL(nue, KIND=dp))
+        CALL ListAddConstReal(CompParams, FoilSheetNuKey(dPlane(d))//' im', AIMAG(nue))
+      END DO
+      WRITE(Message,'(A,ES12.5,SP,ES12.5,A)') 'Foil sheet '//FoilSheetNuKey(dPlane(1))// &
+          ' = '//FoilSheetNuKey(dPlane(2))//' = ', REAL(nue, KIND=dp), AIMAG(nue), ' i'
       CALL Info('Circuits_Init', Message, Level=3)
     END IF
 !------------------------------------------------------------------------------
@@ -3134,7 +3122,7 @@ END FUNCTION isComponentName
     REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, mu0
     REAL(KIND=dp) :: nuinf, rr(6), tt(6), arr(6,1)
     INTEGER :: nlad, nlk, dStack, dPlane(2), d
-    LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient, NuLadder
+    LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient
     LOGICAL :: SigmaVaries
 
     mu0 = 4.0d-7 * PI
@@ -3208,22 +3196,7 @@ END FUNCTION isComponentName
 
       Homog = GetLogical(CompParams, 'Homogenization Model', Found)
       IF (.NOT. Found) Homog = .FALSE.
-      ! DEV-1513: 'Sheet Nu Ladder' (default True) switches the transient
-      ! proximity ladder off, leaving the block at the constant real air
-      ! reluctivity. With no 'Nu 22 Residues' written, the assembly gate in
-      ! WhitneyAVSolver never turns on, so there are no Xi states and no
-      ! history injection either.
-      NuLadder = .TRUE.
-      IF (ListCheckPresent(CompParams,'Sheet Nu Ladder')) &
-          NuLadder = GetLogical(CompParams, 'Sheet Nu Ladder', Found)
-      IF (Homog .AND. .NOT. NuLadder) THEN
-        CALL ListAddConstReal(CompParams, 'Nu 11', 1._dp/mu0)
-        CALL ListAddConstReal(CompParams, 'Nu 22', 1._dp/mu0)
-        CALL ListAddConstReal(CompParams, 'Nu 33', 1._dp/mu0)
-        CALL Info('Circuits_Init', &
-            'Foil sheet Nu ladder disabled: block held at constant real 1/mu0', Level=5)
-      END IF
-      IF (Homog .AND. NuLadder .AND. .NOT. ListCheckPresent(CompParams,'Nu 33 Residues')) THEN
+      IF (Homog .AND. .NOT. ListCheckPresent(CompParams,'Nu 33 Residues')) THEN
         nlad = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
         IF (.NOT. Found) nlad = 4
         CALL FoilSheetNuFoster(tau0, ff, nlad, nuinf, rr(1:nlad), tt(1:nlad))

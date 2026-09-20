@@ -1655,12 +1655,9 @@ END BLOCK
               SUM(MATMUL(Nu, RotWBasis(j,:))*RotWBasis(i,:))*detJ*IP%s(t)
 
            ! Compute the conductivity term <j * omega * C A,eta> 
-           ! for stiffness matrix (anisotropy taken into account)
+           ! for stiffness matrix (anisotropy taken into account). C is zero for
+           ! a foil sheet, which carries no volumetric eddy current either.
            ! ----------------------------------------------------
-           ! A foil sheet block carries no physical volumetric eddy current
-           ! either, but its C is the small 'Sheet Regularization' tensor of
-           ! FoilSheetConductivity, which has to stay in to keep the curl-curl
-           ! operator of the block regular.
            IF (CoilType /= 'stranded') DAMP(p,q) = DAMP(p,q) + &
                 SUM(MATMUL(C, WBasis(j,:))*WBasis(i,:))*detJ*IP % s(t)
 
