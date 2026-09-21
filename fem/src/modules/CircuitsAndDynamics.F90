@@ -1348,6 +1348,19 @@ CONTAINS
 
     CALL GetElementNodes(Nodes)
     nd = GetElementDOFs(Indexes,Element,ASolver)
+
+    ! Each branch below sets only what its own scheme needs, while the assembly
+    ! loop reads both sets. Default to first order plus constant-average-
+    ! acceleration Newmark (alpha=0) so that no path reads an undefined value
+    ! and no reader divides by zero.
+    tscl = 1.0_dp
+    prevV = 0.0_dp
+    alpha = 0.0_dp
+    beta = 0.25_dp
+    gamma = 0.5_dp
+    delta = 0.0_dp
+    Permittivity = 0.0_dp
+
     IF (ASolver % TimeOrder==2) THEN
       CALL GetLocalSolution(pPot,UElement=Element,USolver=ASolver,tstep=-3)
       CALL GetLocalSolution(pVel,UElement=Element,USolver=ASolver,tstep=-4)
@@ -1970,6 +1983,7 @@ CONTAINS
     DO t=1,IP % n
       grads_coeff = -1._dp
       circ_eq_coeff = 1._dp
+      localR = 0._dp  ! the SELECT below only covers dim 2 and 3
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
@@ -2960,6 +2974,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     DO t=1,IP % n
  
       circ_eq_coeff = 1._dp
+      cmplx_val = 0._dp  ! only dim 2 and 3 have a term below
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
@@ -3138,6 +3153,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     DO t=1,IP % n
       grads_coeff = -1._dp
       circ_eq_coeff = 1._dp
+      invZs = 0._dp  ! the surface impedance is set below only when SkinBc
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
@@ -3721,6 +3737,9 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     DO t=1,IP % n
       grads_coeff = -1._dp
       circ_eq_coeff = 1._dp
+      ! the SELECT below and the terms further down only cover dim 2 and 3
+      localR = 0._dp
+      val = 0._dp
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
