@@ -1614,6 +1614,40 @@ CONTAINS
   END SUBROUTINE FoilSheetQuadStrand
 !------------------------------------------------------------------------------
 
+!------------------------------------------------------------------------------
+!> DC resistance of a strand piece of volume wgt: the uniform-J block value
+!> N_j^2 dV / (ff sigma VoltageFactor) that the foil winding block model
+!> reports, so the resistance the component publishes is the same at every
+!> frequency and for every strand layout. One band per turn smears the copper
+!> over the pitch, so 'Foil Sheet Sigma DC' is already ff*sigma and the pieces
+!> fill the block; copper only bands carry the copper conductivity and visit
+!> only ff of the block, hence the second ff.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetDcResistance(Comp, CompParams, wgt) RESULT(r)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Component_t) :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    REAL(KIND=dp) :: wgt, r
+
+    REAL(KIND=dp) :: sdc, ff
+    LOGICAL :: Found
+
+    sdc = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
+    IF (.NOT. Found .OR. sdc <= 0._dp) sdc = Comp % SigmaRef
+
+    ff = Comp % FillFactor
+    IF (ff <= 0._dp) ff = 1._dp
+
+    IF (Comp % nSublayers > 1) THEN
+      r = Comp % N_j**2 * wgt / (ff**2 * sdc * Comp % VoltageFactor)
+    ELSE
+      r = Comp % N_j**2 * wgt / (sdc * Comp % VoltageFactor)
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetDcResistance
+!------------------------------------------------------------------------------
+
 
 END MODULE CircuitUtils
 

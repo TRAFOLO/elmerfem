@@ -1762,10 +1762,9 @@ CONTAINS
       gres = wgt*SUM(tvec*tvec)
       Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
 
-      ! I * R, where R = (1/sigma_s * js,js):
-      ! -------------------------------------
-      Comp % Resistance = Comp % Resistance + &
-          Comp % N_j**2 * wgt/sigma_s/Comp % VoltageFactor
+      ! Reported component resistance: the DC value, the same for every layout.
+      ! -----------------------------------------------------------------------
+      Comp % Resistance = Comp % Resistance + FoilSheetDcResistance(Comp, CompParams, wgt)
 
       ! Strand equation and cell current balance
       ! ----------------------------------------
@@ -3494,10 +3493,10 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       gres = wgt*SUM(tvec*tvec)
       Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
 
-      ! I * R, where R = (1/sigma_s * js,js):
-      ! -------------------------------------
-      Comp % Resistance = Comp % Resistance + &
-          REAL(Comp % N_j**2 * wgt/sigma_s/Comp % VoltageFactor, KIND=dp)
+      ! Reported component resistance: the DC value, because Re(1/sigma_s) is
+      ! the AC plate resistance and would drift with the frequency.
+      ! ---------------------------------------------------------------------
+      Comp % Resistance = Comp % Resistance + FoilSheetDcResistance(Comp, CompParams, wgt)
 
       ! (R1) strand equation
       ! --------------------
