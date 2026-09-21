@@ -4084,18 +4084,20 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
    ! Advance the foil sheet strand skin ladder now that the strand
    ! currents of this timestep are known. crt is already reduced over the
    ! partitions, so every partition advances the same states.
-   IF (Transient .AND. fskin_allocated) THEN
+   IF (Transient) THEN
      BLOCK
-       INTEGER :: ci, kc, js, vvid, bdf, nce, nse, idx
-       LOGICAL :: gotid, gotp, anyskin
+       INTEGER :: ci, kc, js, vvid, bdf, nce, nse, idx, nskin, nFSkin
+       LOGICAL :: gotid, gotp
        TYPE(ValueList_t), POINTER :: CPar
        REAL(KIND=dp), ALLOCATABLE :: ynew(:)
        REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pexcess, Pprox
        bdf = FoilSkinBDFOrder()
-       Pstrand = 0._dp; Pexcess = 0._dp; anyskin = .FALSE.
-       DO ci = 1, SIZE(FSkin)
+       Pstrand = 0._dp; Pexcess = 0._dp; nskin = 0
+       nFSkin = 0
+       IF (fskin_allocated) nFSkin = SIZE(FSkin)
+       DO ci = 1, nFSkin
          IF (.NOT. FSkin(ci) % Alloc) CYCLE
-         anyskin = .TRUE.
+         nskin = 1
          CPar => CurrentModel % Components(ci) % Values
          IF (.NOT. ASSOCIATED(CPar)) CYCLE
          vvid = GetInteger(CPar, 'Circuit Voltage Variable Id', gotid)
@@ -4126,8 +4128,13 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
        ! for this coil type in transient - it reconstructs J from the strand
        ! dofs against the DC conductivity and overstates the loss by orders of
        ! magnitude. TRAFOLO reads the transient Rac from this scalar.
-       IF (anyskin) THEN
-         Pstrand = ParallelReduction(Pstrand)
+       ! Both of these are collective, so every partition has to reach them,
+       ! including one whose mesh carries no sheet element and whose ladder
+       ! state is therefore not allocated. The "is there a sheet" flag is
+       ! reduced first, so the branch below is taken on all ranks or on none.
+       nskin = ParallelReduction(nskin, 2)
+       Pstrand = ParallelReduction(Pstrand)
+       IF (nskin > 0) THEN
          Pprox = GetConstReal(Model % Simulation, 'res: sheet proximity loss', gotp)
          IF (.NOT. gotp) Pprox = 0._dp
          CALL ListAddConstReal(Model % Simulation, 'res: sheet strand loss', Pstrand)

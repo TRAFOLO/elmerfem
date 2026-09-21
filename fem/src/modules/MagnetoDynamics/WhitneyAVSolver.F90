@@ -476,7 +476,10 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   ! BDF coefficients (variable-dt aware). xi_dot ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1})/bdf_dt.
   ! BDF-1: a1=1, a2=-1, a3=0, bdf_dt=dt
   ! BDF-2: a1=(1+2k)/(1+k), a2=-(1+k), a3=k^2/(1+k), bdf_dt=dt with k=dt/dt_prev
-  REAL(KIND=dp) :: bdf_alpha_1, bdf_alpha_2, bdf_alpha_3, bdf_dt, MkFos
+  ! Zero until an assembly sets them: a partition with no homogenized element
+  ! still enters the Xi update, and a stale dt there would divide by garbage.
+  REAL(KIND=dp) :: bdf_alpha_1 = 0.0_dp, bdf_alpha_2 = 0.0_dp, bdf_alpha_3 = 0.0_dp
+  REAL(KIND=dp) :: bdf_dt = 0.0_dp, MkFos
   REAL(KIND=dp) :: dt_prev = -1.0_dp
   ! fos_* are the ladder itself; hcoef_* are this timestep's Schur history
   ! weights, so that the constitutive law at an integration point reads
@@ -802,10 +805,19 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
 
   ! Slice 1b: advance the transient-homogenization auxiliary state Xi to t^{n+1}
   ! using the just-converged A^{n+1}. Runs only in transient mode and only if
-  ! the Xi exported variables exist (i.e. some Component had transient homog).
-  IF (Transient .AND. (ASSOCIATED(XiD(1) % var) .OR. ASSOCIATED(XiD(2) % var) .OR. &
-                       ASSOCIATED(XiD(3) % var))) THEN
-    CALL UpdateTransientHomogXiState()
+  ! the Xi exported variables exist on some partition (i.e. some Component had
+  ! transient homogenization).
+  ! The Xi variables are located in the assembly, which a partition holding no
+  ! homogenized element never reaches, while the routine ends in a parallel
+  ! reduction: reduce the flag so that every partition makes the same call.
+  IF (Transient) THEN
+    BLOCK
+      INTEGER :: xihere
+      xihere = 0
+      IF (ASSOCIATED(XiD(1) % var) .OR. ASSOCIATED(XiD(2) % var) .OR. &
+          ASSOCIATED(XiD(3) % var)) xihere = 1
+      IF (ParallelReduction(xihere, 2) > 0) CALL UpdateTransientHomogXiState()
+    END BLOCK
   END IF
 
   IF(.NOT. UseTorqueTol) CALL CalculateLumpedParameters()
@@ -3733,6 +3745,9 @@ END SUBROUTINE LocalConstraintMatrix
         IF (eperm(d)*nlad > SIZE(XiD(d) % var % Values)) eperm(d) = 0
       END DO
       IF (ANY(dloc .AND. eperm <= 0)) CYCLE
+      ! Set by the assembly of this call; zero means this partition assembled no
+      ! homogenized element and has no step to advance.
+      IF (bdf_dt <= 0.0_dp) CYCLE
 
       y0l = 0._dp; rl = 0._dp; Tl = 1._dp
       IF (dloc(1)) CALL GetFosterLadder(cParams, 'Nu 11', nlad, y0l(1), rl(1:nlad,1), Tl(1:nlad,1))

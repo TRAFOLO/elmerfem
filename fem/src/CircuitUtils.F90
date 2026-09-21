@@ -1081,9 +1081,19 @@ CONTAINS
     IMPLICIT NONE
     TYPE(Component_t), POINTER :: Comp
     REAL(KIND=dp) :: w, wmax, bs1, bs2, bandflux
-    INTEGER :: k, j, ind, nempty, nLayers
+    INTEGER :: k, j, ind, nempty, nLayers, nw
 
-    IF (.NOT. ALLOCATED(Comp % StrandWeight)) RETURN
+    ! One reduction per strand, so the trip count has to be the same on every
+    ! partition. Reduce the length first and make the array match it, rather
+    ! than returning early where the state happens to be missing.
+    nw = 0
+    IF (ALLOCATED(Comp % StrandWeight)) nw = SIZE(Comp % StrandWeight)
+    nw = ParallelReduction(nw, 2)
+    IF (nw <= 0) RETURN
+    IF (.NOT. ALLOCATED(Comp % StrandWeight)) THEN
+      ALLOCATE(Comp % StrandWeight(nw))
+      Comp % StrandWeight = 0._dp
+    END IF
 
     wmax = 0._dp
     DO ind = 1, SIZE(Comp % StrandWeight)
