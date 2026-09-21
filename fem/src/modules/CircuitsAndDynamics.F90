@@ -2148,7 +2148,9 @@ CONTAINS
   SUBROUTINE SetDynamicAngle()
     TYPE(Variable_t), POINTER :: AngVar, VeloVar
     TYPE(ValueList_t), POINTER :: Simulation
-    REAL(KIND=dp) :: dt, ang, velo, ang0, velo0, imom, torq    
+    ! dt is the timestep of the host routine: a local of that name would shadow
+    ! it and never be given a value.
+    REAL(KIND=dp) :: ang, velo, ang0, velo0, imom, torq
     INTEGER :: tStep, tStepPrev = 0
     LOGICAL :: Found
     
@@ -2163,6 +2165,12 @@ CONTAINS
       CALL Fatal('SetRotation','Variable > Rotor Velo < does not exist!')
     END IF
     
+    ! Start from the current state: the branch that takes the angle from the
+    ! simulation section and the one that finds no torque both fall through to
+    ! the writes below, which then put back what they read.
+    ang = AngVar % Values(1)
+    velo = VeloVar % Values(1)
+
     Simulation => GetSimulation()
 
     IF( ListCheckPresent( Model % Simulation,'Rotor Angle') ) THEN
