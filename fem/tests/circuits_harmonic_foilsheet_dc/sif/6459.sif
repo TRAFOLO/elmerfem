@@ -255,7 +255,7 @@ Boundary Condition 7  !---- Beta0
    Target Boundaries = $ A1_beta0
    Body 3: Beta = Real 0
 End
-Solver 10 :: Reference Norm = Real 5.424450959557E-05
+Solver 10 :: Reference Norm = Real 5.424207497831E-05
 Solver 10 :: Reference Norm Tolerance = Real 1E-7
 $fprintf( stderr, "TEST CASE 1\n");
 RUN

@@ -242,7 +242,7 @@ Boundary Condition 5  !---- Beta0
 End
 Solver 6 :: Reference Norm = Real 6.35524E-08
 Solver 6 :: Reference Norm Tolerance = Real 1E-3
-Solver 7 :: Reference Norm = Real 39.1741
+Solver 7 :: Reference Norm = Real 38.7467119
 Solver 7 :: Reference Norm Tolerance = Real 1E-3
 $fprintf( stderr, "TEST CASE 1\n");
 RUN

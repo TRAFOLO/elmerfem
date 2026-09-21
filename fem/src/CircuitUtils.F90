@@ -1321,25 +1321,36 @@ CONTAINS
 !> The outermost cells are open ended on purpose, matching the clamping in
 !> FoilSheetStrand, so nodes that fall slightly outside [0,1] still belong to
 !> the first or last strand instead of being dropped.
+!>
+!> With copper only bands the strand pieces cover the fill factor of the
+!> element, not all of it. WithGaps additionally emits the two insulation
+!> margins of every turn as pieces of strand 0, so that the pieces tile the
+!> element and integrate the block quantities (the magnetic energy, the
+!> homogenization loss) as exactly as they integrate the strand ones. The post
+!> processing needs that; the circuit kernels only look at the strands.
 !------------------------------------------------------------------------------
   SUBROUTINE FoilSheetPieces(nCells, nSegments, aNod, bNod, nPiece, pCell, pSeg, pVol, pBary, &
-      nSublayers, ff)
+      nSublayers, ff, WithGaps)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     INTEGER :: nCells, nSegments, nPiece, pCell(:), pSeg(:)
     REAL(KIND=dp) :: aNod(4), bNod(4), pVol(:), pBary(:,:)
     INTEGER, OPTIONAL :: nSublayers
     REAL(KIND=dp), OPTIONAL :: ff
+    LOGICAL, OPTIONAL :: WithGaps
 
     INTEGER, PARAMETER :: MaxTet = 96
     REAL(KIND=dp) :: tets(4,4,MaxTet), da, db, vol, vtot, ctot(4), plane(4)
-    REAL(KIND=dp) :: fillf, s1, s2
-    INTEGER :: k, j, l, ls, msub, kmin, kmax, jmin, jmax, i, v, ntet
+    REAL(KIND=dp) :: fillf, s1, s2, marg
+    INTEGER :: k, j, l, ls, msub, kmin, kmax, jmin, jmax, i, v, ntet, g
+    LOGICAL :: Gaps
 
     msub = 1
     IF (PRESENT(nSublayers)) msub = nSublayers
     fillf = 1._dp
     IF (PRESENT(ff)) fillf = ff
+    Gaps = .FALSE.
+    IF (PRESENT(WithGaps)) Gaps = WithGaps
 
     da = 1._dp / nCells
     db = 1._dp / nSegments
@@ -1405,6 +1416,63 @@ CONTAINS
             pVol(nPiece)  = vtot
             pBary(:,nPiece) = ctot / vtot
           END DO
+        END DO
+      END DO
+
+      marg = 0.5_dp * (1._dp - fillf) * da
+      IF (.NOT. Gaps .OR. marg <= 0._dp) RETURN
+
+      ! The insulation margins, g = 1 below the copper of turn k and g = 2
+      ! above it. The margin of the first turn is open below and that of the
+      ! last one open above, as the band index is for a point outside [0,1].
+      DO k = kmin, kmax
+        DO g = 1, 2
+          IF (g == 1) THEN
+            s1 = REAL(k-1,dp) * da; s2 = s1 + marg
+          ELSE
+            s2 = REAL(k,dp) * da;   s1 = s2 - marg
+          END IF
+
+          ntet = 1
+          tets(:,:,1) = 0._dp
+          DO v = 1, 4
+            tets(v,v,1) = 1._dp
+          END DO
+
+          IF (.NOT. (g == 1 .AND. k == 1)) THEN
+            plane = aNod - s1
+            CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+          END IF
+          IF (ntet > 0 .AND. .NOT. (g == 2 .AND. k == nCells)) THEN
+            plane = s2 - aNod
+            CALL ClipTetsByHalfSpace(tets, ntet, plane, MaxTet)
+          END IF
+          IF (ntet <= 0) CYCLE
+
+          vtot = 0._dp
+          ctot = 0._dp
+          DO i = 1, ntet
+            vol = TetVolumeFraction(tets(:,:,i))
+            IF (vol <= 0._dp) CYCLE
+            vtot = vtot + vol
+            DO v = 1, 4
+              ctot = ctot + 0.25_dp * vol * tets(:,v,i)
+            END DO
+          END DO
+          IF (vtot <= 1.0d-14) CYCLE
+
+          IF (nPiece >= SIZE(pCell)) THEN
+            WRITE(Message,'(A,I0,A,I0,A,I0,A,I0,A)') 'An element straddles more than ', &
+                SIZE(pCell), ' strands of the ', nCells, ' x ', msub, ' x ', nSegments, ' layout'
+            CALL Error('FoilSheetPieces', Message)
+            CALL Fatal('FoilSheetPieces', &
+                'Lower "Sheet Sublayers" / "Sheet Segments" or refine the coil mesh!')
+          END IF
+          nPiece = nPiece + 1
+          pCell(nPiece) = 0
+          pSeg(nPiece)  = 0
+          pVol(nPiece)  = vtot
+          pBary(:,nPiece) = ctot / vtot
         END DO
       END DO
       RETURN
@@ -1526,25 +1594,63 @@ CONTAINS
     REAL(KIND=dp) :: sStack(:), sAcross(:)
     TYPE(FoilSheetQuad_t) :: Q
 
+    CALL FoilSheetLayoutQuadrature(Comp % nCells, Comp % nSegments, Comp % nSublayers, &
+        Comp % FillFactor, CompParams, Element, nn, sStack, sAcross, Q)
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetQuadrature
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> The same for a caller that knows the strand layout but holds no component,
+!> the post processing being the one. WithGaps asks for the insulation pieces
+!> as well (see FoilSheetPieces) and Fallback lets a caller with a Gauss rule
+!> of its own take the element back instead of dying on it.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetLayoutQuadrature(nCells, nSegments, nSublayers, ff, CompParams, &
+      Element, nn, sStack, sAcross, Q, WithGaps, Fallback)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSegments, nSublayers, nn
+    REAL(KIND=dp) :: ff
+    TYPE(ValueList_t), POINTER :: CompParams
+    TYPE(Element_t), POINTER :: Element
+    REAL(KIND=dp) :: sStack(:), sAcross(:)
+    TYPE(FoilSheetQuad_t) :: Q
+    LOGICAL, OPTIONAL :: WithGaps, Fallback
+
     INTEGER :: ngp
-    LOGICAL :: Found
+    LOGICAL :: Found, Gaps, LetGo
+
+    Gaps = .FALSE.
+    IF (PRESENT(WithGaps)) Gaps = WithGaps
+    LetGo = .FALSE.
+    IF (PRESENT(Fallback)) LetGo = Fallback
 
     ngp = GetInteger(CompParams, 'Sheet Integration Points', Found)
     IF (.NOT. Found) ngp = 0
 
     Q % Exact = (ngp <= 0)
     IF (Q % Exact) THEN
-      IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) CALL Fatal('FoilSheetQuadrature', &
-          'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" '// &
-          'to integrate this coil mesh with a Gauss rule instead!')
-      CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
-          Q % nItem, Q % pCell, Q % pSeg, Q % pVol, Q % pBary, Comp % nSublayers, Comp % FillFactor)
+      IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) THEN
+        IF (LetGo) THEN
+          Q % Exact = .FALSE.
+          Q % nItem = 0
+          RETURN
+        END IF
+        CALL Fatal('FoilSheetQuadrature', &
+            'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" '// &
+            'to integrate this coil mesh with a Gauss rule instead!')
+      END IF
+      CALL FoilSheetPieces(nCells, nSegments, sStack(1:4), sAcross(1:4), &
+          Q % nItem, Q % pCell, Q % pSeg, Q % pVol, Q % pBary, nSublayers, ff, Gaps)
+    ELSE IF (LetGo) THEN
+      Q % nItem = 0
     ELSE
       Q % IP = GaussPoints(Element, np=ngp)
       Q % nItem = Q % IP % n
     END IF
 !------------------------------------------------------------------------------
-  END SUBROUTINE FoilSheetQuadrature
+  END SUBROUTINE FoilSheetLayoutQuadrature
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -1599,19 +1705,35 @@ CONTAINS
     INTEGER :: t, nn, kc, js
     REAL(KIND=dp) :: sStack(:), sAcross(:), Basis(:)
 
+    CALL FoilSheetLayoutQuadStrand(Q, Comp % nCells, Comp % nSegments, Comp % nSublayers, &
+        Comp % FillFactor, t, sStack, sAcross, Basis, nn, kc, js)
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetQuadStrand
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> The same for a caller that knows the strand layout but holds no component.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetLayoutQuadStrand(Q, nCells, nSegments, nSublayers, ff, t, &
+      sStack, sAcross, Basis, nn, kc, js)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    INTEGER :: nCells, nSegments, nSublayers, t, nn, kc, js
+    REAL(KIND=dp) :: ff, sStack(:), sAcross(:), Basis(:)
+
     INTEGER :: idummy
 
     js = 0
     IF (Q % Exact) THEN
       kc = Q % pCell(t); js = Q % pSeg(t)
     ELSE
-      kc = FoilSheetBandIndex(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
-          SUM(sStack(1:nn)*Basis(1:nn)))
+      kc = FoilSheetBandIndex(nCells, nSublayers, ff, SUM(sStack(1:nn)*Basis(1:nn)))
       IF (kc <= 0) RETURN
-      CALL FoilSheetStrand(1, Comp % nSegments, 0._dp, SUM(sAcross(1:nn)*Basis(1:nn)), idummy, js)
+      CALL FoilSheetStrand(1, nSegments, 0._dp, SUM(sAcross(1:nn)*Basis(1:nn)), idummy, js)
     END IF
 !------------------------------------------------------------------------------
-  END SUBROUTINE FoilSheetQuadStrand
+  END SUBROUTINE FoilSheetLayoutQuadStrand
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------

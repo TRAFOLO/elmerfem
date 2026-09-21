@@ -614,6 +614,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    INTEGER :: FsCells, FsSegments, FsSublayers, FsK, FsJ, FsDof
    REAL(KIND=dp) :: FsFillFactor
    REAL(KIND=dp) :: FsSigmaRef, FsSign, FsDofScale
+   TYPE(FoilSheetQuad_t) :: FsQ
+   LOGICAL :: FsExact
+   INTEGER :: nIp
+   REAL(KIND=dp) :: uIp, vIp, wIp
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: R_Z(:), PR(:)
@@ -1486,6 +1490,23 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        IP = GaussPoints(Element, EdgeBasis=dim==3, PReferenceElement=pRef, EdgeBasisDegree=EdgeBasisDegree)
      END IF
 
+     ! A sheet strand is a fraction of an element thick, so a Gauss rule that
+     ! picks the strand at the point mis-estimates the strand volumes by
+     ! percents - and by that much the Joule loss misses the circuit power. Cut
+     ! the element along the strand interfaces instead and integrate each piece
+     ! at its centroid, which is what the circuit kernel does and is exact for
+     ! the affine integrands of a linear tet (B is constant, the nodal basis is
+     ! linear). Other element types and 'Sheet Integration Points' keep the
+     ! Gauss rule, as does the corner / centre sampling of the elemental modes.
+     ! -----------------------------------------------------------------------
+     FsExact = .FALSE.
+     FsQ % Exact = .FALSE.
+     IF (CoilType == 'foil sheet' .AND. ElementalMode < 3) THEN
+       CALL FoilSheetLayoutQuadrature(FsCells, FsSegments, FsSublayers, FsFillFactor, &
+           CompParams, Element, n, alpha, beta, FsQ, WithGaps=.TRUE., Fallback=.TRUE.)
+       FsExact = FsQ % Exact .AND. FsQ % nItem > 0
+     END IF
+
      MASS  = 0._dp
      FORCE = 0._dp
      E = 0._dp; B=0._dp
@@ -1495,16 +1516,46 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        CALL GetHystereticMFS(Element, force(:,4:6), pSolver, HasZirka, CSymmetry=CSymmetry)
      end if
 
-     DO j = 1,IP % n
+     ! The strand pieces integrate the fields exactly but there are too few of
+     ! them to invert the nodal projection, so its mass matrix keeps the Gauss
+     ! rule. It is pure geometry and does not see the strands at all.
+     ! ---------------------------------------------------------------------
+     IF (FsExact .AND. (ElementalFields .OR. .NOT. ConstantMassMatrixInUse)) THEN
+       DO j = 1,IP % n
+         stat = ElementInfo(Element, Nodes, IP % U(j), IP % V(j), IP % W(j), &
+             detJ, Basis, dBasisdx, USolver=pSolver)
+         s = IP % s(j) * detJ
+         IF( CSymmetry ) s = s * SUM( Basis(1:n) * Nodes % x(1:n) )
+         DO p=1,eq_n
+           DO q=1,eq_n
+             MASS(p,q) = MASS(p,q) + s*Basis(p)*Basis(q)
+           END DO
+         END DO
+       END DO
+     END IF
+
+     nIp = IP % n
+     IF (FsExact) nIp = FsQ % nItem
+
+     DO j = 1,nIp
+       IF (FsExact) THEN
+         CALL FoilSheetQuadPoint(FsQ, j, uIp, vIp, wIp)
+       ELSE
+         uIp = IP % U(j); vIp = IP % V(j); wIp = IP % W(j)
+       END IF
        IF(dim == 2 ) THEN
-         stat = ElementInfo(Element,Nodes,IP % u(j),IP % v(j),IP % w(j),&
+         stat = ElementInfo(Element,Nodes,uIp,vIp,wIp,&
              detJ,Basis,dBasisdx,USolver=pSolver)
        ELSE
-         stat = ElementInfo( Element, Nodes, IP % U(j), IP % V(j), IP % W(j), &
+         stat = ElementInfo( Element, Nodes, uIp, vIp, wIp, &
              detJ, Basis, dBasisdx, &
              EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = pSolver ) 
        END IF         
-       s = IP % s(j) * detJ
+       IF (FsExact) THEN
+         s = FoilSheetQuadWeight(FsQ, j, detJ)
+       ELSE
+         s = IP % s(j) * detJ
+       END IF
 
        grads_coeff = -1._dp/GetCircuitModelDepth()
        IF( CSymmetry ) THEN
@@ -1655,10 +1706,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          CASE ('foil sheet')
            ! A point in the insulation margin of a turn belongs to no strand:
            ! it carries no current and no cell voltage.
-           FsK = FoilSheetBandIndex(FsCells, FsSublayers, FsFillFactor, &
-               SUM(alpha(1:np)*Basis(1:np)))
+           CALL FoilSheetLayoutQuadStrand(FsQ, FsCells, FsSegments, FsSublayers, FsFillFactor, &
+               j, alpha, beta, Basis, np, FsK, FsJ)
            IF (FsK > 0) THEN
-             CALL FoilSheetStrand(1, FsSegments, 0._dp, SUM(beta(1:np)*Basis(1:np)), FsDof, FsJ)
              FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
              FsK = FoilSheetLayerCell(FsSublayers, FsK)
              wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
@@ -1803,10 +1853,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
 
          CASE ('foil sheet')
-           FsK = FoilSheetBandIndex(FsCells, FsSublayers, FsFillFactor, &
-               SUM(alpha(1:np)*Basis(1:np)))
+           CALL FoilSheetLayoutQuadStrand(FsQ, FsCells, FsSegments, FsSublayers, FsFillFactor, &
+               j, alpha, beta, Basis, np, FsK, FsJ)
            IF (FsK > 0) THEN
-             CALL FoilSheetStrand(1, FsSegments, 0._dp, SUM(beta(1:np)*Basis(1:np)), FsDof, FsJ)
              FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
              FsK = FoilSheetLayerCell(FsSublayers, FsK)
              wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
@@ -2028,7 +2077,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        Energy(2) = Energy(2) + s*w_dens
        Energy(3) = Energy(3) + (HdotB - w_dens) * s
 
-       IF (ElementalFields .OR. .NOT. ConstantMassMatrixInUse) THEN
+       IF ((ElementalFields .OR. .NOT. ConstantMassMatrixInUse) .AND. .NOT. FsExact) THEN
          DO p=1,eq_n
            DO q=1,eq_n
              MASS(p,q)=MASS(p,q)+s*Basis(p)*Basis(q)
