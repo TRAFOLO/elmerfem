@@ -613,7 +613,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    LOGICAL :: FwStackAlongAlpha, FsStackAlongAlpha
    INTEGER :: FsCells, FsSegments, FsSublayers, FsK, FsJ, FsDof
    REAL(KIND=dp) :: FsFillFactor
-   REAL(KIND=dp) :: FsSigmaRef, FsSign
+   REAL(KIND=dp) :: FsSigmaRef, FsSign, FsDofScale
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: R_Z(:), PR(:)
@@ -1095,7 +1095,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    ! Foil sheet layout of the element at hand; read per element in the coil
    ! type branch below, but the reconstruction runs for every coil type.
    FsCells = 1; FsSegments = 1; FsSublayers = 1
-   FsFillFactor = 1._dp; FsSigmaRef = 1._dp; FsSign = 1._dp
+   FsFillFactor = 1._dp; FsSigmaRef = 1._dp; FsSign = 1._dp; FsDofScale = 1._dp
    IF(.NOT. ConstantMassMatrixInUse ) THEN
      CALL DefaultInitialize()
    END IF
@@ -1366,6 +1366,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          IF (.NOT. Found) FsFillFactor = 1._dp
          FsSigmaRef = GetConstReal(CompParams, 'Foil Sheet Sigma Ref', Found)
          IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Sigma Ref not found!')
+         ! The transient kernel solves for y' = FsDofScale * y; harmonic and old
+         ! SIFs do not publish the keyword and keep the raw dofs.
+         FsDofScale = GetConstReal(CompParams, 'Foil Sheet Dof Scale', Found)
+         IF (.NOT. Found .OR. FsDofScale <= 0._dp) FsDofScale = 1._dp
          FsSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
          IF (.NOT. Found) FsSign = 1._dp
          ! For a foil sheet 'alpha' and 'beta' hold the stacking and the across
@@ -1749,7 +1753,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
        ELSE   ! Real case (transient case)
          E(1,:) = 0._dp
-         IF (CoilType /= 'stranded') THEN 
+         ! A foil sheet strand dof already carries the induced part, exactly as a
+         ! stranded coil current does, so -dA/dt must not be added on top of it.
+         IF (CoilType /= 'stranded' .AND. CoilType /= 'foil sheet') THEN
            SELECT CASE(dim)
            CASE(2)
              E(1,3) = -SUM(PSOL(1:nd) * Basis(1:nd))
@@ -1805,7 +1811,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              FsK = FoilSheetLayerCell(FsSublayers, FsK)
              wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
              IF (REAL(CMat_ip(3,3)) /= 0._dp) &
-                 E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / REAL(CMat_ip(3,3)) * wvec
+                 E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / FsDofScale &
+                     / REAL(CMat_ip(3,3)) * wvec
              localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
            END IF
 

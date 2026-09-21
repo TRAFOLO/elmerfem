@@ -922,6 +922,12 @@ CONTAINS
 
       CompParams => CurrentModel % Components(Comp % ComponentId) % Values
       IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal ('AddComponentEquationsAndCouplings', 'Component parameters not found')
+      ! MagnetoDynamicsCalcFields rebuilds the sheet current density from the raw
+      ! strand dofs, which Add_foil_sheet scales, so the scale of this step has to
+      ! travel with the component.
+      IF (Comp % CoilType == 'foil sheet') &
+          CALL ListAddConstReal(CompParams, 'Foil Sheet Dof Scale', &
+              FoilSheetDofScale(Comp % SigmaRef, dt, FoilSheetTimeScale()))
       IF (Comp % CoilType == 'stranded' .OR. Comp % ComponentType == 'resistor') THEN
         Comp % Resistance = ListGetCReal(CompParams, 'Resistance', Found)
         IF (Found) THEN
@@ -1641,6 +1647,41 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> BDF extrapolation weight of the transient strand equation: 1 while the first
+!> order scheme runs, 1.5 once the second order one does.
+!------------------------------------------------------------------------------
+   FUNCTION FoilSheetTimeScale() RESULT(tscl)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: tscl
+
+    IF (Solver % Order < 2 .OR. GetTimeStep() <= 2) THEN
+      tscl = 1._dp
+    ELSE
+      tscl = 1.5_dp
+    END IF
+!------------------------------------------------------------------------------
+   END FUNCTION FoilSheetTimeScale
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Scale of the transient strand dofs: Add_foil_sheet solves for y' = sdofscl*y,
+!> which keeps the circuit block as well conditioned as the flat wire one. Every
+!> reader of the raw dofs - CircuitsOutput and MagnetoDynamicsCalcFields - has to
+!> divide by the same number, so it is computed only here.
+!------------------------------------------------------------------------------
+   FUNCTION FoilSheetDofScale(SigmaRef, dtime, tscl) RESULT(sdofscl)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: SigmaRef, dtime, tscl, sdofscl
+
+    sdofscl = 1._dp
+    IF (TransientSimulation .AND. dtime > 0._dp) sdofscl = SQRT(SigmaRef * dtime / tscl)
+!------------------------------------------------------------------------------
+   END FUNCTION FoilSheetDofScale
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Foil sheet winding, transient version. The sheet conductivity is the DC one;
 !> the frequency dependence of the intra-turn skin effect is carried by the
 !> per-strand skin ladder, which replaces 1/sigma_s by a conductance with a
@@ -1708,10 +1749,8 @@ CONTAINS
     CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
 
     CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
-    IF(Solver % Order<2.OR.GetTimeStep()<=2) THEN
-      tscl=1.0_dp
-    ELSE
-      tscl=1.5_dp
+    tscl = FoilSheetTimeScale()
+    IF (tscl > 1._dp) THEN
       CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
       pPot = 2*pPOT - 0.5_dp*ppPOT
     END IF
@@ -1736,9 +1775,7 @@ CONTAINS
     ! skin ladder state, so this must be set on every path: the value divides a
     ! matrix entry, and an undefined one reaches the parallel glue as a nonzero
     ! where none is expected.
-    sdofscl = 1._dp
-    IF (TransientSimulation .AND. dt > 0._dp) &
-        sdofscl = SQRT(Comp % SigmaRef * dt / tscl)
+    sdofscl = FoilSheetDofScale(Comp % SigmaRef, dt, tscl)
     IF (HaveSkinState) FSkin(CompId) % DofScale = sdofscl
 
     CALL FoilSheetQuadrature(Comp, CompParams, Element, nn, sStack, sAcross, FsQ)
@@ -4123,10 +4160,10 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
        ! transient: the strand loss already contains the DC part, and the
        ! proximity loss is the reluctivity ladder's, integrated by the AV
        ! solver. They REPLACE 'res: Eddy current power' rather than adding to
-       ! it, because MagnetoDynamicsCalcFields does not produce a usable value
-       ! for this coil type in transient - it reconstructs J from the strand
-       ! dofs against the DC conductivity and overstates the loss by orders of
-       ! magnitude. TRAFOLO reads the transient Rac from this scalar.
+       ! it, because the circuit is the reference for the dissipation of this
+       ! coil type: the 'Joule Heating' field carries the strand loss with the
+       ! DC sheet conductivity, but the skin ladder's excess (Ptot - Pdc) is
+       ! not in it, so only these scalars hold the whole loss.
        ! Both of these are collective, so every partition has to reach them,
        ! including one whose mesh carries no sheet element and whose ladder
        ! state is therefore not allocated. The "is there a sheet" flag is

@@ -1727,6 +1727,7 @@ Component:Integer:   'Foil Sheet Cells'
 Component:Integer:   'Foil Sheet Segments'
 Component:Integer:   'Foil Sheet Foils Per Cell'
 Component:Real:      'Foil Sheet Sigma Ref'
+Component:Real:      'Foil Sheet Dof Scale'
 Component:Real:      'Foil Sheet Direction Sign'
 ! Marks the transient Xi variables as already declared by the AV solver.
 Solver:Logical:      'Foil Sheet Xi Declared'
