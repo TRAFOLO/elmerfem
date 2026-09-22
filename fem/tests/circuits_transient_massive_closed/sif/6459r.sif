@@ -1,0 +1,170 @@
+! Closed (full 360 degree) solid conductor in transient: a massive coil with no
+! electrodes and no W potential. The direction field is the CoilSolver cut
+! potential, normalized to unit circulation per turn by the ratio of the
+! coil's int sigma |grad W|^2 to the flux through the cut crossings.
+! Reference: the open half model of the same ring, a massive coil on mesh 6459
+! with electrodes on the symmetry plane and "Circuit Equation Voltage Factor =
+! 0.5". Its loss and field energy agree with this one to 0.52 % per step.
+! Mesh: circuits_harmonic_foil/6459 mirrored about z=0 (ElmerGrid -mirror 0 0 1).
+Check Keywords "Warn"
+INCLUDE sif/6459r-circuits.definitions
+INCLUDE 6459r/mesh.names
+Header 1
+   Mesh DB "." "6459r"
+End
+Constants 1
+   Permittivity of Vacuum = 8.8542e-12
+End
+Initial Condition 1
+   A {e} = Real 0
+   A = Real 0
+End
+Simulation 1
+   Max Output Level = 5
+   Coordinate System = Cartesian 3D
+   Coordinate Mapping(3) = 1 2 3
+   Coordinate Scaling = 0.001
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+   Timestep intervals = 3
+   Timestep Sizes = 0.0015
+   Steady State Max Iterations = 1
+   Output Intervals = 1
+End
+Solver 1  !---- CoilSolver, CoilSolver
+   Exec Solver = Before All
+   Equation = "CoilSolver"
+   Procedure = "CoilSolver" "CoilSolver"
+   Steady State Convergence Tolerance = 1e-06
+   Nonlinear System Consistent Norm = Logical True
+   Linear System Solver = "Iterative"
+   Linear System Preconditioning = ILU2
+   Linear System Max Iterations = 5000
+   Linear System Convergence Tolerance = 1e-10
+   Linear System Iterative Method = BiCGStab
+   Linear System Abort Not Converged = True
+   Linear System Residual Output = 1000
+   Coil Closed = Logical True
+   Narrow Interface = Logical True
+End
+Solver 2  !---- CircuitsAndDynamics, CircuitsAndDynamics
+   Exec Solver = Always
+   Equation = Circuits
+   Variable = X
+   No Matrix = Logical True
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+End
+Solver 3  !---- MagnetoDynamics, WhitneyAVSolver
+   Exec Solver = Always
+   Equation = "MGDynamics"
+   Variable = "A"
+   Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+   NonLinear System Relaxation Factor = 1
+   Export Lagrange Multiplier = Logical True
+   Linear System Solver = Iterative
+   Linear System Iterative Method = BicgstabL
+   Linear System preconditioning = none
+   Linear System Convergence Tolerance = 1.e-10
+   Linear System Max Iterations = 3000
+   Linear System Residual Output = 1000
+   BicgstabL polynomial degree = 6
+   Steady State Convergence Tolerance = 1e-08
+End
+Solver 4  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
+   Exec Solver = Always
+   Equation = "MGDynamicsCalc"
+   Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+   Linear System Symmetric = True
+   Potential Variable = String "A"
+   Calculate Current Density = Logical True
+   Calculate Joule Heating = Logical True
+   Separate Magnetic Energy = Logical True
+   Loss Estimation = Logical True
+   Steady State Convergence Tolerance = 0
+   Linear System Solver = "Iterative"
+   Linear System Preconditioning = None
+   Linear System Residual Output = 1000
+   Linear System Max Iterations = 5000
+   Linear System Iterative Method = CG
+   Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 5  !---- CircuitsAndDynamics, CircuitsOutput
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 6  !---- SaveData, SaveScalars
+   Exec Solver = After timestep
+   Equation = "sv"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 6459r/dat/6459r.dat
+   Show Norm Index = Integer 1
+End
+Equation 1
+   Active Solvers(2) = 3 4
+End
+Equation 2
+   Active Solvers(6) = 1 2 3 4 5 6
+End
+Material 1  !---- iron: generic
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+End
+Material 2  !---- air: generic
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+End
+Material 3  !---- aluminium: generic
+   Name = aluminium
+   Relative Permeability = 1
+   Electric Conductivity = 36e6
+End
+Body 1  !---- core
+   Name = core
+   Target Bodies(1) = $ core
+   Equation = 1
+   Material = 1
+   Initial Condition = 1
+End
+Body 2  !---- air
+   Name = air
+   Target Bodies(1) = $ air
+   Equation = 1
+   Material = 2
+   Initial Condition = 1
+End
+Body 3  !---- A1
+   Name = A1
+   Target Bodies(1) = $ A1
+   Equation = 2
+   Material = 3
+   Initial Condition = 1
+   Body Force = 1
+End
+Component 1  !---- A1
+   Name = String A1
+   Master Bodies = Integer 3
+   Coil Type = String massive
+   Coil Closed = Logical True
+   Coil Normal(3) = Real 0 1 0
+   Coil Center(3) = Real 0 0 0
+   Number of Turns = Real 1
+   Circuit Equation Voltage Factor = Real 1
+End
+Body Force 1  !---- Circuit
+   Name = "Circuit"
+   S1 = Variable time
+      Real MATC "1.41421356237*sin(2*pi*50*tx)"
+End
+Boundary Condition 1  !---- outer
+   Name = outer
+   Target Boundaries(3) = $ cylinder_lateral_surface infinity_xz0 infinity_xz1
+   A {e} = Real 0
+End
+Solver 6 :: Reference Norm = Real 2.67182778E-05
+Solver 6 :: Reference Norm Tolerance = Real 1E-4
+$fprintf( stderr, "TEST CASE 1\n");
+RUN
