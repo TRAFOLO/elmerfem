@@ -3938,9 +3938,15 @@ END FUNCTION isComponentName
 ! layer is not, so the volume integral runs over the whole loop while the flux
 ! is still measured at the crossings of one branch's layer. Their ratio is
 ! therefore the resistance of the whole loop over the resistance of the loop
-! minus that layer, 1.02-1.05, which is what the composite field ramps through
-! per turn. A wire of N turns repeats that ramp once per turn, so the
-! circulation of the whole wire is N times the ratio.
+! minus that layer, 1.02-1.05, which is what the composite field ramps through.
+!
+! One crossing only. The CoilSolver pins the cut potential at every crossing of
+! the cut plane, so with several crossings each segment between them is a
+! separate Dirichlet problem and carries its own current 1/R_segment instead of
+! one series current. No scalar normalization then gives both unit circulation
+! and the right DC resistance: the conductance comes out low by
+! 1 - N^2/((sum 1/R_k)(sum R_k)), measured as 12.3 % on a 3-turn helix whose
+! return leg doubles one of its three segments.
 !------------------------------------------------------------------------------
   SUBROUTINE ComputeClosedMassiveCirculation(CompParams, CompInd)
 !------------------------------------------------------------------------------
@@ -3955,12 +3961,12 @@ END FUNCTION isComponentName
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), Wloc(:), Ploc(:), &
-        Chi(:), ElCond(:)
+        Chi(:), ElCond(:), ElemFlux(:,:)
     INTEGER, ALLOCATABLE :: Lbl(:), gIdx(:)
     LOGICAL, ALLOCATABLE :: IsCross(:,:)
-    REAL(KIND=dp) :: detJ, gw(3), gc(3), sig, Ener, Flux(2), Mult(2), &
-        Circ, Ratio, Turns, FluxRef, FluxErr
-    INTEGER :: e, n, gp, nmax, nno, nbulk, b, i, m, nTurns, nPatch(2)
+    REAL(KIND=dp) :: detJ, gw(3), gc(3), sig, efl, Ener, Flux(2), Mult(2), &
+        Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2)
+    INTEGER :: e, n, gp, nmax, nno, nbulk, b, i, m, nPatch(2)
     INTEGER, POINTER :: Indexes(:)
     LOGICAL :: stat, Found, Parallel, Split, Changed
     CHARACTER(*), PARAMETER :: Caller = 'Circuits_Init'
@@ -3969,7 +3975,8 @@ END FUNCTION isComponentName
     ! range separates a crossing element from every other element of the coil.
     REAL(KIND=dp), PARAMETER :: CrossingJump = 0.5_dp
     REAL(KIND=dp), PARAMETER :: MinRatio = 0.5_dp, MaxRatio = 2.0_dp
-    REAL(KIND=dp), PARAMETER :: MaxFluxErr = 0.05_dp
+    REAL(KIND=dp), PARAMETER :: MaxFluxErr = 0.05_dp, MaxPatchSpread = 0.02_dp
+    INTEGER, PARAMETER :: MaxPatches = 64
 !------------------------------------------------------------------------------
 
     ! Measuring it again on the already normalized field would just return 1.
@@ -3991,10 +3998,10 @@ END FUNCTION isComponentName
 
     Turns = GetConstReal(CompParams, 'Number of Turns', Found)
     IF (.NOT. Found) Turns = 1._dp
-    nTurns = NINT(Turns)
-    IF (Turns <= 0._dp .OR. ABS(Turns - nTurns) > 1.0e-6_dp) CALL Fatal(Caller, &
-        'Component '//I2S(CompInd)//': a closed massive coil needs a whole number '// &
-        'of turns, the cut plane crosses the conductor once per turn.')
+    IF (ABS(Turns - 1._dp) > 1.0e-6_dp) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
+        ': a closed massive coil supports one cut crossing only, so "Number of Turns" '// &
+        'must be 1: the CoilSolver pins the cut potential at every crossing and the '// &
+        'segments between crossings then carry independent currents.')
 
     ! The identity holds for the conductivity the cut potential was solved with.
     ! 'Coil Conductivity Fix' iterates that conductivity towards a uniform
@@ -4012,8 +4019,9 @@ END FUNCTION isComponentName
     END DO
 
     ALLOCATE(Basis(nmax), dBasisdx(nmax,3), Wloc(nmax), Ploc(nmax), Chi(nmax), ElCond(nmax))
-    ALLOCATE(IsCross(nbulk,2), Lbl(nno), gIdx(nno))
+    ALLOCATE(IsCross(nbulk,2), ElemFlux(nbulk,2), Lbl(nno), gIdx(nno))
     IsCross = .FALSE.
+    ElemFlux = 0._dp
 
     DO i = 1, nno
       gIdx(i) = i
@@ -4065,14 +4073,17 @@ END FUNCTION isComponentName
           Chi(1:n) = 0._dp
         END WHERE
 
+        efl = 0._dp
         DO gp = 1, IP % n
           stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
               detJ, Basis, dBasisdx)
           gw = MATMUL(Wloc(1:n), dBasisdx(1:n,:))
           gc = MATMUL(Chi(1:n), dBasisdx(1:n,:))
           sig = SUM(Basis(1:n) * ElCond(1:n))
-          Flux(b) = Flux(b) + IP % s(gp) * detJ * sig * SUM(gc*gw)
+          efl = efl + IP % s(gp) * detJ * sig * SUM(gc*gw)
         END DO
+        ElemFlux(Element % ElementIndex, b) = efl
+        Flux(b) = Flux(b) + efl
       END DO
     END DO
 
@@ -4097,20 +4108,31 @@ END FUNCTION isComponentName
         'Check "Coil Normal" and "Coil Center".')
 
     Ratio = Ener / FluxRef
-    Circ = Turns * Ratio
+    Circ = Ratio
 
     CALL CountCrossingPatches()
 
-    WRITE(Message,'(A,ES13.6,A,ES13.6,A)') 'Component '//I2S(CompInd)// &
-        ' closed massive coil circulation: ', Circ, ' (', Ratio, ' per turn)'
+    WRITE(Message,'(A,ES13.6)') 'Component '//I2S(CompInd)// &
+        ' closed massive coil circulation: ', Circ
     CALL Info(Caller, Message, Level=5)
     WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES9.2)') 'Component '//I2S(CompInd)// &
         ' cut crossing flux: branch A ', Flux(1), ', branch B ', Flux(2), &
         ', relative difference ', FluxErr
     CALL Info(Caller, Message, Level=5)
-    CALL Info(Caller, 'Component '//I2S(CompInd)//' cut crossing patches: '// &
-        I2S(nPatch(1))//' (branch A) and '//I2S(nPatch(2))//' (branch B) for '// &
-        I2S(nTurns)//' turns', Level=5)
+    WRITE(Message,'(A,ES9.2,A,ES9.2,A)') 'Component '//I2S(CompInd)// &
+        ' cut crossing patches: '//I2S(nPatch(1))//' (branch A) and '// &
+        I2S(nPatch(2))//' (branch B), flux spread ', PatchSpread(1), ' and ', &
+        PatchSpread(2), ' over one turn'
+    CALL Info(Caller, Message, Level=5)
+
+    IF (.NOT. Split .AND. MAXVAL(PatchSpread) > MaxPatchSpread) THEN
+      WRITE(Message,'(A,ES11.4,A)') 'Component '//I2S(CompInd)//': the cut crossings '// &
+          'of the closed massive coil carry currents that differ by ', &
+          MAXVAL(PatchSpread), '. They are cross sections of one series loop, so the '// &
+          'cut potential is not a valid direction field: each crossing is pinned '// &
+          'separately and ramps over its own segment.'
+      CALL Warn(Caller, Message)
+    END IF
 
     IF (FluxErr > MaxFluxErr) THEN
       WRITE(Message,'(A,ES11.4,A)') 'Component '//I2S(CompInd)//': the two cut '// &
@@ -4132,26 +4154,32 @@ END FUNCTION isComponentName
       IF (ParEnv % MyPe == 0) CALL Warn(Caller, 'Component '//I2S(CompInd)//': a cut '// &
           'crossing is shared by several partitions, so its patches cannot be counted '// &
           'against "Number of Turns". Run the case once in serial to have the check made.')
-    ELSE IF (ANY(nPatch /= nTurns)) THEN
+    ELSE IF (ANY(nPatch /= 1)) THEN
       CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut plane crosses the '// &
           'coil on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
-          ' (branch B) but "Number of Turns" is '//I2S(nTurns)// &
-          '. Check "Coil Normal", "Coil Center" and "Number of Turns".')
+          ' (branch B); a closed massive coil supports one crossing only. Check '// &
+          '"Coil Normal" and "Coil Center".')
     END IF
 
     CALL ListAddConstReal(CompParams, 'Coil Circulation', Circ)
 
-    DEALLOCATE(Basis, dBasisdx, Wloc, Ploc, Chi, ElCond, IsCross, Lbl, gIdx)
+    DEALLOCATE(Basis, dBasisdx, Wloc, Ploc, Chi, ElCond, IsCross, ElemFlux, Lbl, gIdx)
 
   CONTAINS
 
-    ! One crossing patch per turn: label the crossing nodes of a branch with the
-    ! largest global node index of their connected component and count the nodes
-    ! that carry their own index. Every patch has exactly one of those, and in
-    ! parallel it is counted once as long as no patch straddles an interface.
+    ! Label the crossing nodes of a branch with the largest global node index of
+    ! their connected component and count the nodes that carry their own index.
+    ! Every patch has exactly one of those, and in parallel it is counted once as
+    ! long as no patch straddles an interface. The flux is summed per patch too:
+    ! the patches are cross sections of one series loop, so a spread between them
+    ! is the cut potential driving a different current through each of them.
     !--------------------------------------------------------------------------
     SUBROUTINE CountCrossingPatches()
+      INTEGER :: np, p, lab(MaxPatches)
+      REAL(KIND=dp) :: pf(MaxPatches)
+
       Split = .FALSE.
+      PatchSpread = 0._dp
       DO b = 1, 2
         Lbl = 0
         DO e = 1, nbulk
@@ -4177,6 +4205,29 @@ END FUNCTION isComponentName
         END DO
 
         nPatch(b) = COUNT(Lbl(1:nno) > 0 .AND. Lbl(1:nno) == gIdx(1:nno))
+
+        np = 0
+        pf = 0._dp
+        DO e = 1, nbulk
+          IF (.NOT. IsCross(e,b)) CYCLE
+          Element => Mesh % Elements(e)
+          m = Lbl(Element % NodeIndexes(1))
+          DO p = 1, np
+            IF (lab(p) == m) EXIT
+          END DO
+          IF (p > np) THEN
+            IF (np >= MaxPatches) CYCLE
+            np = np + 1
+            p = np
+            lab(p) = m
+          END IF
+          pf(p) = pf(p) + ElemFlux(e,b)
+        END DO
+        IF (np > 1) THEN
+          pf(1:np) = ABS(pf(1:np))
+          PatchSpread(b) = np * (MAXVAL(pf(1:np)) - MINVAL(pf(1:np))) / SUM(pf(1:np))
+        END IF
+
         IF (Parallel) THEN
           IF (ASSOCIATED(Mesh % ParallelInfo % GInterface)) THEN
             IF (ANY(Lbl(1:nno) > 0 .AND. Mesh % ParallelInfo % GInterface(1:nno))) &
