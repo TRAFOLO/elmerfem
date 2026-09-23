@@ -1779,13 +1779,15 @@ MODULE CircuitsMod
   USE DefUtils
   IMPLICIT NONE
 
-  ! Largest relative difference of the loop current that the two cut branches of
-  ! a closed solid coil may measure. Each branch loses the share of the loop
+  ! Relative difference of the loop current that the two cut branches of a
+  ! closed solid coil may measure. Each branch loses the share of the loop
   ! resistance of its own Dirichlet layer, the circulation excess Circ-1, and
   ! clean cuts differ by 0.02-0.27 of that share: 0.01-0.2 % on meshes with a
   ! few elements across the wire, 2.2 % on the coarse ring of the closed massive
-  ! tests. A cut along the wire gave 1.3-1.5 times the share, 5.9-18 %.
-  REAL(KIND=dp), PARAMETER :: MaxCutBranchMismatch = 0.01_dp, CutLayerShareMismatch = 0.5_dp
+  ! tests. A cut along the wire gave 1.3-1.5 times the share, 5.9-18 %, and
+  ! inflates the share itself, hence the cap.
+  REAL(KIND=dp), PARAMETER :: MinCutBranchMismatch = 0.01_dp, &
+      MaxCutBranchMismatch = 0.03_dp, CutLayerShareMismatch = 0.5_dp
 
 CONTAINS 
 
@@ -4201,7 +4203,8 @@ END FUNCTION isComponentName
 
     ! Where the two branches meet, the direction field jumps by as much as they
     ! disagree, and at high frequency that jump drives spurious eddy currents.
-    MaxMismatch = MAX(MaxCutBranchMismatch, CutLayerShareMismatch * (Circ - 1._dp))
+    MaxMismatch = MIN(MAX(MinCutBranchMismatch, CutLayerShareMismatch * (Circ - 1._dp)), &
+        MaxCutBranchMismatch)
     IF (FluxErr > MaxMismatch) THEN
       WRITE(Num(1),'(ES12.5)') Flux(1)
       WRITE(Num(2),'(ES12.5)') Flux(2)
