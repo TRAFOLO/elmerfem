@@ -3947,6 +3947,11 @@ END FUNCTION isComponentName
 ! and the right DC resistance: the conductance comes out low by
 ! 1 - N^2/((sum 1/R_k)(sum R_k)), measured as 12.3 % on a 3-turn helix whose
 ! return leg doubles one of its three segments.
+!
+! The CoilSolver keyword "Single Coil Cut" reduces the Dirichlet layer to one
+! crossing, which is what a multi-turn coil needs: the potential then ramps once
+! over the whole wire, the identity above holds for the whole wire, and the
+! number of turns does not enter the normalization at all.
 !------------------------------------------------------------------------------
   SUBROUTINE ComputeClosedMassiveCirculation(CompParams, CompInd)
 !------------------------------------------------------------------------------
@@ -3968,7 +3973,7 @@ END FUNCTION isComponentName
         Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2), MultMax, MultMin
     INTEGER :: e, n, gp, nmax, nno, nbulk, b, i, m, nPatch(2)
     INTEGER, POINTER :: Indexes(:)
-    LOGICAL :: stat, Found, Parallel, Split, Changed
+    LOGICAL :: stat, Found, Parallel, Split, Changed, OneCut
     CHARACTER(*), PARAMETER :: Caller = 'Circuits_Init'
     CHARACTER(*), PARAMETER :: MultName(2) = [ CHARACTER(32) :: &
         'Coil Potential Multiplier', 'Coil Potential Multiplier B' ]
@@ -4012,12 +4017,20 @@ END FUNCTION isComponentName
     IF (ANY(Mult == 0._dp)) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
         ': the CoilSolver scaled the cut potential to zero current.')
 
-    Turns = GetConstReal(CompParams, 'Number of Turns', Found)
-    IF (.NOT. Found) Turns = 1._dp
-    IF (ABS(Turns - 1._dp) > 1.0e-6_dp) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
-        ': a closed massive coil supports one cut crossing only, so "Number of Turns" '// &
-        'must be 1: the CoilSolver pins the cut potential at every crossing and the '// &
-        'segments between crossings then carry independent currents.')
+    ! The CoilSolver writes this into the component when it has reduced the cut
+    ! to one crossing. The wire is then cut once however many turns it makes, so
+    ! the turns do not enter the normalization and are not read.
+    OneCut = ListGetLogical(CompParams, 'Single Coil Cut', Found)
+
+    IF (.NOT. OneCut) THEN
+      Turns = GetConstReal(CompParams, 'Number of Turns', Found)
+      IF (.NOT. Found) Turns = 1._dp
+      IF (ABS(Turns - 1._dp) > 1.0e-6_dp) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
+          ': a closed massive coil supports one cut crossing only, so "Number of Turns" '// &
+          'must be 1: the CoilSolver pins the cut potential at every crossing and the '// &
+          'segments between crossings then carry independent currents. Add "Single Coil '// &
+          'Cut = Logical True" to the CoilSolver to cut the wire once instead.')
+    END IF
 
     ! The identity holds for the conductivity the cut potential was solved with.
     ! 'Coil Conductivity Fix' iterates that conductivity towards a uniform
@@ -4166,15 +4179,26 @@ END FUNCTION isComponentName
       CALL Fatal(Caller, Message)
     END IF
 
+    ! The patch count is exact only when no patch is shared by two partitions,
+    ! so a shared one is all that is left of the check in parallel.
     IF (Split) THEN
       IF (ParEnv % MyPe == 0) CALL Warn(Caller, 'Component '//I2S(CompInd)//': a cut '// &
-          'crossing is shared by several partitions, so its patches cannot be counted '// &
-          'against "Number of Turns". Run the case once in serial to have the check made.')
+          'crossing is shared by several partitions, so its patches cannot be counted. '// &
+          'Run the case once in serial to have the check made.')
     ELSE IF (ANY(nPatch /= 1)) THEN
-      CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut plane crosses the '// &
-          'coil on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
-          ' (branch B); a closed massive coil supports one crossing only. Check '// &
-          '"Coil Normal" and "Coil Center".')
+      IF (OneCut) THEN
+        CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut potential still jumps '// &
+            'on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
+            ' (branch B), so the CoilSolver did not reduce the cut to one crossing and '// &
+            'the segments between the crossings carry currents of their own: the '// &
+            'resistance of this component would be wrong. Check "Coil Normal" and '// &
+            '"Coil Center", and that the coil is one connected loop.')
+      ELSE
+        CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut plane crosses the '// &
+            'coil on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
+            ' (branch B); a closed massive coil supports one crossing only. Check '// &
+            '"Coil Normal" and "Coil Center".')
+      END IF
     END IF
 
     CALL ListAddConstReal(CompParams, 'Coil Circulation', Circ)
