@@ -627,6 +627,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: ldetJ,detJ, C_ip, ST(3,3), Omega, ThinLinePower, Power, Energy(3), w_dens
    REAL(KIND=dp) :: HomogPower   ! Im(Nu) proximity loss, a part of Power
    INTEGER :: HomogPowerSeen     ! 1 where a foil sheet contributed to it
+   REAL(KIND=dp) :: SheetPower   ! transient foil sheet Joule loss, a part of Power
+   INTEGER :: SheetPowerSeen     ! 1 where a transient foil sheet contributed to it
    REAL(KIND=dp) :: localThickness
    REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ValAtIP
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
@@ -1096,6 +1098,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    Magnetization = 0._dp
 
    Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp; HomogPowerSeen = 0
+   SheetPower = 0._dp; SheetPowerSeen = 0
    ! Foil sheet layout of the element at hand; read per element in the coil
    ! type branch below, but the reconstruction runs for every coil type.
    FsCells = 1; FsSegments = 1; FsSublayers = 1
@@ -2310,6 +2313,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
 
          Power = Power + Coeff
+         IF ( Transient .AND. CoilType == 'foil sheet' ) THEN
+           SheetPower = SheetPower + Coeff
+           SheetPowerSeen = 1
+         END IF
          IF ( ASSOCIATED(JH) .OR. ASSOCIATED(EL_JH) .OR. ASSOCIATED(NJH) ) THEN           
            FORCE(p,k+1) = FORCE(p,k+1) + Coeff
            k = k+1
@@ -2926,6 +2933,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    IF(Parallel) THEN
      Power = ParallelReduction(Power) / NoSlices
      HomogPower = ParallelReduction(HomogPower) / NoSlices
+     SheetPower = ParallelReduction(SheetPower) / NoSlices
      IF( LayerBC ) SurfPower = ParallelReduction( SurfPower ) / NoSlices
 
      Energy(1) = ParallelReduction(Energy(1)) / NoSlices
@@ -2973,6 +2981,20 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      WRITE(Message,'(A,ES15.6)') 'Homogenization loss: ', HomogPower
      CALL Info( Caller, Message )
      CALL ListAddConstReal( Model % Simulation, 'res: Homogenization loss', HomogPower )
+   END IF
+
+   ! A transient foil sheet block is in Power with its strand currents at the DC
+   ! sheet conductivity only. CircuitsOutput puts its whole loss, strand skin
+   ! ladder and reluctivity ladder included, into 'res: Eddy current power' and
+   ! takes every other conductor from here.
+   IF( Transient ) THEN
+     CALL ListAddConstReal( Model % Simulation, 'Eddy current power outside foil sheets', &
+         Power - SheetPower )
+     IF( Parallel ) SheetPowerSeen = ParallelReduction(SheetPowerSeen, 2)
+     IF( SheetPowerSeen > 0 ) THEN
+       WRITE(Message,'(A,ES15.6)') 'Foil sheet Joule loss at the DC sheet conductivity: ', SheetPower
+       CALL Info( Caller, Message, Level=5 )
+     END IF
    END IF
 
    IF( LayerBC ) THEN

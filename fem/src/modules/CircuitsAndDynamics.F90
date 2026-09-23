@@ -111,18 +111,34 @@ MODULE TransientHomogCircuitState
     ! with the R1 row scaled by DofScale makes both blocks equal; D is invariant.
     REAL(KIND=dp) :: DofScale = 1._dp
     REAL(KIND=dp), ALLOCATABLE :: tau(:), Minv(:)
-    REAL(KIND=dp), ALLOCATABLE :: x(:,:), xo(:,:)
-    REAL(KIND=dp), ALLOCATABLE :: y(:), yo(:), hist(:)
+    ! x and y are the latest iterate of the step, x_n^{n+1} and y^{n+1}; xo, yo
+    ! and xoo, yoo are the states of the two previous steps, which
+    ! PrepareFoilSkinStep commits once per step. AdvanceFoilSkin starts from the
+    ! committed states, so a second call within a timestep (coupled iterations)
+    ! redoes the step instead of taking another one.
+    REAL(KIND=dp), ALLOCATABLE :: x(:,:), xo(:,:), xoo(:,:)
+    REAL(KIND=dp), ALLOCATABLE :: y(:), yo(:), yoo(:), hist(:)
     ! w(j) = sum over the strand of gres*SigmaRef^2/sigma_dc, i.e. the DC
     ! resistance weight, so that the strand dissipation is
     !   P_j = w(j) * [ y_j^2 + sum_k 2 (y_j - x_kj)^2 ],
     ! the first term being the DC loss and each ladder stage dissipating in its
     ! own 2 R_dc resistor. The tail inductance dissipates nothing.
     REAL(KIND=dp), ALLOCATABLE :: w(:)
+    ! The strand pieces of the last assembly, element by element: element,
+    ! strand and the piece's share of w, so that the loss beyond DC can be put
+    ! back in space.
+    INTEGER :: nPiece = 0
+    INTEGER, ALLOCATABLE :: pElem(:), pStrand(:)
+    REAL(KIND=dp), ALLOCATABLE :: pW(:)
   END TYPE FoilSkin_t
 
   TYPE(FoilSkin_t), ALLOCATABLE, SAVE :: FSkin(:)
   LOGICAL, SAVE :: fskin_allocated = .FALSE.
+
+  ! Per element of the 'Proximity Loss' field: the value found before the skin
+  ! ladder's share was added, and the value written (PublishFoilSkinExcess).
+  REAL(KIND=dp), ALLOCATABLE, SAVE :: PLBase(:), PLWritten(:)
+  LOGICAL, ALLOCATABLE, SAVE :: PLHave(:)
 
 CONTAINS
 
@@ -184,10 +200,12 @@ CONTAINS
       FSkin(i) % N       = nn
       FSkin(i) % nStrand = ns
       ALLOCATE(FSkin(i) % tau(nn), FSkin(i) % Minv(nn))
-      ALLOCATE(FSkin(i) % x(nn,ns), FSkin(i) % xo(nn,ns))
-      ALLOCATE(FSkin(i) % y(ns), FSkin(i) % yo(ns), FSkin(i) % hist(ns), FSkin(i) % w(ns))
-      FSkin(i) % x = 0._dp; FSkin(i) % xo = 0._dp
-      FSkin(i) % y = 0._dp; FSkin(i) % yo = 0._dp; FSkin(i) % hist = 0._dp
+      ALLOCATE(FSkin(i) % x(nn,ns), FSkin(i) % xo(nn,ns), FSkin(i) % xoo(nn,ns))
+      ALLOCATE(FSkin(i) % y(ns), FSkin(i) % yo(ns), FSkin(i) % yoo(ns), FSkin(i) % hist(ns), &
+          FSkin(i) % w(ns))
+      FSkin(i) % x = 0._dp; FSkin(i) % xo = 0._dp; FSkin(i) % xoo = 0._dp
+      FSkin(i) % y = 0._dp; FSkin(i) % yo = 0._dp; FSkin(i) % yoo = 0._dp
+      FSkin(i) % hist = 0._dp
       FSkin(i) % w = 0._dp
       FSkin(i) % Minv = 1._dp
 
@@ -209,9 +227,10 @@ CONTAINS
   END SUBROUTINE InitFoilSkinLadder
 
   !----------------------------------------------------------------------------
-  ! Start of a timestep: Schur factors for this dt and the BDF weights bdfw of
-  ! the step (TransientLadderBDF), and the history of every strand. Must run
-  ! before the assembly of the step.
+  ! Start of a timestep: commit the last iterate of the previous step, then the
+  ! Schur factors for this dt and the BDF weights bdfw of the step
+  ! (TransientLadderBDF), and the history of every strand. Must run once per
+  ! step, before its assembly.
   !----------------------------------------------------------------------------
   SUBROUTINE PrepareFoilSkinStep(dt, bdfw)
     IMPLICIT NONE
@@ -226,6 +245,11 @@ CONTAINS
 
     DO i = 1, SIZE(FSkin)
       IF (.NOT. FSkin(i) % Active) CYCLE
+      FSkin(i) % xoo = FSkin(i) % xo
+      FSkin(i) % xo  = FSkin(i) % x
+      FSkin(i) % yoo = FSkin(i) % yo
+      FSkin(i) % yo  = FSkin(i) % y
+
       FSkin(i) % bdfw = bdfw
       FSkin(i) % Gdiag = 1._dp + FSkin(i) % Ltail * c
       DO k = 1, FSkin(i) % N
@@ -235,9 +259,9 @@ CONTAINS
       END DO
 
       DO j = 1, FSkin(i) % nStrand
-        h = FSkin(i) % Ltail * (-(bdfw(2)*FSkin(i) % y(j) + bdfw(3)*FSkin(i) % yo(j))) / dt
+        h = FSkin(i) % Ltail * (-(bdfw(2)*FSkin(i) % yo(j) + bdfw(3)*FSkin(i) % yoo(j))) / dt
         DO k = 1, FSkin(i) % N
-          hx = FSkin(i) % tau(k) * (-(bdfw(2)*FSkin(i) % x(k,j) + bdfw(3)*FSkin(i) % xo(k,j))) / dt
+          hx = FSkin(i) % tau(k) * (-(bdfw(2)*FSkin(i) % xo(k,j) + bdfw(3)*FSkin(i) % xoo(k,j))) / dt
           h = h + 2._dp * hx * FSkin(i) % Minv(k)
         END DO
         FSkin(i) % hist(j) = h
@@ -245,21 +269,21 @@ CONTAINS
 
       WRITE(Message,'(A,I0,A,ES12.5,A,ES12.5,A,ES12.5)') 'Foil skin ladder comp ', i, &
           ': Gdiag = ', FSkin(i) % Gdiag, ', hist(1) = ', FSkin(i) % hist(1), &
-          ', y(1) = ', FSkin(i) % y(1)
+          ', y(1) = ', FSkin(i) % yo(1)
       CALL Info('PrepareFoilSkinStep', Message, Level=7)
     END DO
   END SUBROUTINE PrepareFoilSkinStep
 
   !----------------------------------------------------------------------------
-  ! End of a timestep: x_n^{k+1} = (y^{k+1} + hx_n)/M_n with the weights the
-  ! step was prepared with, then shift the history.
+  ! End of a timestep: x_n^{n+1} = (y^{n+1} + hx_n)/M_n from the committed
+  ! states, with the weights the step was prepared with.
   !----------------------------------------------------------------------------
   SUBROUTINE AdvanceFoilSkin(i, ynew, dt)
     IMPLICIT NONE
     INTEGER, INTENT(IN) :: i
     REAL(KIND=dp), INTENT(IN) :: ynew(:), dt
     INTEGER :: k, j
-    REAL(KIND=dp) :: hx, xnew
+    REAL(KIND=dp) :: hx
 
     IF (.NOT. fskin_allocated) RETURN
     IF (i < 1 .OR. i > SIZE(FSkin)) RETURN
@@ -268,26 +292,140 @@ CONTAINS
 
     ! The strand currents are recorded whether or not the ladder is on, because
     ! the loss bookkeeping needs them; only the stage states are advanced.
-    IF (.NOT. FSkin(i) % Active) THEN
-      DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
-        FSkin(i) % yo(j) = FSkin(i) % y(j)
-        FSkin(i) % y(j)  = ynew(j)
-      END DO
-      RETURN
-    END IF
+    DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
+      FSkin(i) % y(j) = ynew(j)
+    END DO
+    IF (.NOT. FSkin(i) % Active) RETURN
 
     DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
       DO k = 1, FSkin(i) % N
-        hx = FSkin(i) % tau(k) * (-(FSkin(i) % bdfw(2)*FSkin(i) % x(k,j) &
-            + FSkin(i) % bdfw(3)*FSkin(i) % xo(k,j))) / dt
-        xnew = (ynew(j) + hx) * FSkin(i) % Minv(k)
-        FSkin(i) % xo(k,j) = FSkin(i) % x(k,j)
-        FSkin(i) % x(k,j)  = xnew
+        hx = FSkin(i) % tau(k) * (-(FSkin(i) % bdfw(2)*FSkin(i) % xo(k,j) &
+            + FSkin(i) % bdfw(3)*FSkin(i) % xoo(k,j))) / dt
+        FSkin(i) % x(k,j) = (ynew(j) + hx) * FSkin(i) % Minv(k)
       END DO
-      FSkin(i) % yo(j) = FSkin(i) % y(j)
-      FSkin(i) % y(j)  = ynew(j)
     END DO
   END SUBROUTINE AdvanceFoilSkin
+
+  !----------------------------------------------------------------------------
+  ! Record one strand piece of component i as the assembly visits it.
+  !----------------------------------------------------------------------------
+  SUBROUTINE AddFoilSkinPiece(i, elem, strand, wp)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i, elem, strand
+    REAL(KIND=dp), INTENT(IN) :: wp
+    INTEGER, PARAMETER :: FirstCapacity = 1024
+    INTEGER :: n, m
+    INTEGER, ALLOCATABLE :: itmp(:)
+    REAL(KIND=dp), ALLOCATABLE :: rtmp(:)
+
+    n = FSkin(i) % nPiece + 1
+    IF (.NOT. ALLOCATED(FSkin(i) % pW)) THEN
+      ALLOCATE(FSkin(i) % pElem(FirstCapacity), FSkin(i) % pStrand(FirstCapacity), &
+          FSkin(i) % pW(FirstCapacity))
+    ELSE IF (n > SIZE(FSkin(i) % pW)) THEN
+      m = 2 * SIZE(FSkin(i) % pW)
+      ALLOCATE(itmp(m))
+      itmp(1:n-1) = FSkin(i) % pElem(1:n-1)
+      CALL MOVE_ALLOC(itmp, FSkin(i) % pElem)
+      ALLOCATE(itmp(m))
+      itmp(1:n-1) = FSkin(i) % pStrand(1:n-1)
+      CALL MOVE_ALLOC(itmp, FSkin(i) % pStrand)
+      ALLOCATE(rtmp(m))
+      rtmp(1:n-1) = FSkin(i) % pW(1:n-1)
+      CALL MOVE_ALLOC(rtmp, FSkin(i) % pW)
+    END IF
+    FSkin(i) % pElem(n) = elem
+    FSkin(i) % pStrand(n) = strand
+    FSkin(i) % pW(n) = wp
+    FSkin(i) % nPiece = n
+  END SUBROUTINE AddFoilSkinPiece
+
+  !----------------------------------------------------------------------------
+  ! Put the strand loss beyond DC, the dissipation w_j sum_k 2 (y_j - x_kj)^2 of
+  ! the skin ladder resistors, into the elemental 'Proximity Loss' field of the
+  ! sheet elements, spread over each strand's pieces like its DC loss. For a
+  ! transient foil sheet that field then carries all of the loss beyond the DC
+  ! Joule heating: the AV solver writes the reluctivity ladder's share and this
+  ! adds the skin ladder's, so 'Joule Heating' plus 'Proximity Loss' integrate
+  ! to the sheet loss. The value found is kept as the base: a second call
+  ! within a timestep replaces the skin share instead of adding it again, and a
+  ! value the AV solver wrote since becomes the new base.
+  !----------------------------------------------------------------------------
+  SUBROUTINE PublishFoilSkinExcess(Mesh)
+    IMPLICIT NONE
+    TYPE(Mesh_t), POINTER :: Mesh
+    TYPE(Variable_t), POINTER :: PL
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: sx(:), Basis(:)
+    REAL(KIND=dp) :: pe, vol, detJ, base
+    INTEGER :: i, j, k, r, e, idx, g, nv
+    LOGICAL :: stat
+
+    IF (.NOT. fskin_allocated) RETURN
+    IF (.NOT. ANY(FSkin(:) % Active)) RETURN
+    PL => VariableGet(Mesh % Variables, 'Proximity Loss', ThisOnly = .TRUE.)
+    IF (.NOT. ASSOCIATED(PL)) RETURN
+    IF (PL % TYPE /= Variable_on_elements) RETURN
+
+    nv = SIZE(PL % Values)
+    IF (ALLOCATED(PLBase)) THEN
+      IF (SIZE(PLBase) /= nv) DEALLOCATE(PLBase, PLWritten, PLHave)
+    END IF
+    IF (.NOT. ALLOCATED(PLBase)) THEN
+      ALLOCATE(PLBase(nv), PLWritten(nv), PLHave(nv))
+      PLHave = .FALSE.
+    END IF
+    ALLOCATE(Basis(Mesh % MaxElementNodes))
+
+    DO i = 1, SIZE(FSkin)
+      IF (.NOT. FSkin(i) % Active) CYCLE
+      ALLOCATE(sx(FSkin(i) % nStrand))
+      DO j = 1, FSkin(i) % nStrand
+        sx(j) = 0._dp
+        DO k = 1, FSkin(i) % N
+          sx(j) = sx(j) + 2._dp * (FSkin(i) % y(j) - FSkin(i) % x(k,j))**2
+        END DO
+      END DO
+
+      r = 1
+      DO WHILE (r <= FSkin(i) % nPiece)
+        e = FSkin(i) % pElem(r)
+        pe = 0._dp
+        DO WHILE (r <= FSkin(i) % nPiece)
+          IF (FSkin(i) % pElem(r) /= e) EXIT
+          pe = pe + FSkin(i) % pW(r) * sx(FSkin(i) % pStrand(r))
+          r = r + 1
+        END DO
+
+        idx = e
+        IF (ASSOCIATED(PL % Perm)) idx = PL % Perm(e)
+        IF (idx <= 0 .OR. idx > nv) CYCLE
+
+        Element => Mesh % Elements(e)
+        CALL GetElementNodes(Nodes, UElement = Element)
+        IP = GaussPoints(Element)
+        vol = 0._dp
+        DO g = 1, IP % n
+          stat = ElementInfo(Element, Nodes, IP % U(g), IP % V(g), IP % W(g), detJ, Basis)
+          vol = vol + IP % s(g) * detJ
+        END DO
+        IF (vol <= 0._dp) CYCLE
+
+        IF (PLHave(idx) .AND. PL % Values(idx) == PLWritten(idx)) THEN
+          base = PLBase(idx)
+        ELSE
+          base = PL % Values(idx)
+        END IF
+        PL % Values(idx) = base + pe / vol
+        PLBase(idx) = base
+        PLWritten(idx) = PL % Values(idx)
+        PLHave(idx) = .TRUE.
+      END DO
+      DEALLOCATE(sx)
+    END DO
+  END SUBROUTINE PublishFoilSkinExcess
 
   !----------------------------------------------------------------------------
   ! Instantaneous strand dissipation of a component and its DC part. The ladder
@@ -888,7 +1026,10 @@ CONTAINS
       ! The strand resistance weights are re-accumulated with the matrix.
       IF (fskin_allocated) THEN
         IF (Comp % ComponentId >= 1 .AND. Comp % ComponentId <= SIZE(FSkin)) THEN
-          IF (FSkin(Comp % ComponentId) % Alloc) FSkin(Comp % ComponentId) % w = 0._dp
+          IF (FSkin(Comp % ComponentId) % Alloc) THEN
+            FSkin(Comp % ComponentId) % w = 0._dp
+            FSkin(Comp % ComponentId) % nPiece = 0
+          END IF
         END IF
       END IF
 
@@ -1795,6 +1936,7 @@ CONTAINS
       ! this piece, which turns the strand dofs into a dissipation. Accumulated
       ! whether or not the ladder is on, so that the loss is reported either way.
       IF (HaveSkinState) FSkin(CompId) % w(sInd) = FSkin(CompId) % w(sInd) + Kfac * Comp % SigmaRef
+      IF (SkinLadder) CALL AddFoilSkinPiece(CompId, Element % ElementIndex, sInd, Kfac * Comp % SigmaRef)
       CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -sdofscl * g * Comp % VoltageFactor)
       CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g / sdofscl)
 
@@ -4099,11 +4241,11 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
    IF (Transient) THEN
      BLOCK
        INTEGER :: ci, kc, js, vvid, nce, nse, idx, nskin, nFSkin
-       LOGICAL :: gotid, gotp
+       LOGICAL :: gotid, gotp, gotq
        TYPE(ValueList_t), POINTER :: CPar
        REAL(KIND=dp), ALLOCATABLE :: ynew(:)
-       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pexcess, Pprox
-       Pstrand = 0._dp; Pexcess = 0._dp; nskin = 0
+       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pstranddc, Pprox, Pother
+       Pstrand = 0._dp; Pstranddc = 0._dp; nskin = 0
        nFSkin = 0
        IF (fskin_allocated) nFSkin = SIZE(FSkin)
        DO ci = 1, nFSkin
@@ -4126,30 +4268,37 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
          CALL AdvanceFoilSkin(ci, ynew, dt)
          CALL FoilSkinLoss(ci, Ptot, Pdc)
          Pstrand = Pstrand + Ptot
-         Pexcess = Pexcess + (Ptot - Pdc)
+         Pstranddc = Pstranddc + Pdc
          DEALLOCATE(ynew)
        END DO
 
+       CALL PublishFoilSkinExcess(ASolver % Mesh)
+
        ! The weights are partition-local sums, so the losses are too. Together
-       ! the two terms are the whole dissipation of a foil sheet block in
-       ! transient: the strand loss already contains the DC part, and the
-       ! proximity loss is the reluctivity ladder's, integrated by the AV
-       ! solver. They REPLACE 'res: Eddy current power' rather than adding to
-       ! it, because the circuit is the reference for the dissipation of this
-       ! coil type: the 'Joule Heating' field carries the strand loss with the
-       ! DC sheet conductivity, but the skin ladder's excess (Ptot - Pdc) is
-       ! not in it, so only these scalars hold the whole loss.
-       ! Both of these are collective, so every partition has to reach them,
+       ! the strand loss (the DC part and the skin ladder's) and the proximity
+       ! loss (the reluctivity ladder's, integrated by the AV solver) are the
+       ! whole dissipation of the foil sheet blocks in transient.
+       ! MagnetoDynamicsCalcFields has them at the DC sheet conductivity only and
+       ! publishes every other conductor apart, so the total conductor loss is
+       ! that plus the sheets whole. Nothing here reads what it writes, so a
+       ! second call within a timestep gives the same numbers.
+       ! The reductions are collective, so every partition has to reach them,
        ! including one whose mesh carries no sheet element and whose ladder
        ! state is therefore not allocated. The "is there a sheet" flag is
        ! reduced first, so the branch below is taken on all ranks or on none.
        nskin = ParallelReduction(nskin, 2)
        Pstrand = ParallelReduction(Pstrand)
+       Pstranddc = ParallelReduction(Pstranddc)
        IF (nskin > 0) THEN
          Pprox = GetConstReal(Model % Simulation, 'res: sheet proximity loss', gotp)
          IF (.NOT. gotp) Pprox = 0._dp
+         Pother = GetConstReal(Model % Simulation, 'Eddy current power outside foil sheets', gotq)
+         IF (.NOT. gotq) Pother = 0._dp
          CALL ListAddConstReal(Model % Simulation, 'res: sheet strand loss', Pstrand)
-         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', Pstrand + Pprox)
+         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', Pother + (Pstrand + Pprox))
+         WRITE(Message,'(A,4ES13.5)') 'Foil sheet strand loss, its DC part, sheet proximity loss, '// &
+             'other conductors:', Pstrand, Pstranddc, Pprox, Pother
+         CALL Info(Caller, Message, Level=5)
        END IF
      END BLOCK
    END IF
