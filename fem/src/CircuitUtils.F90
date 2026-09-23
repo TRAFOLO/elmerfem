@@ -3965,11 +3965,13 @@ END FUNCTION isComponentName
     INTEGER, ALLOCATABLE :: Lbl(:), gIdx(:)
     LOGICAL, ALLOCATABLE :: IsCross(:,:)
     REAL(KIND=dp) :: detJ, gw(3), gc(3), sig, efl, Ener, Flux(2), Mult(2), &
-        Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2)
+        Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2), MultMax, MultMin
     INTEGER :: e, n, gp, nmax, nno, nbulk, b, i, m, nPatch(2)
     INTEGER, POINTER :: Indexes(:)
     LOGICAL :: stat, Found, Parallel, Split, Changed
     CHARACTER(*), PARAMETER :: Caller = 'Circuits_Init'
+    CHARACTER(*), PARAMETER :: MultName(2) = [ CHARACTER(32) :: &
+        'Coil Potential Multiplier', 'Coil Potential Multiplier B' ]
     ! The cut potential runs over [0,1] and is pinned to exactly 0 and 1 on the
     ! two sides of the single element layer it is cut at, so half of the full
     ! range separates a crossing element from every other element of the coil.
@@ -3988,9 +3990,23 @@ END FUNCTION isComponentName
     nbulk = Mesh % NumberOfBulkElements
     Parallel = (ParEnv % PEs > 1)
 
-    Mult(1) = ListGetConstReal(CompParams, 'Coil Potential Multiplier', Found)
-    IF (Found) Mult(2) = ListGetConstReal(CompParams, 'Coil Potential Multiplier B', Found)
-    IF (.NOT. Found) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
+    ! The CoilSolver returns before it scales anything on a partition that holds
+    ! no element of the coil, which is the normal case for a coil small against
+    ! the model, so the multipliers are missing there. Every partition that did
+    ! scale got the same value and the others hold zero, so reducing over all of
+    ! them hands that value to every one. It is taken by magnitude because the
+    ! sign of the multiplier is the winding sense of the cut, either way round.
+    DO b = 1, 2
+      Mult(b) = ListGetConstReal(CompParams, MultName(b), Found)
+      IF (.NOT. Found) Mult(b) = 0._dp
+      MultMax = ParallelReduction(Mult(b), 2)
+      MultMin = ParallelReduction(Mult(b), 1)
+      Mult(b) = MERGE(MultMax, MultMin, ABS(MultMax) >= ABS(MultMin))
+      IF (.NOT. Found .AND. Mult(b) /= 0._dp) &
+          CALL ListAddConstReal(CompParams, MultName(b), Mult(b))
+    END DO
+
+    IF (ALL(Mult == 0._dp)) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
         ' is a closed massive coil but the CoilSolver has not run with '// &
         '"Coil Closed": there is no cut potential to normalize.')
     IF (ANY(Mult == 0._dp)) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
