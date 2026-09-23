@@ -2947,12 +2947,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END DO
        END DO
 
-       TotalLoss = 0._dp
        DO j=1,3
          DO i=1,Model % NumberOfBodies
            BodyLoss(j,i) = ParallelReduction(BodyLoss(j,i)) / NoSlices
          END DO
-         TotalLoss(j) = SUM( BodyLoss(j,:) )
        END DO
      END IF
 
@@ -3021,6 +3019,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    
    
    IF (LossEstimation) THEN
+     DO j=1,3
+       TotalLoss(j) = SUM( BodyLoss(j,:) )
+     END DO
      CALL ListAddConstReal( Model % Simulation,'res: harmonic loss linear',TotalLoss(1) )
      CALL ListAddConstReal( Model % Simulation,'res: harmonic loss quadratic',TotalLoss(2) )
      CALL ListAddConstReal( Model % Simulation,'res: joule loss',TotalLoss(3) )
