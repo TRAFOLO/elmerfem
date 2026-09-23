@@ -1689,6 +1689,14 @@ Component:Logical:   'Coil Closed'
 Component:Real:      'Coil Potential Multiplier'
 Component:Real:      'Coil Potential Multiplier B'
 Component:Real:      'Coil Circulation'
+! Keep the Dirichlet layer of the cut at one crossing of the cut plane, the
+! piece with the largest global node index or, with "Select Min Coil Cut", the
+! smallest. A closed solid coil of several turns needs it: it is then cut once
+! and carries one series current. The CoilSolver writes "Single Coil Cut" into
+! the Component it applied it to, which is where the circuits solver reads it.
+Solver:Logical:      'Single Coil Cut'
+Solver:Logical:      'Select Min Coil Cut'
+Component:Logical:   'Single Coil Cut'
 ! Flat wire winding (per-turn cell model).
 Component:Integer:   'Turns Across'
 Component:String:    'Stacking Direction'

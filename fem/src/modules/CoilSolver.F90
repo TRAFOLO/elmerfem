@@ -290,7 +290,8 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
   TestCut = .FALSE.
   OneCut = .FALSE.
   IF( CoilParts == 2 ) THEN
-    OneCut = GetLogical( Params,'Single Coil Cut',Found )
+    OneCut = GetLogical( Params,'Single Coil Cut',Found ) .OR. &
+        ListGetLogicalAnyComponent( Model,'Single Coil Cut')
     TestCut = GetLogical( Params,'Test Coil Cut',Found )
         
     ALLOCATE( SetB(nsize) )
@@ -419,6 +420,13 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
       Set => SetB
       CALL ChooseFixedBulkNodesNarrow(Set,2,SelectNodes)
       IF( OneCut ) CALL ChooseCoilCut(Set,SelectNodes)
+
+      ! The circuit side reads this back to know that the cut potential it
+      ! normalizes ramps once over the whole wire instead of once per turn.
+      IF( OneCut .AND. CoilCompInd(NoCoils) > 0 ) THEN
+        CALL ListAddLogical( Model % Components(CoilCompInd(NoCoils)) % Values, &
+            'Single Coil Cut', .TRUE. )
+      END IF
     ELSE
       Set => SetA
       CALL ChooseFixedEndNodes(Set)
@@ -1270,12 +1278,20 @@ CONTAINS
 100 DO WHILE(.NOT. Ready) 
       Ready = .TRUE.
 
-      DO t = 1, Mesh % NumberOfBulkElements
-        Element => Mesh % Elements(t)        
+      ! Only the elements of the coil carry the piece index from node to node.
+      ! Filtering by node is not enough: an element of the surrounding mesh that
+      ! fits in the gap between two turns has all of its nodes on the coil
+      ! surface, and it merges the two cuts there into one piece.
+      DO t = 1, GetNOFActive()
+        Element => GetActiveElement(t)
         Indexes => Element % NodeIndexes
         n = Element % TYPE % NumberOfNodes
         pIndexes(1:n) = Perm(Indexes)
-        
+
+        IF( SelectNodes ) THEN
+          IF( ANY( CoilIndex(Indexes(1:n)) /= NoCoils ) ) CYCLE
+        END IF
+
         GotAny = .FALSE.
         DO i=1,n
           j = Perm(Indexes(i))
@@ -1377,12 +1393,14 @@ CONTAINS
     !PRINT *,'MinMax:',ParEnv % MyPe, MinIndex, MaxIndex, NoPieces, COUNT( MeshPiece > 0 )
     
     NoPieces = ParallelReduction(NoPieces)
-    CALL Info(Caller,'Number of separate cuts in mesh is '//I2S(NoPieces),Level=12)
+    CALL Info(Caller,'Number of separate cuts in mesh is '//I2S(NoPieces),Level=5)
     IF(NoPieces == 1 ) RETURN
 
     MaxIndex = ParallelReduction(MaxIndex,2)
 
 
+    ! Only the nodes tagged above are cleared: the set is shared by all the coils
+    ! of the solver, and the pieces of the other coils are not tagged here.
     IF( ListGetLogical( Solver % Values,'Select Min Coil Cut',Found ) ) THEN
       ! We may choose the minimum index
       IF( NoCand > 0 ) THEN
@@ -1391,10 +1409,10 @@ CONTAINS
         MinIndex = MaxIndex
       END IF
       MinIndex = ParallelReduction(MinIndex,1)      
-      WHERE ( MeshPiece /= MinIndex ) Set = 0
+      WHERE ( MeshPiece > 0 .AND. MeshPiece /= MinIndex ) Set = 0
     ELSE      
       ! Or the maximum. We don't really know how many there are.
-      WHERE ( MeshPiece /= MaxIndex) Set = 0
+      WHERE ( MeshPiece > 0 .AND. MeshPiece /= MaxIndex) Set = 0
     END IF
  
   END SUBROUTINE ChooseCoilCut
