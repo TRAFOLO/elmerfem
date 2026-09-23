@@ -474,14 +474,12 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   ! ladder, i.e. which need an Xi state.
   REAL(KIND=dp) :: nu_eff_dir(3)
   LOGICAL :: dir_active(3)
-  ! BDF coefficients (variable-dt aware). xi_dot ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1})/bdf_dt.
-  ! BDF-1: a1=1, a2=-1, a3=0, bdf_dt=dt
-  ! BDF-2: a1=(1+2k)/(1+k), a2=-(1+k), a3=k^2/(1+k), bdf_dt=dt with k=dt/dt_prev
-  ! Zero until an assembly sets them: a partition with no homogenized element
-  ! still enters the Xi update, and a stale dt there would divide by garbage.
+  ! BDF coefficients, xi_dot ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1})/bdf_dt, from
+  ! TransientLadderBDF. Zero until an assembly sets them: a partition with no
+  ! homogenized element still enters the Xi update, and a stale dt there would
+  ! divide by garbage.
   REAL(KIND=dp) :: bdf_alpha_1 = 0.0_dp, bdf_alpha_2 = 0.0_dp, bdf_alpha_3 = 0.0_dp
   REAL(KIND=dp) :: bdf_dt = 0.0_dp, MkFos
-  REAL(KIND=dp) :: dt_prev = -1.0_dp
   ! fos_* are the ladder itself; hcoef_* are this timestep's Schur history
   ! weights, so that the constitutive law at an integration point reads
   !   H_d = nu_eff_dir(d) * B_d - sum_k [ hcoef_n(k,d) xi^n + hcoef_n1(k,d) xi^{n-1} ].
@@ -507,7 +505,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
        Acoef, Cwrk, LamThick, LamCond, Wbase, RotM, AllocationsDone, &
        Acoef_t, ThinLineCrossect, ThinLineCond, nSTIFF, nFORCE, &
        HomogLadderOrder_alloc, fos_y0, fos_r, fos_T, hcoef_n, hcoef_n1, &
-       XiD, nu_eff_dir, dir_active, prox_loss_var, dt_prev
+       XiD, nu_eff_dir, dir_active, prox_loss_var
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN	
 
@@ -3892,9 +3890,6 @@ END SUBROUTINE LocalConstraintMatrix
       prox_total = ParallelReduction(prox_total)
       CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet proximity loss', prox_total)
     END IF
-
-    ! Record the dt just used, so the next Schur block can form k = dt/dt_prev.
-    dt_prev = dt
 !------------------------------------------------------------------------------
   END SUBROUTINE UpdateTransientHomogXiState
 !------------------------------------------------------------------------------
