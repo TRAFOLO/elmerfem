@@ -89,9 +89,10 @@ MODULE TransientHomogCircuitState
   ! u coth u to 0.05 % in the real part and 0.00 % in the imaginary part at
   ! 100 kHz for a 0.5 mm foil.
   !
-  ! Discretely, with c = 1/dt for BDF-1 and 3/(2 dt) for BDF-2, a_n = c tau_n
-  ! and M_n = 1 + a_n, the Schur elimination of the states gives a diagonal
-  ! factor and a history term that only involve stored quantities:
+  ! Discretely, with the BDF weights bdfw of the step (TransientLadderBDF),
+  ! c = bdfw(1)/dt, a_n = c tau_n and M_n = 1 + a_n, the Schur elimination of the
+  ! states gives a diagonal factor and a history term that only involve stored
+  ! quantities:
   !     Gdiag = 1 + sum_n 2 a_n/M_n + c L_tail
   !     hist  = sum_n 2 hx_n/M_n + hy
   ! with hx_n and hy the BDF history of x_n and y.
@@ -102,6 +103,8 @@ MODULE TransientHomogCircuitState
     LOGICAL :: Active = .FALSE., Alloc = .FALSE.
     INTEGER :: N = 0, nStrand = 0, nCells = 0, nSegments = 0
     REAL(KIND=dp) :: Ltail = 0._dp, Gdiag = 1._dp
+    ! BDF weights of the current step, set with the Schur factors.
+    REAL(KIND=dp) :: bdfw(3) = [1._dp, -1._dp, 0._dp]
     ! Similarity transform of the strand dof, transient only. The AV<-y and
     ! y<-a border blocks differ by SigmaRef*dt/a1 (~600 at 1 kHz), which makes
     ! the bordered system violently non-symmetric. Solving for y' = DofScale*y
@@ -206,27 +209,24 @@ CONTAINS
   END SUBROUTINE InitFoilSkinLadder
 
   !----------------------------------------------------------------------------
-  ! Start of a timestep: Schur factors for this dt and the history of every
-  ! strand. Must run before the assembly of the step.
+  ! Start of a timestep: Schur factors for this dt and the BDF weights bdfw of
+  ! the step (TransientLadderBDF), and the history of every strand. Must run
+  ! before the assembly of the step.
   !----------------------------------------------------------------------------
-  SUBROUTINE PrepareFoilSkinStep(dt, bdf)
+  SUBROUTINE PrepareFoilSkinStep(dt, bdfw)
     IMPLICIT NONE
-    REAL(KIND=dp), INTENT(IN) :: dt
-    INTEGER, INTENT(IN) :: bdf
+    REAL(KIND=dp), INTENT(IN) :: dt, bdfw(3)
     INTEGER :: i, k, j
     REAL(KIND=dp) :: c, a, hx, h
 
     IF (.NOT. fskin_allocated) RETURN
     IF (dt <= 0._dp) RETURN
 
-    IF (bdf >= 2) THEN
-      c = 1.5_dp/dt
-    ELSE
-      c = 1._dp/dt
-    END IF
+    c = bdfw(1)/dt
 
     DO i = 1, SIZE(FSkin)
       IF (.NOT. FSkin(i) % Active) CYCLE
+      FSkin(i) % bdfw = bdfw
       FSkin(i) % Gdiag = 1._dp + FSkin(i) % Ltail * c
       DO k = 1, FSkin(i) % N
         a = FSkin(i) % tau(k) * c
@@ -235,17 +235,9 @@ CONTAINS
       END DO
 
       DO j = 1, FSkin(i) % nStrand
-        IF (bdf >= 2) THEN
-          h = FSkin(i) % Ltail * (4._dp*FSkin(i) % y(j) - FSkin(i) % yo(j)) / (2._dp*dt)
-        ELSE
-          h = FSkin(i) % Ltail * FSkin(i) % y(j) / dt
-        END IF
+        h = FSkin(i) % Ltail * (-(bdfw(2)*FSkin(i) % y(j) + bdfw(3)*FSkin(i) % yo(j))) / dt
         DO k = 1, FSkin(i) % N
-          IF (bdf >= 2) THEN
-            hx = FSkin(i) % tau(k) * (4._dp*FSkin(i) % x(k,j) - FSkin(i) % xo(k,j)) / (2._dp*dt)
-          ELSE
-            hx = FSkin(i) % tau(k) * FSkin(i) % x(k,j) / dt
-          END IF
+          hx = FSkin(i) % tau(k) * (-(bdfw(2)*FSkin(i) % x(k,j) + bdfw(3)*FSkin(i) % xo(k,j))) / dt
           h = h + 2._dp * hx * FSkin(i) % Minv(k)
         END DO
         FSkin(i) % hist(j) = h
@@ -259,11 +251,12 @@ CONTAINS
   END SUBROUTINE PrepareFoilSkinStep
 
   !----------------------------------------------------------------------------
-  ! End of a timestep: x_n^{k+1} = (y^{k+1} + hx_n)/M_n, then shift the history.
+  ! End of a timestep: x_n^{k+1} = (y^{k+1} + hx_n)/M_n with the weights the
+  ! step was prepared with, then shift the history.
   !----------------------------------------------------------------------------
-  SUBROUTINE AdvanceFoilSkin(i, ynew, dt, bdf)
+  SUBROUTINE AdvanceFoilSkin(i, ynew, dt)
     IMPLICIT NONE
-    INTEGER, INTENT(IN) :: i, bdf
+    INTEGER, INTENT(IN) :: i
     REAL(KIND=dp), INTENT(IN) :: ynew(:), dt
     INTEGER :: k, j
     REAL(KIND=dp) :: hx, xnew
@@ -285,11 +278,8 @@ CONTAINS
 
     DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
       DO k = 1, FSkin(i) % N
-        IF (bdf >= 2) THEN
-          hx = FSkin(i) % tau(k) * (4._dp*FSkin(i) % x(k,j) - FSkin(i) % xo(k,j)) / (2._dp*dt)
-        ELSE
-          hx = FSkin(i) % tau(k) * FSkin(i) % x(k,j) / dt
-        END IF
+        hx = FSkin(i) % tau(k) * (-(FSkin(i) % bdfw(2)*FSkin(i) % x(k,j) &
+            + FSkin(i) % bdfw(3)*FSkin(i) % xo(k,j))) / dt
         xnew = (ynew(j) + hx) * FSkin(i) % Minv(k)
         FSkin(i) % xo(k,j) = FSkin(i) % x(k,j)
         FSkin(i) % x(k,j)  = xnew
@@ -330,21 +320,6 @@ CONTAINS
       Ptot = Ptot + FSkin(i) % w(j) * s
     END DO
   END SUBROUTINE FoilSkinLoss
-
-  !----------------------------------------------------------------------------
-  ! BDF order actually used for the ladder: the simulation's, capped at 2, and
-  ! 1 on the first step because BDF-2 has no history there.
-  !----------------------------------------------------------------------------
-  FUNCTION FoilSkinBDFOrder() RESULT(bdf)
-    IMPLICIT NONE
-    INTEGER :: bdf
-    LOGICAL :: found
-
-    bdf = ListGetInteger(CurrentModel % Simulation, 'BDF Order', found)
-    IF (.NOT. found) bdf = 1
-    bdf = MAX(1, MIN(2, bdf))
-    IF (GetTimestep() <= 1) bdf = 1
-  END FUNCTION FoilSkinBDFOrder
 
   !----------------------------------------------------------------------------
   ! One-time allocation + per-Component SIF triplet read. Called from
@@ -679,7 +654,8 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     END IF
 
     ! The foil sheet ladder history changes every step, not only when dt does.
-    IF (TransientSimulation) CALL PrepareFoilSkinStep(dt, FoilSkinBDFOrder())
+    IF (TransientSimulation) CALL PrepareFoilSkinStep(dt, &
+        TransientLadderBDF(Model % ASolver % Order, dt))
 
     ! Circuit variable values from previous timestep:
     ! -----------------------------------------------
@@ -1647,19 +1623,17 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> BDF extrapolation weight of the transient strand equation: 1 while the first
-!> order scheme runs, 1.5 once the second order one does.
+!> Weight of the new state in the BDF derivative of the transient strand
+!> equation: the first TransientLadderBDF weight of the step.
 !------------------------------------------------------------------------------
    FUNCTION FoilSheetTimeScale() RESULT(tscl)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     REAL(KIND=dp) :: tscl
+    REAL(KIND=dp) :: w(3)
 
-    IF (Solver % Order < 2 .OR. GetTimeStep() <= 2) THEN
-      tscl = 1._dp
-    ELSE
-      tscl = 1.5_dp
-    END IF
+    w = TransientLadderBDF(CurrentModel % ASolver % Order, dt)
+    tscl = w(1)
 !------------------------------------------------------------------------------
    END FUNCTION FoilSheetTimeScale
 !------------------------------------------------------------------------------
@@ -1705,7 +1679,7 @@ CONTAINS
     TYPE(Solver_t), POINTER :: ASolver
     INTEGER, POINTER :: PS(:)
     TYPE(Matrix_t), POINTER :: CM
-    REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s
+    REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s, bdfw(3)
     REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
     INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
     LOGICAL :: stat, PiolaVersion, Found
@@ -1748,11 +1722,13 @@ CONTAINS
     nd = GetElementDOFs(Indexes,Element,ASolver)
     CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
 
+    ! (tscl a^{n+1} - pPOT)/dt is the BDF derivative of a in the strand equation.
     CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
-    tscl = FoilSheetTimeScale()
-    IF (tscl > 1._dp) THEN
+    bdfw = TransientLadderBDF(ASolver % Order, dt)
+    tscl = bdfw(1)
+    IF (bdfw(3) /= 0._dp) THEN
       CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
-      pPot = 2*pPOT - 0.5_dp*ppPOT
+      pPot = -(bdfw(2)*pPOT + bdfw(3)*ppPOT)
     END IF
 
     CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
@@ -4122,12 +4098,11 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
    ! partitions, so every partition advances the same states.
    IF (Transient) THEN
      BLOCK
-       INTEGER :: ci, kc, js, vvid, bdf, nce, nse, idx, nskin, nFSkin
+       INTEGER :: ci, kc, js, vvid, nce, nse, idx, nskin, nFSkin
        LOGICAL :: gotid, gotp
        TYPE(ValueList_t), POINTER :: CPar
        REAL(KIND=dp), ALLOCATABLE :: ynew(:)
        REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pexcess, Pprox
-       bdf = FoilSkinBDFOrder()
        Pstrand = 0._dp; Pexcess = 0._dp; nskin = 0
        nFSkin = 0
        IF (fskin_allocated) nFSkin = SIZE(FSkin)
@@ -4148,7 +4123,7 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
              IF (idx >= 1 .AND. idx <= circuit_tot_n) ynew((kc-1)*nse + js) = crt(idx) / FSkin(ci) % DofScale
            END DO
          END DO
-         CALL AdvanceFoilSkin(ci, ynew, dt, bdf)
+         CALL AdvanceFoilSkin(ci, ynew, dt)
          CALL FoilSkinLoss(ci, Ptot, Pdc)
          Pstrand = Pstrand + Ptot
          Pexcess = Pexcess + (Ptot - Pdc)

@@ -1083,22 +1083,15 @@ CONTAINS
                                                fos_y0(3), fos_r(:,3), fos_T(:,3))
 
        ! BDF coefficients for  T_k xi_dot + xi = b.
-       ! Stencil: xi_dot(t^{n+1}) ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1}) / bdf_dt.
-       ! BDF-1: a1=1, a2=-1, a3=0. BDF-2 is variable-dt aware with k = dt/dt_prev.
-       ! Falls back to BDF-1 when Solver Order < 2, on the first two timesteps
-       ! (no xi^{n-1} yet), or before dt_prev has been recorded.
+       ! Stencil: xi_dot(t^{n+1}) ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1}) / bdf_dt,
+       ! the same weights and startup as the foil sheet strand skin ladder and
+       ! strand coupling (TransientLadderBDF).
        BLOCK
-         REAL(KIND=dp) :: k_ratio
-         IF (Solver % Order < 2 .OR. GetTimeStep() <= 2 .OR. dt_prev <= 0.0_dp) THEN
-           bdf_alpha_1 =  1.0_dp
-           bdf_alpha_2 = -1.0_dp
-           bdf_alpha_3 =  0.0_dp
-         ELSE
-           k_ratio     = dt / dt_prev
-           bdf_alpha_1 = (1.0_dp + 2.0_dp * k_ratio) / (1.0_dp + k_ratio)
-           bdf_alpha_2 = -(1.0_dp + k_ratio)
-           bdf_alpha_3 = (k_ratio * k_ratio) / (1.0_dp + k_ratio)
-         END IF
+         REAL(KIND=dp) :: bdfw(3)
+         bdfw = TransientLadderBDF(Solver % Order, dt)
+         bdf_alpha_1 = bdfw(1)
+         bdf_alpha_2 = bdfw(2)
+         bdf_alpha_3 = bdfw(3)
          bdf_dt = dt
        END BLOCK
 

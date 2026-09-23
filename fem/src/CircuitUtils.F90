@@ -50,6 +50,10 @@ MODULE CircuitUtils
     ! above this instead of running off the buffer.
     INTEGER, PARAMETER :: MaxFoilSheetPieces = 1024
 
+    ! Largest relative change of the timestep that VBDF_CRS still treats as a
+    ! constant step; the transient ladders follow it.
+    REAL(KIND=dp), PARAMETER :: ConstantStepTolerance = 1.0e-6_dp
+
     !> Element quadrature of the foil sheet strand integrals, shared by the
     !> harmonic and the transient kernel and by the strand checks.
     TYPE FoilSheetQuad_t
@@ -709,6 +713,64 @@ CONTAINS
     taus(1) = SigmaMat(1,1)
 !------------------------------------------------------------------------------
   END SUBROUTINE GetFosterLadder
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> BDF weights of a transient ladder state or coupling,
+!>   x'(t^{n+1}) ~ ( a(1) x^{n+1} + a(2) x^n + a(3) x^{n-1} ) / dt,
+!> for the given order (capped at 2), step dt and previous step dtp: the
+!> weights of BDFLocal while the step is unchanged and those of VBDFLocal when
+!> it changes, scaled by dt.
+!------------------------------------------------------------------------------
+  PURE FUNCTION LadderBDFWeights(Order, dt, dtp) RESULT(a)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: Order
+    REAL(KIND=dp), INTENT(IN) :: dt, dtp
+    REAL(KIND=dp) :: a(3)
+    REAL(KIND=dp) :: k
+
+    IF (Order < 2) THEN
+      a = [1._dp, -1._dp, 0._dp]
+    ELSE IF (dtp <= 0._dp .OR. ABS(dtp - dt) <= ConstantStepTolerance * dt) THEN
+      a = [1.5_dp, -2._dp, 0.5_dp]
+    ELSE
+      k = dt / dtp
+      a = [(1._dp + 2._dp*k) / (1._dp + k), -(1._dp + k), k*k / (1._dp + k)]
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LadderBDFWeights
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> BDF weights of this timestep for the transient homogenization ladders (the
+!> reluctivity ladder of the AV solver, the foil sheet strand skin ladder) and
+!> for the foil sheet strand coupling -(da/dt, t), which all take them from here
+!> so that they integrate with one scheme. Order is the solver's BDF order. The
+!> startup is that of the circuit coil couplings, first order on the first two
+!> timesteps, and the previous step comes from the 'Timestep size' history, as
+!> in Add1stOrderTime_CRS.
+!------------------------------------------------------------------------------
+  FUNCTION TransientLadderBDF(Order, dt) RESULT(a)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: Order
+    REAL(KIND=dp) :: dt, a(3)
+    TYPE(Variable_t), POINTER :: DtVar
+    REAL(KIND=dp) :: dtp
+
+    IF (Order < 2 .OR. GetTimestep() <= 2) THEN
+      a = LadderBDFWeights(1, dt, dt)
+      RETURN
+    END IF
+    dtp = dt
+    DtVar => VariableGet(CurrentModel % Mesh % Variables, 'Timestep size')
+    IF (ASSOCIATED(DtVar)) THEN
+      IF (ASSOCIATED(DtVar % PrevValues)) dtp = DtVar % PrevValues(1,1)
+    END IF
+    a = LadderBDFWeights(2, dt, dtp)
+!------------------------------------------------------------------------------
+  END FUNCTION TransientLadderBDF
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
