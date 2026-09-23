@@ -3557,6 +3557,13 @@ END FUNCTION isComponentName
 
     Transient = (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient')
 
+    ! The transient material, and the reluctivity and strand skin ladders built
+    ! from it, are fixed here at the first circuits call: a 'Sheet Conductivity'
+    ! function of Temperature and LossFactor is averaged over the block with the
+    ! values of the initial conditions or of a restart file, both loaded before
+    ! the first timestep. Init only, since the transient SIF writer keeps
+    ! Temperature fixed over a run; a thermal iteration is a new run from the
+    ! new temperature.
     IF (Transient) THEN
       IF (nSub /= 1) CALL Fatal('Circuits_Init', &
           'Foil sheet transient supports "Sheet Sublayers = 1" only; the strand '// &
