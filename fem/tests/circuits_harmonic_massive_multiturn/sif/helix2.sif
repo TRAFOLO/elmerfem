@@ -1,18 +1,24 @@
-! Closed (full 360 degree) solid conductor: a massive coil with no electrodes
-! and no W potential. The direction field is the CoilSolver cut potential,
-! normalized to unit circulation per turn by the ratio of the coil's
-! int sigma |grad W|^2 to the flux through the cut crossings.
-! Reference: the open half model of the same ring, a massive coil on mesh 6459
-! with electrodes on the symmetry plane and "Circuit Equation Voltage Factor =
-! 0.5". Its R and L agree with this one to 0.53 %.
-! Mesh: circuits_harmonic_foil/6459 mirrored about z=0 (ElmerGrid -mirror 0 0 1).
-! The cut plane crosses this ring once, so "Single Coil Cut" has nothing to drop
-! here and only covers that a coil with one crossing is left alone.
+! Closed (full loop) solid conductor that makes more than one turn: a two turn
+! helix of 3x3 mm aluminium wire, radius 12 mm, pitch 7 mm, closed on itself by
+! a return path outside the helix tube. The cut plane of the CoilSolver crosses
+! it twice per branch, once per turn, and "Single Coil Cut" keeps the Dirichlet
+! layer on one of the two crossings, the piece with the largest global node
+! index, so that the cut potential ramps once over the whole wire and the turns
+! carry one series current. Without it every crossing is pinned separately and
+! the run stops on the one crossing check of a closed massive coil.
+! "Number of Turns" is not given: it does not enter the normalization of a coil
+! that is cut once.
+! Reference: a StatCurrentSolver DC solve of the same conductor with a 0.1 mm
+! gap in the lower stub gives R_dc = 7.187522E-04 Ohm. The source current is
+! sqrt(2) A of amplitude, so "res: eddy current power" is I_rms^2 R = R at 50 Hz,
+! where the skin depth of 11.9 mm makes the AC resistance the DC one: the pinned
+! norm is 0.04 % above R_dc.
+! Mesh: gmsh, see the DEV-1525 validation scripts.
 Check Keywords "Warn"
-INCLUDE sif/6459r-circuits.definitions
-INCLUDE 6459r/mesh.names
+INCLUDE sif/helix2-circuits.definitions
+INCLUDE helix2/mesh.names
 Header 1
-   Mesh DB "." "6459r"
+   Mesh DB "." "helix2"
 End
 Constants 1
    Permittivity of Vacuum = 8.8542e-12
@@ -25,7 +31,6 @@ Simulation 1
    Max Output Level = 5
    Coordinate System = Cartesian 3D
    Coordinate Mapping(3) = 1 2 3
-   Coordinate Scaling = 0.001
    Simulation Type = Steady
    Steady State Max Iterations = 1
    BDF Order = 1
@@ -68,9 +73,9 @@ Solver 3  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
    Linear System Solver = Iterative
    Linear System Iterative Method = BicgstabL
    Linear System preconditioning = Circuit
-   Linear System Convergence Tolerance = 1.e-10
-   Linear System Max Iterations = 5000
-   Linear System Residual Output = 1000
+   Linear System Convergence Tolerance = 1.e-8
+   Linear System Max Iterations = 8000
+   Linear System Residual Output = 2000
    BicgStabL Polynomial Degree = 4
    Steady State Convergence Tolerance = 1e-08
 End
@@ -87,7 +92,7 @@ Solver 4  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
    Steady State Convergence Tolerance = 0
    Linear System Solver = "Iterative"
    Linear System Preconditioning = None
-   Linear System Residual Output = 1000
+   Linear System Residual Output = 2000
    Linear System Max Iterations = 5000
    Linear System Iterative Method = CG
    Linear System Convergence Tolerance = 1.0e-10
@@ -101,7 +106,7 @@ Solver 6  !---- SaveData, SaveScalars
    Exec Solver = After timestep
    Equation = "sv"
    Procedure = "SaveData" "SaveScalars"
-   Filename = 6459r/dat/6459r.dat
+   Filename = helix2/dat/helix2.dat
    Show Norm Index = Integer 1
 End
 Equation 1
@@ -110,27 +115,23 @@ End
 Equation 2
    Active Solvers(6) = 1 2 3 4 5 6
 End
-Material 1  !---- iron: generic
-   Name = iron
-   Electric Conductivity = 0
-   Relative Permeability = 2000
-End
-Material 2  !---- air: generic
-   Name = air
-   Electric Conductivity = 0
-   Relative Permeability = 1
-End
-Material 3  !---- aluminium: generic
+Material 1  !---- aluminium: generic
    Name = aluminium
    Relative Permeability = 1
    Electric Conductivity = 36e6
 End
-Body 1  !---- core
-   Name = core
-   Target Bodies(1) = $ core
-   Equation = 1
+Material 2  !---- air: generic
+   Name = air
+   Relative Permeability = 1
+   Electric Conductivity = 0
+End
+Body 1  !---- A1
+   Name = A1
+   Target Bodies(1) = $ A1
+   Equation = 2
    Material = 1
    Initial Condition = 1
+   Body Force = 1
 End
 Body 2  !---- air
    Name = air
@@ -139,36 +140,27 @@ Body 2  !---- air
    Material = 2
    Initial Condition = 1
 End
-Body 3  !---- A1
-   Name = A1
-   Target Bodies(1) = $ A1
-   Equation = 2
-   Material = 3
-   Initial Condition = 1
-   Body Force = 1
-End
 Component 1  !---- A1
    Name = String A1
-   Master Bodies = Integer 3
+   Master Bodies = Integer 1
    Coil Type = String massive
    Coil Closed = Logical True
-   Coil Normal(3) = Real 0 1 0
-   Coil Center(3) = Real 0 0 0
-   Number of Turns = Real 1
+   Coil Normal(3) = Real 0 0 1
+   Coil Center(3) = Real 0 0 0.007
    Circuit Equation Voltage Factor = Real 1
 End
 Body Force 1  !---- Circuit
    Name = "Circuit"
-   S1 Re = Real $ cos(0.0*pi/3) * 1.41421356237
-   S1 Im = Real $ sin(0.0*pi/3) * 1.41421356237
+   S1 Re = Real 1.41421356237
+   S1 Im = Real 0
 End
 Boundary Condition 1  !---- outer
    Name = outer
-   Target Boundaries(3) = $ cylinder_lateral_surface infinity_xz0 infinity_xz1
+   Target Boundaries(1) = $ outer
    A re {e} = Real 0
    A im {e} = Real 0
 End
-Solver 6 :: Reference Norm = Real 2.18958959E-05
+Solver 6 :: Reference Norm = Real 7.1904011E-04
 Solver 6 :: Reference Norm Tolerance = Real 1E-4
 $fprintf( stderr, "TEST CASE 1\n");
 RUN
