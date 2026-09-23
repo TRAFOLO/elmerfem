@@ -1009,6 +1009,24 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Elemental reluctivity ladder state of a foil sheet along local direction d,
+!> declared by WhitneyAVSolver_Init. It is not 'Xi Alpha' / 'Xi Beta', which a
+!> homogenized stranded winding in the same model declares in its SIF with its
+!> own ladder order.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetXiName(d) RESULT(vname)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: d
+    CHARACTER(LEN=:), ALLOCATABLE :: vname
+    CHARACTER(LEN=5), PARAMETER :: DirName(3) = ['Alpha', 'Beta ', 'Gamma']
+
+    vname = 'Foil Sheet Xi '//TRIM(DirName(d))
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetXiName
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Offset of the strand (l,j) current dof inside the foil sheet voltage
 !> variable, l being the sub-layer index along the stack. Layout: 0 = V,
 !> 1..nCells = V_k, then the strands sub-layer by sub-layer. With one sub-layer

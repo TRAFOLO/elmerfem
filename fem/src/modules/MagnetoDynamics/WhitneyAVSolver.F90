@@ -320,17 +320,17 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
   
   ! A transient foil sheet with Homogenization Model needs an elemental Xi state
   ! per in-plane direction, with one dof per ladder pole. The SIF writer
-  ! supplies physics, not solver plumbing, so declare them here.
+  ! supplies physics, not solver plumbing, so declare them here. Alpha and beta
+  ! stacking homogenize different in-plane directions, so a model with both
+  ! needs all three. Each direction gets the largest ladder order of the sheets
+  ! using it; a sheet of lower order uses the first dofs of its elements.
   IF (Transient) THEN
     BLOCK
       TYPE(ValueList_t), POINTER :: CPar
-      INTEGER :: ic, nlad, slot, dStack, dPlane(2), d
-      LOGICAL :: gotit, need, stackalpha
+      INTEGER :: ic, nlad, slot, dStack, dPlane(2), d, nXi(3)
+      LOGICAL :: gotit, stackalpha
       CHARACTER(LEN=MAX_NAME_LEN) :: ctype, str
-      CHARACTER(LEN=8), PARAMETER :: XiName(3) = ['Xi Alpha','Xi Beta ','Xi Gamma']
-      need = .FALSE.
-      nlad = 4
-      stackalpha = .TRUE.
+      nXi = 0
       DO ic = 1, CurrentModel % NumberOfComponents
         CPar => CurrentModel % Components(ic) % Values
         IF (.NOT. ASSOCIATED(CPar)) CYCLE
@@ -338,26 +338,27 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
         IF (.NOT. gotit) CYCLE
         IF (TRIM(ctype) /= 'foil sheet') CYCLE
         IF (.NOT. (ListGetLogical(CPar, 'Homogenization Model', gotit) .AND. gotit)) CYCLE
-        need = .TRUE.
-        i = ListGetInteger(CPar, 'Homogenization Ladder Order', gotit)
-        IF (gotit) nlad = i
+        nlad = ListGetInteger(CPar, 'Homogenization Ladder Order', gotit)
+        IF (.NOT. gotit) nlad = 4
         str = ListGetString(CPar, 'Stacking Direction', gotit)
-        IF (gotit .AND. TRIM(str) == 'beta') stackalpha = .FALSE.
-      END DO
-      IF (need .AND. .NOT. ListCheckPresent(Params, 'Foil Sheet Xi Declared')) THEN
+        stackalpha = .NOT. (gotit .AND. TRIM(str) == 'beta')
         CALL FoilSheetNuDirections(stackalpha, dStack, dPlane)
+        nXi(dPlane) = MAX(nXi(dPlane), nlad)
+      END DO
+      IF (ANY(nXi > 0) .AND. .NOT. ListCheckPresent(Params, 'Foil Sheet Xi Declared')) THEN
         slot = 1
         DO WHILE (ListCheckPresent(Params, 'Exported Variable '//I2S(slot)))
           slot = slot + 1
         END DO
-        DO d = 1, 2
-          CALL ListAddString(Params, 'Exported Variable '//I2S(slot+d-1), &
-              '-dofs '//I2S(nlad)//' -elem '//TRIM(XiName(dPlane(d))))
+        DO d = 1, 3
+          IF (nXi(d) == 0) CYCLE
+          CALL ListAddString(Params, 'Exported Variable '//I2S(slot), &
+              '-dofs '//I2S(nXi(d))//' -elem '//FoilSheetXiName(d))
+          slot = slot + 1
+          CALL Info('WhitneyAVSolver_Init','Declared "'//FoilSheetXiName(d)//'" with '// &
+              I2S(nXi(d))//' dofs for the foil sheet reluctivity ladder', Level=5)
         END DO
         CALL ListAddLogical(Params, 'Foil Sheet Xi Declared', .TRUE.)
-        CALL Info('WhitneyAVSolver_Init','Declared '//TRIM(XiName(dPlane(1)))//' and '// &
-            TRIM(XiName(dPlane(2)))//' with '//I2S(nlad)// &
-            ' dofs for the foil sheet reluctivity ladder', Level=5)
       END IF
     END BLOCK
   END IF
@@ -490,7 +491,14 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
     TYPE(Variable_t), POINTER :: var => NULL()
     REAL(KIND=dp), ALLOCATABLE :: prev2(:)
   END TYPE XiDir_t
-  TYPE(XiDir_t) :: XiD(3)
+  ! Xi states per local direction, in two separate sets: a stranded winding
+  ! uses the 'Xi Alpha'/'Xi Beta' its SIF declares (TRAFOLO: one scalar each), a
+  ! foil sheet the FoilSheetXiName variables of WhitneyAVSolver_Init. An
+  ! element's states start at (perm-1)*DOFs of the variable, and a component of
+  ! lower ladder order than the variable's DOFs uses the first ones.
+  INTEGER, PARAMETER :: XiStranded = 1, XiSheet = 2
+  TYPE(XiDir_t) :: XiD(3,2)
+  INTEGER :: XiSet = XiStranded
   TYPE(Variable_t), POINTER :: prox_loss_var => NULL()
 
   CHARACTER(*), PARAMETER :: Caller = 'WhitneyAVSolver'
@@ -812,10 +820,13 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   ! reduction: reduce the flag so that every partition makes the same call.
   IF (Transient) THEN
     BLOCK
-      INTEGER :: xihere
+      INTEGER :: xihere, xd, xs
       xihere = 0
-      IF (ASSOCIATED(XiD(1) % var) .OR. ASSOCIATED(XiD(2) % var) .OR. &
-          ASSOCIATED(XiD(3) % var)) xihere = 1
+      DO xs = 1, 2
+        DO xd = 1, 3
+          IF (ASSOCIATED(XiD(xd,xs) % var)) xihere = 1
+        END DO
+      END DO
       IF (ParallelReduction(xihere, 2) > 0) CALL UpdateTransientHomogXiState()
     END BLOCK
   END IF
@@ -841,33 +852,42 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
 CONTAINS
 
 !------------------------------------------------------------------------------
-!> Locate the -elem Xi variable of one homogenization direction and size its
-!> BDF-2 history. The variable must carry Homogenization Ladder Order dofs per
-!> element, which for order 1 is the plain scalar the older SIFs declare.
+!> Locate the -elem Xi variable of one homogenization direction in the current
+!> set XiSet and size its BDF-2 history. The variable must carry at least
+!> Homogenization Ladder Order dofs per element; for order 1 that is the plain
+!> scalar the stranded SIFs declare.
 !------------------------------------------------------------------------------
-  SUBROUTINE LocateXiVar(d, vname)
+  SUBROUTINE LocateXiVar(d)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     INTEGER :: d
-    CHARACTER(*) :: vname
+    CHARACTER(LEN=8), PARAMETER :: StrandedXiName(3) = ['Xi Alpha','Xi Beta ','Xi Gamma']
+    CHARACTER(LEN=:), ALLOCATABLE :: vname
     INTEGER :: nv
 
     IF (.NOT. dir_active(d)) RETURN
-    IF (.NOT. ASSOCIATED(XiD(d) % var)) &
-        XiD(d) % var => VariableGet(Solver % Mesh % Variables, vname)
-    IF (.NOT. ASSOCIATED(XiD(d) % var)) CALL Fatal(Caller, &
-        'Transient Homogenization needs "'//TRIM(vname)//'" as an -elem Exported Variable with '// &
-        I2S(HomogLadderOrder)//' dofs on this solver')
-    IF (XiD(d) % var % DOFs /= HomogLadderOrder) CALL Fatal(Caller, &
-        '"'//TRIM(vname)//'" must have Homogenization Ladder Order dofs')
-
-    nv = SIZE(XiD(d) % var % Values)
-    IF (ALLOCATED(XiD(d) % prev2)) THEN
-      IF (SIZE(XiD(d) % prev2) /= nv) DEALLOCATE(XiD(d) % prev2)
+    IF (.NOT. ASSOCIATED(XiD(d,XiSet) % var)) THEN
+      IF (XiSet == XiSheet) THEN
+        vname = FoilSheetXiName(d)
+      ELSE
+        vname = TRIM(StrandedXiName(d))
+      END IF
+      XiD(d,XiSet) % var => VariableGet(Solver % Mesh % Variables, vname)
+      IF (.NOT. ASSOCIATED(XiD(d,XiSet) % var)) CALL Fatal(Caller, &
+          'Transient Homogenization needs "'//vname//'" as an -elem Exported Variable with '// &
+          I2S(HomogLadderOrder)//' dofs on this solver')
     END IF
-    IF (.NOT. ALLOCATED(XiD(d) % prev2)) THEN
-      ALLOCATE(XiD(d) % prev2(nv))
-      XiD(d) % prev2 = 0._dp
+    IF (XiD(d,XiSet) % var % DOFs < HomogLadderOrder) CALL Fatal(Caller, &
+        '"'//XiD(d,XiSet) % var % Name//'" has '//I2S(XiD(d,XiSet) % var % DOFs)// &
+        ' dofs, fewer than Homogenization Ladder Order '//I2S(HomogLadderOrder))
+
+    nv = SIZE(XiD(d,XiSet) % var % Values)
+    IF (ALLOCATED(XiD(d,XiSet) % prev2)) THEN
+      IF (SIZE(XiD(d,XiSet) % prev2) /= nv) DEALLOCATE(XiD(d,XiSet) % prev2)
+    END IF
+    IF (.NOT. ALLOCATED(XiD(d,XiSet) % prev2)) THEN
+      ALLOCATE(XiD(d,XiSet) % prev2(nv))
+      XiD(d,XiSet) % prev2 = 0._dp
     END IF
 !------------------------------------------------------------------------------
   END SUBROUTINE LocateXiVar
@@ -1122,11 +1142,13 @@ CONTAINS
          IF (.NOT. Found) nu_eff_dir(FsDirStack) = nu_air
        END IF
 
-       ! Xi states: one -elem variable per active direction, with
-       ! HomogLadderOrder dofs per element.
-       CALL LocateXiVar(1, 'Xi Alpha')
-       CALL LocateXiVar(2, 'Xi Beta')
-       CALL LocateXiVar(3, 'Xi Gamma')
+       ! Xi states: one -elem variable per active direction, in the set of
+       ! this kind of winding.
+       XiSet = XiStranded
+       IF (FoilSheetTransientHomog) XiSet = XiSheet
+       CALL LocateXiVar(1)
+       CALL LocateXiVar(2)
+       CALL LocateXiVar(3)
 
        ! Optional "Proximity Loss" exported variable for the local dissipation.
        IF (.NOT. ASSOCIATED(prox_loss_var)) &
@@ -2315,7 +2337,7 @@ END SUBROUTINE LocalConstraintMatrix
     ! direction. The ladder order is capped at 6, so a fixed shape is enough.
     REAL(KIND=dp) :: xi_e(6,3), xi_e1(6,3)
     REAL(KIND=dp) :: h_hist_local(3), h_hist_global(3)
-    INTEGER :: xi_perm_idx, xd, xk
+    INTEGER :: xi_perm_idx, xi_off, xd, xk
 
     TYPE(GaussIntegrationPoints_t) :: IP
 
@@ -2374,17 +2396,18 @@ END SUBROUTINE LocalConstraintMatrix
     IF (StrandedTransientHomog) THEN
       DO xd = 1, 3
         IF (.NOT. dir_active(xd)) CYCLE
-        IF (ASSOCIATED(XiD(xd) % var % Perm)) THEN
-          xi_perm_idx = XiD(xd) % var % Perm(Element % ElementIndex)
+        IF (ASSOCIATED(XiD(xd,XiSet) % var % Perm)) THEN
+          xi_perm_idx = XiD(xd,XiSet) % var % Perm(Element % ElementIndex)
         ELSE
           xi_perm_idx = Element % ElementIndex
         END IF
         IF (xi_perm_idx <= 0) CYCLE
-        IF (xi_perm_idx*HomogLadderOrder > SIZE(XiD(xd) % var % Values)) CYCLE
+        xi_off = (xi_perm_idx-1) * XiD(xd,XiSet) % var % DOFs
+        IF (xi_off + HomogLadderOrder > SIZE(XiD(xd,XiSet) % var % Values)) CYCLE
         DO xk = 1, HomogLadderOrder
-          xi_e(xk,xd) = XiD(xd) % var % Values((xi_perm_idx-1)*HomogLadderOrder + xk)
-          IF (ALLOCATED(XiD(xd) % prev2)) &
-              xi_e1(xk,xd) = XiD(xd) % prev2((xi_perm_idx-1)*HomogLadderOrder + xk)
+          xi_e(xk,xd) = XiD(xd,XiSet) % var % Values(xi_off + xk)
+          IF (ALLOCATED(XiD(xd,XiSet) % prev2)) &
+              xi_e1(xk,xd) = XiD(xd,XiSet) % prev2(xi_off + xk)
         END DO
       END DO
     END IF
@@ -3656,8 +3679,9 @@ END SUBROUTINE LocalConstraintMatrix
 ! storage. It avoids the inter-element smoothing artifact that inflated the
 ! (dxi/dt)^2 loss in cells where b varies sharply across cell boundaries.
 !
-! One pole per dof: the -elem Xi variable carries Homogenization Ladder Order
-! components per element and the poles decouple, so each is a scalar update.
+! One pole per dof: the element's first Homogenization Ladder Order dofs of the
+! -elem Xi variable, in the set of its kind of winding (see XiD), and the poles
+! decouple, so each is a scalar update.
 !
 ! Multi-Component safe: the ladder is re-read from the element's own Component
 ! here, mirroring the per-element reads in the assembly loop. The BDF stencil
@@ -3683,7 +3707,7 @@ END SUBROUTINE LocalConstraintMatrix
     REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem, prox_total
     LOGICAL :: dloc(3), stackalpha_loc, sheet_loc
     INTEGER :: dstack_loc, dplane_loc(2)
-    INTEGER :: nlad, d, k, idx, eperm(3), elem_perm_pl, any_sheet
+    INTEGER :: nlad, d, k, idx, eperm(3), xoff(3), xs, elem_perm_pl, any_sheet
 
     prox_total = 0._dp
     any_sheet = 0
@@ -3714,6 +3738,8 @@ END SUBROUTINE LocalConstraintMatrix
       ELSE
         CYCLE
       END IF
+      xs = XiStranded
+      IF (sheet_loc) xs = XiSheet
 
       nlad = GetInteger(cParams, 'Homogenization Ladder Order', found_loc)
       IF (.NOT. found_loc) nlad = 4
@@ -3723,9 +3749,9 @@ END SUBROUTINE LocalConstraintMatrix
       eperm = 0
       DO d = 1, 3
         IF (.NOT. dloc(d)) CYCLE
-        IF (.NOT. ASSOCIATED(XiD(d) % var)) CYCLE
-        IF (ASSOCIATED(XiD(d) % var % Perm)) THEN
-          eperm(d) = XiD(d) % var % Perm(el % ElementIndex)
+        IF (.NOT. ASSOCIATED(XiD(d,xs) % var)) CYCLE
+        IF (ASSOCIATED(XiD(d,xs) % var % Perm)) THEN
+          eperm(d) = XiD(d,xs) % var % Perm(el % ElementIndex)
         ELSE
           eperm(d) = el % ElementIndex
         END IF
@@ -3733,9 +3759,11 @@ END SUBROUTINE LocalConstraintMatrix
       IF (ANY(dloc .AND. eperm <= 0)) CYCLE
       ! Guard the element's slot against the variable's actual length: an -elem
       ! variable only covers the bodies its solver is active on.
+      xoff = 0
       DO d = 1, 3
         IF (.NOT. dloc(d)) CYCLE
-        IF (eperm(d)*nlad > SIZE(XiD(d) % var % Values)) eperm(d) = 0
+        xoff(d) = (eperm(d)-1) * XiD(d,xs) % var % DOFs
+        IF (xoff(d) + nlad > SIZE(XiD(d,xs) % var % Values)) eperm(d) = 0
       END DO
       IF (ANY(dloc .AND. eperm <= 0)) CYCLE
       ! Set by the assembly of this call; zero means this partition assembled no
@@ -3777,9 +3805,9 @@ END SUBROUTINE LocalConstraintMatrix
       DO d = 1, 3
         IF (.NOT. dloc(d)) CYCLE
         DO k = 1, nlad
-          idx = (eperm(d)-1)*nlad + k
-          xin(k,d) = XiD(d) % var % Values(idx)
-          IF (ALLOCATED(XiD(d) % prev2)) xin1(k,d) = XiD(d) % prev2(idx)
+          idx = xoff(d) + k
+          xin(k,d) = XiD(d,xs) % var % Values(idx)
+          IF (ALLOCATED(XiD(d,xs) % prev2)) xin1(k,d) = XiD(d,xs) % prev2(idx)
         END DO
       END DO
 
@@ -3825,9 +3853,9 @@ END SUBROUTINE LocalConstraintMatrix
       DO d = 1, 3
         IF (.NOT. dloc(d)) CYCLE
         DO k = 1, nlad
-          idx = (eperm(d)-1)*nlad + k
-          IF (ALLOCATED(XiD(d) % prev2)) XiD(d) % prev2(idx) = xin(k,d)
-          XiD(d) % var % Values(idx) = xinew(k,d)
+          idx = xoff(d) + k
+          IF (ALLOCATED(XiD(d,xs) % prev2)) XiD(d,xs) % prev2(idx) = xin(k,d)
+          XiD(d,xs) % var % Values(idx) = xinew(k,d)
         END DO
       END DO
 
