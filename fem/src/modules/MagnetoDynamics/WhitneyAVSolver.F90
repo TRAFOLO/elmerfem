@@ -487,7 +487,12 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
                                 hcoef_n(:,:), hcoef_n1(:,:)
   TYPE :: XiDir_t
     TYPE(Variable_t), POINTER :: var => NULL()
-    REAL(KIND=dp), ALLOCATABLE :: prev2(:)
+    ! var holds the latest xi^{n+1}; prev1 and prev2 are xi^n and xi^{n-1},
+    ! committed from var once per timestep (CommitXiState). The update starts
+    ! from the committed states, so a second call in a timestep (coupled
+    ! iterations) redoes the step instead of taking another one.
+    REAL(KIND=dp), ALLOCATABLE :: prev1(:), prev2(:)
+    INTEGER :: step = -1
   END TYPE XiDir_t
   ! Xi states per local direction, in two separate sets: a stranded winding
   ! uses the 'Xi Alpha'/'Xi Beta' its SIF declares (TRAFOLO: one scalar each), a
@@ -496,7 +501,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   ! lower ladder order than the variable's DOFs uses the first ones.
   INTEGER, PARAMETER :: XiStranded = 1, XiSheet = 2
   TYPE(XiDir_t) :: XiD(3,2)
-  INTEGER :: XiSet = XiStranded
+  INTEGER :: XiSet = XiStranded, XiStep
   TYPE(Variable_t), POINTER :: prox_loss_var => NULL()
 
   CHARACTER(*), PARAMETER :: Caller = 'WhitneyAVSolver'
@@ -508,6 +513,8 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
        XiD, nu_eff_dir, dir_active, prox_loss_var
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN	
+
+  XiStep = GetTimestep()
 
   CALL Info(Caller,'',Level=6 )
   CALL Info(Caller,'-------------------------------------------------',Level=6 )
@@ -881,14 +888,34 @@ CONTAINS
 
     nv = SIZE(XiD(d,XiSet) % var % Values)
     IF (ALLOCATED(XiD(d,XiSet) % prev2)) THEN
-      IF (SIZE(XiD(d,XiSet) % prev2) /= nv) DEALLOCATE(XiD(d,XiSet) % prev2)
+      IF (SIZE(XiD(d,XiSet) % prev2) /= nv) DEALLOCATE(XiD(d,XiSet) % prev1, XiD(d,XiSet) % prev2)
     END IF
     IF (.NOT. ALLOCATED(XiD(d,XiSet) % prev2)) THEN
-      ALLOCATE(XiD(d,XiSet) % prev2(nv))
+      ALLOCATE(XiD(d,XiSet) % prev1(nv), XiD(d,XiSet) % prev2(nv))
+      XiD(d,XiSet) % prev1 = 0._dp
       XiD(d,XiSet) % prev2 = 0._dp
     END IF
+    CALL CommitXiState(XiD(d,XiSet))
 !------------------------------------------------------------------------------
   END SUBROUTINE LocateXiVar
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> At the first call of a timestep, shift the Xi history: xi^{n-1} <- xi^n and
+!> xi^n <- the last xi^{n+1} of the previous step.
+!------------------------------------------------------------------------------
+  SUBROUTINE CommitXiState(X)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(XiDir_t) :: X
+
+    IF (.NOT. ASSOCIATED(X % var) .OR. .NOT. ALLOCATED(X % prev1)) RETURN
+    IF (X % step == XiStep) RETURN
+    X % prev2 = X % prev1
+    X % prev1 = X % var % Values
+    X % step = XiStep
+!------------------------------------------------------------------------------
+  END SUBROUTINE CommitXiState
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -2384,11 +2411,12 @@ END SUBROUTINE LocalConstraintMatrix
     END IF
     np = n*Solver % Def_Dofs(GetElementFamily(Element),Element % BodyId,1)
 
-    ! Slice 1b: pre-load xi^n (current solver var) and xi^{n-1} (module prev2 array)
-    ! for the proximity history term. Elemental (DG-0) storage: one scalar per
-    ! element, keyed by ElementIndex. Only meaningful when StrandedTransientHomog
-    ! is True; otherwise these stay at zero and the M-vector below is unmodified.
-    ! For BDF-1, r_*_ladder_n_1 = 0 so the xi^{n-1} contribution drops out cleanly.
+    ! Slice 1b: pre-load xi^n and xi^{n-1}, the states committed at the start of
+    ! the timestep (prev1, prev2), for the proximity history term. Elemental
+    ! (DG-0) storage: one scalar per element, keyed by ElementIndex. Only
+    ! meaningful when StrandedTransientHomog is True; otherwise these stay at
+    ! zero and the M-vector below is unmodified. For BDF-1, r_*_ladder_n_1 = 0 so
+    ! the xi^{n-1} contribution drops out cleanly.
     xi_e  = 0.0_dp
     xi_e1 = 0.0_dp
     IF (StrandedTransientHomog) THEN
@@ -2403,9 +2431,8 @@ END SUBROUTINE LocalConstraintMatrix
         xi_off = (xi_perm_idx-1) * XiD(xd,XiSet) % var % DOFs
         IF (xi_off + HomogLadderOrder > SIZE(XiD(xd,XiSet) % var % Values)) CYCLE
         DO xk = 1, HomogLadderOrder
-          xi_e(xk,xd) = XiD(xd,XiSet) % var % Values(xi_off + xk)
-          IF (ALLOCATED(XiD(xd,XiSet) % prev2)) &
-              xi_e1(xk,xd) = XiD(xd,XiSet) % prev2(xi_off + xk)
+          xi_e(xk,xd) = XiD(xd,XiSet) % prev1(xi_off + xk)
+          xi_e1(xk,xd) = XiD(xd,XiSet) % prev2(xi_off + xk)
         END DO
       END DO
     END IF
@@ -3668,8 +3695,9 @@ END SUBROUTINE LocalConstraintMatrix
 ! of (alpha_hat_k . curl A^{n+1}), computes the elemental xi^{n+1} from the
 ! variable-dt BDF-1/2 stencil
 !   M_k * xi^{n+1} = b_bar * e_1 - (a2/dt)*Sigma*xi^n - (a3/dt)*Sigma*xi^{n-1}
-! and writes one scalar per element to the -elem Xi variable. xi^{n-1} is kept
-! in the module-level xi_*_prev2 arrays, rotated element-by-element here.
+! and writes one scalar per element to the -elem Xi variable. xi^n and xi^{n-1}
+! are the states committed at the start of the timestep (CommitXiState), so a
+! second call in the same step redoes it from the same states.
 ! Per-element dissipation density uses the same BDF stencil on dxi/dt squared,
 ! one constant per cell.
 !
@@ -3797,15 +3825,20 @@ END SUBROUTINE LocalConstraintMatrix
       CALL GetScalarLocalSolution(a_loc, UElement=el)
       CALL GetElementRotM(el, rotm_loc, n_el)
 
-      ! xi^n from the live variable, xi^{n-1} from the module history, which is
-      ! zero on the first two timesteps, consistent with the BDF-1 fallback.
+      ! xi^n and xi^{n-1} as committed at the start of the step; xi^{n-1} is zero
+      ! on the first two timesteps, consistent with the BDF-1 fallback.
       xin = 0._dp; xin1 = 0._dp
       DO d = 1, 3
         IF (.NOT. dloc(d)) CYCLE
+        CALL CommitXiState(XiD(d,xs))
         DO k = 1, nlad
           idx = xoff(d) + k
-          xin(k,d) = XiD(d,xs) % var % Values(idx)
-          IF (ALLOCATED(XiD(d,xs) % prev2)) xin1(k,d) = XiD(d,xs) % prev2(idx)
+          IF (ALLOCATED(XiD(d,xs) % prev1)) THEN
+            xin(k,d) = XiD(d,xs) % prev1(idx)
+            xin1(k,d) = XiD(d,xs) % prev2(idx)
+          ELSE
+            xin(k,d) = XiD(d,xs) % var % Values(idx)
+          END IF
         END DO
       END DO
 
@@ -3847,12 +3880,11 @@ END SUBROUTINE LocalConstraintMatrix
         END DO
       END DO
 
-      ! Rotate the history, then publish xi^{n+1}.
+      ! Publish xi^{n+1}; the history moves at the next step's commit.
       DO d = 1, 3
         IF (.NOT. dloc(d)) CYCLE
         DO k = 1, nlad
           idx = xoff(d) + k
-          IF (ALLOCATED(XiD(d,xs) % prev2)) XiD(d,xs) % prev2(idx) = xin(k,d)
           XiD(d,xs) % var % Values(idx) = xinew(k,d)
         END DO
       END DO
