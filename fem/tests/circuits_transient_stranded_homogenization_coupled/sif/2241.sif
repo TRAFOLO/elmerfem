@@ -147,6 +147,14 @@ Solver 10
    Operator 1 = String "int"
    Show Norm Index = Integer 1
 End
+Solver 11
+   Exec Solver = After timestep
+   Equation = "sv total"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/total.dat
+   ! res: eddy current power, the conductor loss including the proximity loss
+   Show Norm Index = Integer 1
+End
 Equation 1
    Active Solvers(2) = 6 7
 End
@@ -272,6 +280,8 @@ End
 
 Solver 10 :: Reference Norm = Real $Pref
 Solver 10 :: Reference Norm Tolerance = Real 1E-05
+Solver 11 :: Reference Norm = Real $Ptot
+Solver 11 :: Reference Norm Tolerance = Real 1E-05
 !Solver 7 :: Reference Norm = Real 1.63166208E-09
 !Solver 7 :: Reference Norm Tolerance = Real 1E-03
 $fprintf( stderr, "TEST CASE 1\n");

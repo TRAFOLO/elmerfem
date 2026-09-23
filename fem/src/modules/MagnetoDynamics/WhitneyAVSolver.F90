@@ -3730,13 +3730,16 @@ END SUBROUTINE LocalConstraintMatrix
     INTEGER, SAVE :: alloc_n = 0, alloc_nd = 0
     REAL(KIND=dp) :: detJ_loc, rml(3,3), curlA_ip(3), wt, elem_volume
     REAL(KIND=dp) :: bbar(3), y0l(3), rl(6,3), Tl(6,3), mki(6,3)
-    REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem, prox_total
+    REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem, prox_total, &
+                     prox_stranded
     LOGICAL :: dloc(3), stackalpha_loc, sheet_loc
     INTEGER :: dstack_loc, dplane_loc(2)
-    INTEGER :: nlad, d, k, idx, eperm(3), xoff(3), xs, elem_perm_pl, any_sheet
+    INTEGER :: nlad, d, k, idx, eperm(3), xoff(3), xs, elem_perm_pl, any_sheet, any_stranded
 
     prox_total = 0._dp
     any_sheet = 0
+    prox_stranded = 0._dp
+    any_stranded = 0
 
     DO el_idx = 1, GetNOFActive()
       el => GetActiveElement(el_idx)
@@ -3906,6 +3909,9 @@ END SUBROUTINE LocalConstraintMatrix
         IF (sheet_loc) THEN
           prox_total = prox_total + p_loss_elem * elem_volume
           any_sheet = 1
+        ELSE
+          prox_stranded = prox_stranded + p_loss_elem * elem_volume
+          any_stranded = 1
         END IF
         IF (ASSOCIATED(prox_loss_var)) THEN
           elem_perm_pl = prox_loss_var % Perm(el % ElementIndex)
@@ -3921,6 +3927,14 @@ END SUBROUTINE LocalConstraintMatrix
     IF (any_sheet > 0) THEN
       prox_total = ParallelReduction(prox_total)
       CALL ListAddConstReal(CurrentModel % Simulation, 'res: sheet proximity loss', prox_total)
+    END IF
+
+    ! The same for homogenized stranded windings, for CircuitsOutput to add to
+    ! 'res: Eddy current power'; the Proximity Loss field is its spatial form.
+    any_stranded = ParallelReduction(any_stranded, 2)
+    IF (any_stranded > 0) THEN
+      prox_stranded = ParallelReduction(prox_stranded)
+      CALL ListAddConstReal(CurrentModel % Simulation, 'Stranded coil proximity loss', prox_stranded)
     END IF
 !------------------------------------------------------------------------------
   END SUBROUTINE UpdateTransientHomogXiState

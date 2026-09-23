@@ -4241,10 +4241,10 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
    IF (Transient) THEN
      BLOCK
        INTEGER :: ci, kc, js, vvid, nce, nse, idx, nskin, nFSkin
-       LOGICAL :: gotid, gotp, gotq
+       LOGICAL :: gotid, gotp, gotq, gotl
        TYPE(ValueList_t), POINTER :: CPar
        REAL(KIND=dp), ALLOCATABLE :: ynew(:)
-       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pstranddc, Pprox, Pother
+       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pstranddc, Pprox, Pother, Pstrandedprox
        Pstrand = 0._dp; Pstranddc = 0._dp; nskin = 0
        nFSkin = 0
        IF (fskin_allocated) nFSkin = SIZE(FSkin)
@@ -4280,8 +4280,10 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
        ! whole dissipation of the foil sheet blocks in transient.
        ! MagnetoDynamicsCalcFields has them at the DC sheet conductivity only and
        ! publishes every other conductor apart, so the total conductor loss is
-       ! that plus the sheets whole. Nothing here reads what it writes, so a
-       ! second call within a timestep gives the same numbers.
+       ! that plus the sheets whole, plus the reluctivity ladder loss of
+       ! homogenized stranded windings, which is in no Joule heating either.
+       ! Nothing here reads what it writes, so a second call within a timestep
+       ! gives the same numbers.
        ! The reductions are collective, so every partition has to reach them,
        ! including one whose mesh carries no sheet element and whose ladder
        ! state is therefore not allocated. The "is there a sheet" flag is
@@ -4289,15 +4291,24 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
        nskin = ParallelReduction(nskin, 2)
        Pstrand = ParallelReduction(Pstrand)
        Pstranddc = ParallelReduction(Pstranddc)
+       Pother = GetConstReal(Model % Simulation, 'Eddy current power outside foil sheets', gotq)
+       IF (.NOT. gotq) Pother = 0._dp
+       Pstrandedprox = GetConstReal(Model % Simulation, 'Stranded coil proximity loss', gotl)
+       IF (.NOT. gotl) Pstrandedprox = 0._dp
        IF (nskin > 0) THEN
          Pprox = GetConstReal(Model % Simulation, 'res: sheet proximity loss', gotp)
          IF (.NOT. gotp) Pprox = 0._dp
-         Pother = GetConstReal(Model % Simulation, 'Eddy current power outside foil sheets', gotq)
-         IF (.NOT. gotq) Pother = 0._dp
          CALL ListAddConstReal(Model % Simulation, 'res: sheet strand loss', Pstrand)
-         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', Pother + (Pstrand + Pprox))
-         WRITE(Message,'(A,4ES13.5)') 'Foil sheet strand loss, its DC part, sheet proximity loss, '// &
-             'other conductors:', Pstrand, Pstranddc, Pprox, Pother
+         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', &
+             (Pother + Pstrandedprox) + (Pstrand + Pprox))
+         WRITE(Message,'(A,5ES13.5)') 'Foil sheet strand loss, its DC part, sheet proximity loss, '// &
+             'stranded coil proximity loss, other conductors:', Pstrand, Pstranddc, Pprox, &
+             Pstrandedprox, Pother
+         CALL Info(Caller, Message, Level=5)
+       ELSE IF (gotl .AND. gotq) THEN
+         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', Pother + Pstrandedprox)
+         WRITE(Message,'(A,2ES13.5)') 'Stranded coil proximity loss, other conductors:', &
+             Pstrandedprox, Pother
          CALL Info(Caller, Message, Level=5)
        END IF
      END BLOCK
