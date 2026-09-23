@@ -1779,6 +1779,14 @@ MODULE CircuitsMod
   USE DefUtils
   IMPLICIT NONE
 
+  ! Largest relative difference of the loop current that the two cut branches of
+  ! a closed solid coil may measure. Each branch loses the share of the loop
+  ! resistance of its own Dirichlet layer, the circulation excess Circ-1, and
+  ! clean cuts differ by 0.02-0.27 of that share: 0.01-0.2 % on meshes with a
+  ! few elements across the wire, 2.2 % on the coarse ring of the closed massive
+  ! tests. A cut along the wire gave 1.3-1.5 times the share, 5.9-18 %.
+  REAL(KIND=dp), PARAMETER :: MaxCutBranchMismatch = 0.01_dp, CutLayerShareMismatch = 0.5_dp
+
 CONTAINS 
 
 !------------------------------------------------------------------------------
@@ -3967,13 +3975,13 @@ END FUNCTION isComponentName
     TYPE(GaussIntegrationPoints_t) :: IP
     REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), Wloc(:), Ploc(:), &
         Chi(:), ElCond(:), ElemFlux(:,:)
-    INTEGER, ALLOCATABLE :: Lbl(:), gIdx(:)
+    INTEGER, ALLOCATABLE :: gIdx(:)
     LOGICAL, ALLOCATABLE :: IsCross(:,:)
     REAL(KIND=dp) :: detJ, gw(3), gc(3), sig, efl, Ener, Flux(2), Mult(2), &
         Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2), MultMax, MultMin
     INTEGER :: e, n, gp, nmax, nno, nbulk, b, i, m, nPatch(2)
     INTEGER, POINTER :: Indexes(:)
-    LOGICAL :: stat, Found, Parallel, Split, Changed, OneCut
+    LOGICAL :: stat, Found, Parallel, Changed, OneCut
     CHARACTER(*), PARAMETER :: Caller = 'Circuits_Init'
     CHARACTER(*), PARAMETER :: MultName(2) = [ CHARACTER(32) :: &
         'Coil Potential Multiplier', 'Coil Potential Multiplier B' ]
@@ -3982,8 +3990,9 @@ END FUNCTION isComponentName
     ! range separates a crossing element from every other element of the coil.
     REAL(KIND=dp), PARAMETER :: CrossingJump = 0.5_dp
     REAL(KIND=dp), PARAMETER :: MinRatio = 0.5_dp, MaxRatio = 2.0_dp
-    REAL(KIND=dp), PARAMETER :: MaxFluxErr = 0.05_dp, MaxPatchSpread = 0.02_dp
-    INTEGER, PARAMETER :: MaxPatches = 64
+    REAL(KIND=dp), PARAMETER :: MaxPatchSpread = 0.02_dp
+    REAL(KIND=dp) :: MaxMismatch
+    CHARACTER(LEN=12) :: Num(4)
 !------------------------------------------------------------------------------
 
     ! Measuring it again on the already normalized field would just return 1.
@@ -4048,7 +4057,7 @@ END FUNCTION isComponentName
     END DO
 
     ALLOCATE(Basis(nmax), dBasisdx(nmax,3), Wloc(nmax), Ploc(nmax), Chi(nmax), ElCond(nmax))
-    ALLOCATE(IsCross(nbulk,2), ElemFlux(nbulk,2), Lbl(nno), gIdx(nno))
+    ALLOCATE(IsCross(nbulk,2), ElemFlux(nbulk,2), gIdx(nno))
     IsCross = .FALSE.
     ElemFlux = 0._dp
 
@@ -4154,20 +4163,12 @@ END FUNCTION isComponentName
         PatchSpread(2), ' over one turn'
     CALL Info(Caller, Message, Level=5)
 
-    IF (.NOT. Split .AND. MAXVAL(PatchSpread) > MaxPatchSpread) THEN
+    IF (MAXVAL(PatchSpread) > MaxPatchSpread) THEN
       WRITE(Message,'(A,ES11.4,A)') 'Component '//I2S(CompInd)//': the cut crossings '// &
           'of the closed massive coil carry currents that differ by ', &
           MAXVAL(PatchSpread), '. They are cross sections of one series loop, so the '// &
           'cut potential is not a valid direction field: each crossing is pinned '// &
           'separately and ramps over its own segment.'
-      CALL Warn(Caller, Message)
-    END IF
-
-    IF (FluxErr > MaxFluxErr) THEN
-      WRITE(Message,'(A,ES11.4,A)') 'Component '//I2S(CompInd)//': the two cut '// &
-          'crossings of the closed massive coil disagree on the loop current by ', &
-          FluxErr, '. The cut is not a clean single layer: check "Coil Normal", '// &
-          '"Coil Center" and the mesh of the conductor.'
       CALL Warn(Caller, Message)
     END IF
 
@@ -4179,20 +4180,17 @@ END FUNCTION isComponentName
       CALL Fatal(Caller, Message)
     END IF
 
-    ! The patch count is exact only when no patch is shared by two partitions,
-    ! so a shared one is all that is left of the check in parallel.
-    IF (Split) THEN
-      IF (ParEnv % MyPe == 0) CALL Warn(Caller, 'Component '//I2S(CompInd)//': a cut '// &
-          'crossing is shared by several partitions, so its patches cannot be counted. '// &
-          'Run the case once in serial to have the check made.')
-    ELSE IF (ANY(nPatch /= 1)) THEN
+    IF (ANY(nPatch /= 1)) THEN
       IF (OneCut) THEN
         CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut potential still jumps '// &
             'on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
             ' (branch B), so the CoilSolver did not reduce the cut to one crossing and '// &
             'the segments between the crossings carry currents of their own: the '// &
             'resistance of this component would be wrong. Check "Coil Normal" and '// &
-            '"Coil Center", and that the coil is one connected loop.')
+            '"Coil Center", and that the coil is one connected loop. Unless "Coil Tangent" '// &
+            'is given, the CoilSolver chooses the cut of a coil with "Single Coil Cut" itself '// &
+            'and lists the half planes it tried at info level 5; "Coil Tangent" and "Coil '// &
+            'Center" in the component set it by hand.')
       ELSE
         CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut plane crosses the '// &
             'coil on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
@@ -4201,84 +4199,150 @@ END FUNCTION isComponentName
       END IF
     END IF
 
+    ! Where the two branches meet, the direction field jumps by as much as they
+    ! disagree, and at high frequency that jump drives spurious eddy currents.
+    MaxMismatch = MAX(MaxCutBranchMismatch, CutLayerShareMismatch * (Circ - 1._dp))
+    IF (FluxErr > MaxMismatch) THEN
+      WRITE(Num(1),'(ES12.5)') Flux(1)
+      WRITE(Num(2),'(ES12.5)') Flux(2)
+      WRITE(Num(3),'(F7.2,A)') 100*FluxErr, ' %'
+      WRITE(Num(4),'(F7.2,A)') 100*MaxMismatch, ' %'
+      CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the two branches of the cut of '// &
+          'the closed massive coil disagree on the loop current, branch A '// &
+          TRIM(ADJUSTL(Num(1)))//' and branch B '//TRIM(ADJUSTL(Num(2)))//', by '// &
+          TRIM(ADJUSTL(Num(3)))//' where a clean cut of this mesh gives at most '// &
+          TRIM(ADJUSTL(Num(4)))//': one of the two cuts is not a cross section of the wire, '// &
+          'and the current density where the branches meet would be wrong. Unless "Coil '// &
+          'Tangent" is given, the CoilSolver chooses the cut of a coil with "Single Coil Cut" '// &
+          'itself and lists the half planes it tried at info level 5; "Coil Tangent" and '// &
+          '"Coil Center" in the component set it by hand.')
+    END IF
+
     CALL ListAddConstReal(CompParams, 'Coil Circulation', Circ)
 
-    DEALLOCATE(Basis, dBasisdx, Wloc, Ploc, Chi, ElCond, IsCross, ElemFlux, Lbl, gIdx)
+    DEALLOCATE(Basis, dBasisdx, Wloc, Ploc, Chi, ElCond, IsCross, ElemFlux, gIdx)
 
   CONTAINS
 
-    ! Label the crossing nodes of a branch with the largest global node index of
-    ! their connected component and count the nodes that carry their own index.
-    ! Every patch has exactly one of those, and in parallel it is counted once as
-    ! long as no patch straddles an interface. The flux is summed per patch too:
-    ! the patches are cross sections of one series loop, so a spread between them
-    ! is the cut potential driving a different current through each of them.
+    ! Label the crossing elements of each branch into connected patches and sum
+    ! the flux per patch. The crossing elements are few, so every partition
+    ! gathers all of them by their global node indices and labels them itself:
+    ! the count is exact in parallel too, also for a patch that straddles
+    ! partitions. The patches are cross sections of one series loop, so a spread
+    ! of the flux between them is the cut potential driving a different current
+    ! through each of them.
     !--------------------------------------------------------------------------
     SUBROUTINE CountCrossingPatches()
-      INTEGER :: np, p, lab(MaxPatches)
-      REAL(KIND=dp) :: pf(MaxPatches)
+      INTEGER :: nw, nLoc, nAll, nId, k, p, q, LastId, ierr, comm, nPE
+      INTEGER, ALLOCATABLE :: LocNodes(:), AllNodes(:), Counts(:), Displ(:), &
+          Srt(:), Order(:), Uid(:), Lab(:), Self(:)
+      REAL(KIND=dp), ALLOCATABLE :: LocFlux(:), AllFlux(:), PatchFlux(:)
 
-      Split = .FALSE.
+      nw = nmax
+      IF (Parallel) THEN
+        nw = ParallelReduction(nw, 2)
+        ! The communicator ParallelReduction uses, so the same ranks take part.
+        comm = ParEnv % ActiveComm
+        IF (COUNT(ParEnv % Active) <= 0) comm = ELMER_COMM_WORLD
+        CALL MPI_COMM_SIZE(comm, nPE, ierr)
+        ALLOCATE(Counts(nPE), Displ(nPE))
+      END IF
+
       PatchSpread = 0._dp
       DO b = 1, 2
-        Lbl = 0
+        nLoc = COUNT(IsCross(:,b))
+        ALLOCATE(LocNodes(nw*MAX(nLoc,1)), LocFlux(MAX(nLoc,1)))
+        LocNodes = 0
+        LocFlux = 0._dp
+        k = 0
         DO e = 1, nbulk
           IF (.NOT. IsCross(e,b)) CYCLE
           Element => Mesh % Elements(e)
           n = Element % TYPE % NumberOfNodes
-          Lbl(Element % NodeIndexes(1:n)) = gIdx(Element % NodeIndexes(1:n))
+          LocNodes(k*nw+1:k*nw+n) = gIdx(Element % NodeIndexes(1:n))
+          k = k + 1
+          LocFlux(k) = ElemFlux(e,b)
         END DO
 
+        IF (Parallel) THEN
+          CALL MPI_ALLGATHER(nLoc, 1, MPI_INTEGER, Counts, 1, MPI_INTEGER, comm, ierr)
+          nAll = SUM(Counts)
+          Displ(1) = 0
+          DO p = 2, nPE
+            Displ(p) = Displ(p-1) + Counts(p-1)
+          END DO
+          ALLOCATE(AllNodes(nw*MAX(nAll,1)), AllFlux(MAX(nAll,1)))
+          AllNodes = 0
+          AllFlux = 0._dp
+          CALL MPI_ALLGATHERV(LocFlux, nLoc, MPI_DOUBLE_PRECISION, AllFlux, Counts, &
+              Displ, MPI_DOUBLE_PRECISION, comm, ierr)
+          CALL MPI_ALLGATHERV(LocNodes, nw*nLoc, MPI_INTEGER, AllNodes, nw*Counts, &
+              nw*Displ, MPI_INTEGER, comm, ierr)
+        ELSE
+          nAll = nLoc
+          ALLOCATE(AllNodes(SIZE(LocNodes)), AllFlux(SIZE(LocFlux)))
+          AllNodes = LocNodes
+          AllFlux = LocFlux
+        END IF
+
+        ! Number the distinct nodes 1..nId; 0 pads the elements with fewer nodes.
+        k = nw*nAll
+        ALLOCATE(Srt(MAX(k,1)), Order(MAX(k,1)), Uid(MAX(k,1)))
+        Srt(1:k) = AllNodes(1:k)
+        DO p = 1, k
+          Order(p) = p
+        END DO
+        CALL SortI(k, Srt, Order)
+        Uid = 0
+        nId = 0
+        LastId = 0
+        DO p = 1, k
+          IF (Srt(p) == 0) CYCLE
+          IF (Srt(p) /= LastId) THEN
+            nId = nId + 1
+            LastId = Srt(p)
+          END IF
+          Uid(Order(p)) = nId
+        END DO
+
+        ALLOCATE(Lab(MAX(nId,1)), Self(MAX(nId,1)), PatchFlux(MAX(nId,1)))
+        DO p = 1, nId
+          Self(p) = p
+        END DO
+        Lab = Self
         Changed = .TRUE.
         DO WHILE (Changed)
           Changed = .FALSE.
-          DO e = 1, nbulk
-            IF (.NOT. IsCross(e,b)) CYCLE
-            Element => Mesh % Elements(e)
-            n = Element % TYPE % NumberOfNodes
-            m = MAXVAL(Lbl(Element % NodeIndexes(1:n)))
-            IF (ANY(Lbl(Element % NodeIndexes(1:n)) /= m)) THEN
-              Lbl(Element % NodeIndexes(1:n)) = m
-              Changed = .TRUE.
-            END IF
+          DO e = 0, nAll-1
+            m = 0
+            DO p = e*nw+1, e*nw+nw
+              IF (Uid(p) > 0) m = MAX(m, Lab(Uid(p)))
+            END DO
+            DO p = e*nw+1, e*nw+nw
+              IF (Uid(p) == 0) CYCLE
+              IF (Lab(Uid(p)) /= m) THEN
+                Lab(Uid(p)) = m
+                Changed = .TRUE.
+              END IF
+            END DO
           END DO
         END DO
 
-        nPatch(b) = COUNT(Lbl(1:nno) > 0 .AND. Lbl(1:nno) == gIdx(1:nno))
-
-        np = 0
-        pf = 0._dp
-        DO e = 1, nbulk
-          IF (.NOT. IsCross(e,b)) CYCLE
-          Element => Mesh % Elements(e)
-          m = Lbl(Element % NodeIndexes(1))
-          DO p = 1, np
-            IF (lab(p) == m) EXIT
-          END DO
-          IF (p > np) THEN
-            IF (np >= MaxPatches) CYCLE
-            np = np + 1
-            p = np
-            lab(p) = m
-          END IF
-          pf(p) = pf(p) + ElemFlux(e,b)
+        ! Each patch is labelled by its largest node number, which labels itself.
+        PatchFlux = 0._dp
+        DO e = 0, nAll-1
+          q = Lab(Uid(e*nw+1))
+          PatchFlux(q) = PatchFlux(q) + AllFlux(e+1)
         END DO
-        IF (np > 1) THEN
-          pf(1:np) = ABS(pf(1:np))
-          PatchSpread(b) = np * (MAXVAL(pf(1:np)) - MINVAL(pf(1:np))) / SUM(pf(1:np))
+        nPatch(b) = COUNT(Lab(1:nId) == Self(1:nId))
+        IF (nPatch(b) > 1) THEN
+          PatchFlux = ABS(PatchFlux)
+          PatchSpread(b) = nPatch(b) * (MAXVAL(PatchFlux(1:nId)) - &
+              MINVAL(PatchFlux(1:nId), Lab(1:nId) == Self(1:nId))) / SUM(PatchFlux(1:nId))
         END IF
 
-        IF (Parallel) THEN
-          IF (ASSOCIATED(Mesh % ParallelInfo % GInterface)) THEN
-            IF (ANY(Lbl(1:nno) > 0 .AND. Mesh % ParallelInfo % GInterface(1:nno))) &
-                Split = .TRUE.
-          ELSE
-            Split = .TRUE.
-          END IF
-          nPatch(b) = NINT(ParallelReduction(1._dp*nPatch(b)))
-        END IF
+        DEALLOCATE(LocNodes, LocFlux, AllNodes, AllFlux, Srt, Order, Uid, Lab, Self, PatchFlux)
       END DO
-      IF (Parallel) Split = (ParallelReduction(MERGE(1._dp,0._dp,Split), 2) > 0.5_dp)
     END SUBROUTINE CountCrossingPatches
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeClosedMassiveCirculation
