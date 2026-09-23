@@ -1700,6 +1700,10 @@ Component:Real:      'Coil Circulation'
 Solver:Logical:      'Single Coil Cut'
 Solver:Logical:      'Select Min Coil Cut'
 Component:Logical:   'Single Coil Cut'
+! Relative difference of the loop current the two branches of the cut of a
+! closed massive coil may show before the run stops. Unset, it is half the
+! share of the loop resistance the two cut layers take, between 1 % and 3 %.
+Component:Real:      'Coil Cut Disagreement Limit'
 ! Flat wire winding (per-turn cell model).
 Component:Integer:   'Turns Across'
 Component:String:    'Stacking Direction'

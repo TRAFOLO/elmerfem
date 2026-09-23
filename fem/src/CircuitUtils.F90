@@ -1785,7 +1785,8 @@ MODULE CircuitsMod
   ! clean cuts differ by 0.02-0.27 of that share: 0.01-0.2 % on meshes with a
   ! few elements across the wire, 2.2 % on the coarse ring of the closed massive
   ! tests. A cut along the wire gave 1.3-1.5 times the share, 5.9-18 %, and
-  ! inflates the share itself, hence the cap.
+  ! inflates the share itself, hence the cap. "Coil Cut Disagreement Limit"
+  ! overrides it for meshes too coarse or too graded along the wire for that.
   REAL(KIND=dp), PARAMETER :: MinCutBranchMismatch = 0.01_dp, &
       MaxCutBranchMismatch = 0.03_dp, CutLayerShareMismatch = 0.5_dp
 
@@ -3979,8 +3980,9 @@ END FUNCTION isComponentName
         Chi(:), ElCond(:), ElemFlux(:,:)
     INTEGER, ALLOCATABLE :: gIdx(:)
     LOGICAL, ALLOCATABLE :: IsCross(:,:)
-    REAL(KIND=dp) :: detJ, gw(3), gc(3), sig, efl, Ener, Flux(2), Mult(2), &
-        Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2), MultMax, MultMin
+    REAL(KIND=dp) :: detJ, gw(3), gc(3), sig, efl, ely, Ener, Flux(2), Mult(2), &
+        Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2), MultMax, MultMin, &
+        LayerEner(2), LayerShare(2)
     INTEGER :: e, n, gp, nmax, nno, nbulk, b, i, m, nPatch(2)
     INTEGER, POINTER :: Indexes(:)
     LOGICAL :: stat, Found, Parallel, Changed, OneCut
@@ -3994,7 +3996,8 @@ END FUNCTION isComponentName
     REAL(KIND=dp), PARAMETER :: MinRatio = 0.5_dp, MaxRatio = 2.0_dp
     REAL(KIND=dp), PARAMETER :: MaxPatchSpread = 0.02_dp
     REAL(KIND=dp) :: MaxMismatch
-    CHARACTER(LEN=12) :: Num(4)
+    LOGICAL :: GotLimit
+    CHARACTER(LEN=12) :: Num(6)
 !------------------------------------------------------------------------------
 
     ! Measuring it again on the already normalized field would just return 1.
@@ -4073,6 +4076,7 @@ END FUNCTION isComponentName
 
     Ener = 0._dp
     Flux = 0._dp
+    LayerEner = 0._dp
 
     DO e = 1, GetNOFActive()
       Element => GetActiveElement(e)
@@ -4114,6 +4118,7 @@ END FUNCTION isComponentName
         END WHERE
 
         efl = 0._dp
+        ely = 0._dp
         DO gp = 1, IP % n
           stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
               detJ, Basis, dBasisdx)
@@ -4121,9 +4126,11 @@ END FUNCTION isComponentName
           gc = MATMUL(Chi(1:n), dBasisdx(1:n,:))
           sig = SUM(Basis(1:n) * ElCond(1:n))
           efl = efl + IP % s(gp) * detJ * sig * SUM(gc*gw)
+          ely = ely + IP % s(gp) * detJ * sig * SUM(gw*gw)
         END DO
         ElemFlux(Element % ElementIndex, b) = efl
         Flux(b) = Flux(b) + efl
+        LayerEner(b) = LayerEner(b) + ely
       END DO
     END DO
 
@@ -4131,6 +4138,7 @@ END FUNCTION isComponentName
     ! The sign is the winding sense of the cut, which carries no information here.
     DO b = 1, 2
       Flux(b) = ABS(ParallelReduction(Flux(b)))
+      LayerEner(b) = ParallelReduction(LayerEner(b))
     END DO
 
     ! The branches are cut in different places, so their crossings are two cross
@@ -4150,6 +4158,12 @@ END FUNCTION isComponentName
     Ratio = Ener / FluxRef
     Circ = Ratio
 
+    ! The composite field is smooth across both layers, so the part of its loss
+    ! in a layer is the share of the loop resistance that layer takes; the two
+    ! add up to the circulation excess. A slab along the wire takes a large one.
+    LayerShare = 0._dp
+    IF (Ener > 0._dp) LayerShare = LayerEner / Ener
+
     CALL CountCrossingPatches()
 
     WRITE(Message,'(A,ES13.6)') 'Component '//I2S(CompInd)// &
@@ -4158,6 +4172,10 @@ END FUNCTION isComponentName
     WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES9.2)') 'Component '//I2S(CompInd)// &
         ' cut crossing flux: branch A ', Flux(1), ', branch B ', Flux(2), &
         ', relative difference ', FluxErr
+    CALL Info(Caller, Message, Level=5)
+    WRITE(Message,'(A,ES9.2,A,ES9.2)') 'Component '//I2S(CompInd)// &
+        ' share of the loop resistance in the cut layer: branch A ', LayerShare(1), &
+        ', branch B ', LayerShare(2)
     CALL Info(Caller, Message, Level=5)
     WRITE(Message,'(A,ES9.2,A,ES9.2,A)') 'Component '//I2S(CompInd)// &
         ' cut crossing patches: '//I2S(nPatch(1))//' (branch A) and '// &
@@ -4203,22 +4221,30 @@ END FUNCTION isComponentName
 
     ! Where the two branches meet, the direction field jumps by as much as they
     ! disagree, and at high frequency that jump drives spurious eddy currents.
-    MaxMismatch = MIN(MAX(MinCutBranchMismatch, CutLayerShareMismatch * (Circ - 1._dp)), &
-        MaxCutBranchMismatch)
+    MaxMismatch = GetConstReal(CompParams, 'Coil Cut Disagreement Limit', GotLimit)
+    IF (.NOT. GotLimit) MaxMismatch = MIN(MAX(MinCutBranchMismatch, &
+        CutLayerShareMismatch * (Circ - 1._dp)), MaxCutBranchMismatch)
     IF (FluxErr > MaxMismatch) THEN
       WRITE(Num(1),'(ES12.5)') Flux(1)
       WRITE(Num(2),'(ES12.5)') Flux(2)
       WRITE(Num(3),'(F7.2,A)') 100*FluxErr, ' %'
       WRITE(Num(4),'(F7.2,A)') 100*MaxMismatch, ' %'
+      WRITE(Num(5),'(F7.2,A)') 100*LayerShare(1), ' %'
+      WRITE(Num(6),'(F7.2,A)') 100*LayerShare(2), ' %'
       CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the two branches of the cut of '// &
           'the closed massive coil disagree on the loop current, branch A '// &
           TRIM(ADJUSTL(Num(1)))//' and branch B '//TRIM(ADJUSTL(Num(2)))//', by '// &
           TRIM(ADJUSTL(Num(3)))//' where a clean cut of this mesh gives at most '// &
-          TRIM(ADJUSTL(Num(4)))//': one of the two cuts is not a cross section of the wire, '// &
+          TRIM(ADJUSTL(Num(4)))//'. The cut layer of branch A takes '//TRIM(ADJUSTL(Num(5)))// &
+          ' of the loop resistance, that of branch B '//TRIM(ADJUSTL(Num(6)))// &
+          ', and a layer that runs along the wire takes a large share. '// &
+          'One of the two cuts is not a cross section of the wire, '// &
           'and the current density where the branches meet would be wrong. Unless "Coil '// &
           'Tangent" is given, the CoilSolver chooses the cut of a coil with "Single Coil Cut" '// &
           'itself and lists the half planes it tried at info level 5; "Coil Tangent" and '// &
-          '"Coil Center" in the component set it by hand.')
+          '"Coil Center" in the component set it by hand. A mesh much coarser or graded '// &
+          'along the wire can make even clean cuts disagree: remesh the wire, or set '// &
+          '"Coil Cut Disagreement Limit" in the component to the fraction to accept.')
     END IF
 
     CALL ListAddConstReal(CompParams, 'Coil Circulation', Circ)

@@ -1237,10 +1237,11 @@ CONTAINS
     INTEGER :: i,j,k,n,t,MinIndex,MaxIndex,Loop,ParLoop,jmax,NoCand
     TYPE(Element_t), POINTER :: Element
     INTEGER, POINTER :: Indexes(:)
-    INTEGER :: pIndexes(20)
+    INTEGER, ALLOCATABLE :: pIndexes(:), PrevPiece(:)
 
     
     Parallel = ( ParEnv % PEs > 1 )
+    ALLOCATE( pIndexes(Mesh % MaxElementNodes), PrevPiece(SIZE(MeshPiece)) )
 
     MeshPiece = 0
     
@@ -1349,14 +1350,14 @@ CONTAINS
 
     ! In parallel we might not be ready. The coil cut may be shared at the interface.
     IF( Parallel ) THEN
-      i = SUM(MeshPiece)
+      PrevPiece = MeshPiece
 
       ! Take parallel maximum at the interfaces
       CALL ParallelSumVectorInt(Solver % Matrix,MeshPiece,2)
 
       ! Was there any need to communicate?
       ! If even one node needed to be communicated then repeat the serial algo. 
-      j = SUM(MeshPiece)-i
+      j = COUNT( MeshPiece /= PrevPiece )
       k = ParallelReduction(j)
 
       IF(k > 0 ) THEN
