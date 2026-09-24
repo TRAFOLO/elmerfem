@@ -1151,7 +1151,7 @@ CONTAINS
             CALL Add_stranded(Element,Tcoef,Comp,nn,nd,dt,CompParams)
           CASE ('massive')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
-            CALL Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt)
+            CALL Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt,CompParams)
           CASE ('foil winding')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
             ! DEV-1491: CompParams passed in so that the kernel can read
@@ -1410,12 +1410,13 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt)
+   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt,CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    TYPE(Element_t) :: Element
+    TYPE(Element_t), POINTER :: Element
     REAL(KIND=dp) :: Tcoef(3,3,nn),dt, crt(:)
     TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
 
     TYPE(Solver_t), POINTER :: ASolver
     INTEGER, POINTER :: PS(:)
@@ -1500,8 +1501,7 @@ CONTAINS
 
     ncdofs=nd
     IF (dim == 3) THEN
-      !CALL GetLocalSolution(Wbase, 'w')      
-      CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+      CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
       ncdofs=nd-nn
     END IF
 
@@ -2922,7 +2922,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       CASE ('massive')
         IF (HasSupport(Element,nn_elem)) THEN
           Tcoef = GetCMPLXElectricConductivityTensor(Element, nn_elem, .TRUE., CoilType) 
-          CALL Add_massive(Element,Tcoef,Comp,nn_elem,nd_elem)
+          CALL Add_massive(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
         END IF
       CASE ('foil winding')
         IF (HasSupport(Element,nn_elem)) THEN
@@ -3143,12 +3143,13 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd)
+   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd,CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    TYPE(Element_t) :: Element
+    TYPE(Element_t), POINTER :: Element
     COMPLEX(KIND=dp) :: Tcoef(3,3,nn)
     TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
 
     TYPE(Solver_t), POINTER :: ASolver
     TYPE(ValueList_t), POINTER :: BC
@@ -3210,8 +3211,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     ncdofs=nd
     IF (dim == 3) THEN
-      !CALL GetWPotential(WBase)     
-      CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+      CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
       ncdofs=nd-nn
     END IF
 
