@@ -93,6 +93,12 @@
         Tcoef(1,1,1:n) = 0._dp
       CASE ('flat wire')
         CALL FlatWireConductivity(Element, n, Tcoef)
+      CASE ('foil sheet')
+        ! The block carries no volumetric eddy current: the sheets conduct
+        ! through the circuit coupling with the complex sheet conductivity
+        ! 'Sigma 33', and their intra-turn proximity loss is in 'Nu 22' /
+        ! 'Nu 33'. The material 'Electric Conductivity' is not used here.
+        Tcoef = 0._dp
       END SELECT
     END IF
  
@@ -137,6 +143,7 @@
 !------------------------------------------------------------------------------
   END SUBROUTINE FlatWireConductivity
 !------------------------------------------------------------------------------
+
 
 !------------------------------------------------------------------------------ 
   FUNCTION GetCMPLXElectricConductivityTensor(Element, n, CoilBody, CoilType) &

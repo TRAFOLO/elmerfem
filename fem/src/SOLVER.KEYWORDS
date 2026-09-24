@@ -1658,11 +1658,90 @@ Component:Real:      'Nu 22 Sigma'
 Component:Real:      'Sigma 33 y0'
 Component:Real:      'Sigma 33 alpha'
 Component:Real:      'Sigma 33 Sigma'
+! Foster form of the same ladders: y0 + sum_k r_k/(1 + s T_k). Accepted
+! alongside the alpha/Sigma triplet, which stays valid for order 1.
+Component:Real:      'Nu 33 y0'
+Component:Real:      'Nu 11 Residues'
+Component:Real:      'Nu 11 Taus'
+Component:Real:      'Nu 22 Residues'
+Component:Real:      'Nu 22 Taus'
+Component:Real:      'Nu 33 Residues'
+Component:Real:      'Nu 33 Taus'
 ! Nodal scalar potential of the AV solver inside a coil component. Required for
 ! DC / low-frequency foil and flat wire runs (auto-enabled at zero frequency).
 Component:Logical:   'Activate Constraint'
 Component:Logical:   'Automatic Electrode BC'
 Component:Integer:   'Electrode Boundaries'
+Component:Real:      'Electrode Area'
+Component:Real:      'Circuit Equation Voltage Factor'
+Component:Integer:   'Circuit Voltage Variable Id'
+! Take the coil direction field from a precomputed vector variable instead of
+! from grad(W). Accepted on the Component and on the circuits Solver section.
+Component:Logical:   'Coil Use W Vector'
+Component:String:    'W Vector Variable Name'
+Solver:Logical:      'Coil Use W Vector'
+Solver:String:       'W Vector Variable Name'
+! Closed (full 360 degree) coil: no electrodes and no single valued W, so the
+! direction field is the CoilSolver cut potential normalized to unit
+! circulation. The multipliers and the measured circulation are written by
+! Elmer itself, not by the SIF.
+Component:Logical:   'Coil Closed'
+Component:Real:      'Coil Potential Multiplier'
+Component:Real:      'Coil Potential Multiplier B'
+Component:Real:      'Coil Circulation'
+! Flat wire winding (per-turn cell model).
+Component:Integer:   'Turns Across'
+Component:String:    'Stacking Direction'
+Component:Real:      'Fill Factor'
+Component:Real:      'Conductor Thickness'
+Component:Real:      'Conductor Width'
+! Resolved layout, written back into the Component by Elmer.
+Component:Real:      'Flat Wire Fill Factor'
+Component:Integer:   'Flat Wire Stack Cells'
+Component:Integer:   'Flat Wire Across Cells'
+Component:Logical:   'Flat Wire Stack Along Alpha'
+! Foil sheet winding: conducting sheets, not a conducting continuum.
+Component:Integer:   'Sheet Cells'
+Component:Integer:   'Sheet Segments'
+! Strand layers through the thickness of one turn, 0 = automatic.
+Component:Integer:   'Sheet Sublayers'
+Component:Integer:   'Foil Sheet Sublayers'
+! Fallback quadrature for coil meshes that are not linear tetrahedra, where the
+! exact strand clipping does not apply. Unset (0) selects the clipping.
+Component:Integer:   'Sheet Integration Points'
+! Physics the SIF writer supplies; Elmer derives tau0, the sheet conductivity
+! and the in-plane reluctivity from these.
+Component:Real:      'Foil Thickness'
+Component:Real:      'Sheet Conductivity'
+Component:Real:      'Foil Sheet Tau0'
+Component:Real:      'Foil Sheet Sigma DC'
+Component:Logical:   'Foil Sheet Derive Sigma 33'
+Component:Logical:   'Foil Sheet Derive Nu'
+Component:Logical:   'Foil Sheet Sigma Varies'
+! 'Stacking Direction' of a foil sheet, published for the solvers.
+Component:Logical:   'Foil Sheet Stack Along Alpha'
+Component:Real:      'Foil Sheet Stack Extent'
+Component:Real:      'Foil Sheet Element Size'
+! Resolved layout and strand scaling, written back into the Component by Elmer.
+Component:Integer:   'Foil Sheet Cells'
+Component:Integer:   'Foil Sheet Segments'
+Component:Integer:   'Foil Sheet Foils Per Cell'
+Component:Real:      'Foil Sheet Sigma Ref'
+Component:Real:      'Foil Sheet Dof Scale'
+Component:Real:      'Foil Sheet Direction Sign'
+! Marks the transient Xi variables as already declared by the AV solver.
+Solver:Logical:      'Foil Sheet Xi Declared'
+! Transient strand skin ladder.
+Component:Integer:   'Sheet Skin Ladder Order'
+Component:Logical:   'Homogenization Model'
+Component:Real:      'Nu 11'
+Component:Real:      'Nu 11 im'
+Component:Real:      'Nu 22'
+Component:Real:      'Nu 22 im'
+Component:Real:      'Nu 33'
+Component:Real:      'Nu 33 im'
+Component:Real:      'Sigma 33'
+Component:Real:      'Sigma 33 im'
 !!!!!!!! TRAFOTEK KEYWORDS
 Material:Real:       'rho0'
 Material:Real:       'rho1'
