@@ -435,3 +435,125 @@ END SUBROUTINE APrecSolver
 
 !> \}
 
+
+!------------------------------------------------------------------------------
+!> Real edge-element auxiliary solver for the harmonic AV circuit preconditioner:
+!> K + omega*sigma*M on the lowest-order edge dofs (assembled by the master),
+!> solved with Hypre AMS. The caller writes the right-hand side to "AuxEdge res".
+!------------------------------------------------------------------------------
+SUBROUTINE HarmonicEdgePrecSolver_Init0( Model,Solver,dt,Transient )
+!------------------------------------------------------------------------------
+  USE DefUtils
+  IMPLICIT NONE
+!------------------------------------------------------------------------------
+  TYPE(Solver_t) :: Solver
+  TYPE(Model_t) :: Model
+  REAL(KIND=dp) :: dt
+  LOGICAL :: Transient
+!------------------------------------------------------------------------------
+  TYPE(ValueList_t), POINTER :: Params
+!------------------------------------------------------------------------------
+  Params => GetSolverParams()
+  CALL ListAddNewString( Params,'Exec Solver','never')
+  CALL ListAddNewString( Params,'Element','n:0 e:1')
+  CALL ListAddNewString( Params,'Variable','-nooutput AuxEdge')
+  CALL ListAddString( Params,NextFreeKeyword('Exported Variable',Params),'-nooutput AuxEdge res')
+  CALL ListAddString( Params,NextFreeKeyword('Exported Variable',Params),'-nodal -dofs 3 -nooutput ams nodal var')
+  CALL ListAddNewLogical( Params,'Skip Compute Nonlinear Change',.TRUE.)
+  CALL ListAddNewLogical( Params,'Linear System Symmetric',.TRUE.)
+  ! AMS needs the unscaled matrix: its discrete gradient must lie in the kernel.
+  CALL ListAddNewLogical( Params,'Linear System Scaling',.FALSE.)
+  CALL ListAddNewString( Params,'Linear System Solver','iterative')
+  CALL ListAddNewLogical( Params,'Linear System Use Hypre',.TRUE.)
+  CALL ListAddNewString( Params,'Linear System Iterative Method','cg')
+  CALL ListAddNewString( Params,'Linear System Preconditioning','ams')
+  CALL ListAddNewInteger( Params,'Linear System Max Iterations',20)
+  CALL ListAddNewConstReal( Params,'Linear System Convergence Tolerance',1.0e-2_dp)
+  CALL ListAddNewLogical( Params,'Linear System Abort Not Converged',.FALSE.)
+  CALL ListAddNewInteger( Params,'Linear System Residual Output',0)
+!------------------------------------------------------------------------------
+END SUBROUTINE HarmonicEdgePrecSolver_Init0
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+SUBROUTINE HarmonicEdgePrecSolver( Model,Solver,dt,Transient )
+!------------------------------------------------------------------------------
+  USE DefUtils
+  IMPLICIT NONE
+!------------------------------------------------------------------------------
+  TYPE(Solver_t), TARGET :: Solver
+  TYPE(Model_t) :: Model
+  REAL(KIND=dp) :: dt
+  LOGICAL :: Transient
+!------------------------------------------------------------------------------
+  TYPE(ValueList_t), POINTER :: Params
+  TYPE(Mesh_t), POINTER :: Mesh
+  TYPE(Matrix_t), POINTER :: A
+  TYPE(Solver_t), POINTER :: Master
+  TYPE(Variable_t), POINTER :: ResVar
+  LOGICAL, ALLOCATABLE, SAVE :: Fix(:)
+  REAL(KIND=dp), ALLOCATABLE :: Mark(:)
+  REAL(KIND=dp) :: Norm, Reg
+  INTEGER :: e, gi, km, ks, i, j, n
+  LOGICAL :: Found, Refactorize
+!------------------------------------------------------------------------------
+  Params => GetSolverParams()
+  Mesh => GetMesh()
+  A => Solver % Matrix
+  n = A % NumberOfRows
+  ResVar => VariableGet(Mesh % Variables, 'AuxEdge res', ThisOnly=.TRUE., UnfoundFatal=.TRUE.)
+
+  Refactorize = ListGetLogical(Params, 'Linear System Refactorize', Found)
+  IF (.NOT. Found) Refactorize = .TRUE.
+  IF (Refactorize .OR. .NOT. ALLOCATED(Fix)) THEN
+    ! Dirichlet edges of the master system: identity rows, symmetric elimination.
+    i = ListGetInteger(Params, 'Auxiliary Edge Master', Found)
+    IF (.NOT. Found) CALL Fatal('HarmonicEdgePrecSolver', '"Auxiliary Edge Master" not set')
+    Master => Model % Solvers(i)
+    IF (ALLOCATED(Fix)) DEALLOCATE(Fix)
+    ALLOCATE(Fix(n), Mark(n))
+    Mark = 0.0_dp
+    IF (ALLOCATED(Master % Matrix % ConstrainedDOF)) THEN
+      DO e = 1, Mesh % NumberOfEdges
+        gi = Mesh % MaxNDOFs * Mesh % NumberOfNodes + Mesh % MaxEdgeDOFs * (e-1) + 1
+        km = Master % Variable % Perm(gi)
+        ks = Solver % Variable % Perm(gi)
+        IF (km <= 0 .OR. ks <= 0) CYCLE
+        IF (Master % Matrix % ConstrainedDOF(2*km-1)) Mark(ks) = 1.0_dp
+      END DO
+    END IF
+    IF (Solver % Parallel) THEN
+      IF (.NOT. ASSOCIATED(A % ParMatrix)) THEN
+        A % Solver => Solver
+        CALL ParallelInitMatrix(Solver, A)
+      END IF
+      CALL ParallelSumVector(A, Mark)
+    END IF
+    Fix = Mark > 0.0_dp
+    ! Relative diagonal shift: curl-curl alone is singular in non-conducting
+    ! regions, which breaks the nodal AMG problems inside AMS.
+    Reg = ListGetConstReal(Params, 'Auxiliary Edge Regularization', Found)
+    IF (.NOT. Found) Reg = 1.0e-6_dp
+    DO i = 1, n
+      IF (Fix(i)) THEN
+        CALL ZeroRow(A, i)
+        A % Values(A % Diag(i)) = 1.0_dp
+      ELSE
+        DO j = A % Rows(i), A % Rows(i+1) - 1
+          IF (Fix(A % Cols(j))) A % Values(j) = 0.0_dp
+        END DO
+        A % Values(A % Diag(i)) = A % Values(A % Diag(i)) * (1.0_dp + Reg)
+      END IF
+    END DO
+    CALL Info('HarmonicEdgePrecSolver', 'Fixed '//I2S(COUNT(Fix))//' of '//I2S(n)//' edge unknowns', Level=8)
+  END IF
+
+  A % RHS = ResVar % Values
+  WHERE(Fix) A % RHS = 0.0_dp
+  Solver % Variable % Values = 0.0_dp
+  Norm = DefaultSolve()
+  CALL ListAddLogical(Params, 'Linear System Refactorize', .FALSE.)
+!------------------------------------------------------------------------------
+END SUBROUTINE HarmonicEdgePrecSolver
+!------------------------------------------------------------------------------

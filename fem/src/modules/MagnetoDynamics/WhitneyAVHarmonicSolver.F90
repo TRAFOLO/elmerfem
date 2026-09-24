@@ -177,6 +177,31 @@ SUBROUTINE WhitneyAVHarmonicSolver_Init(Model,Solver,dt,Transient)
     END DO
   END BLOCK
   
+  ! Circuit preconditioner with an edge auxiliary space (Hypre AMS): locate the
+  ! HarmonicEdgePrecSolver helper and tell it which solver is its master.
+  BLOCK
+    INTEGER :: i, j
+    TYPE(ValueList_t), POINTER :: Params
+    CHARACTER(:), ALLOCATABLE :: sname
+
+    Params => Solver % Values
+    IF( ListGetString(Params,'Circuit Prec Field Method',Found) == 'auxiliary space' ) THEN
+      DO i=1,Model % NumberOfSolvers
+        sname = ListGetString(Model % Solvers(i) % Values,'Procedure',Found)
+        IF(.NOT. Found) CYCLE
+        IF(INDEX(sname,'HarmonicEdgePrecSolver') == 0) CYCLE
+        IF(.NOT. ListCheckPresent(Params,'Auxiliary Edge Solver')) &
+            CALL ListAddInteger(Params,'Auxiliary Edge Solver',i)
+        DO j=1,Model % NumberOfSolvers
+          IF(ASSOCIATED(Model % Solvers(j) % Values, Solver % Values)) &
+              CALL ListAddInteger(Model % Solvers(i) % Values,'Auxiliary Edge Master',j)
+        END DO
+      END DO
+      IF(.NOT. ListCheckPresent(Params,'Auxiliary Edge Solver')) CALL Fatal('WhitneyAVHarmonicSolver_Init', &
+          '"Circuit Prec Field Method = auxiliary space" needs a HarmonicEdgePrecSolver solver')
+    END IF
+  END BLOCK
+
 !------------------------------------------------------------------------------
 END SUBROUTINE WhitneyAVHarmonicSolver_Init
 !------------------------------------------------------------------------------
@@ -244,6 +269,9 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   REAL(KIND=dp) :: CurrAmp
   LOGICAL :: UseCoilCurrent, ElemCurrent, ElectroDynamics, Darwin, EigenSystem
   TYPE(Solver_t), POINTER :: pSolver 
+  ! Real edge auxiliary matrix for the circuit preconditioner (HarmonicEdgePrecSolver)
+  TYPE(Solver_t), POINTER :: AuxEdgeSolver
+  REAL(KIND=dp), ALLOCATABLE, SAVE :: AuxEStiff(:,:), AuxEF(:)
 
   
   SAVE MASS, STIFF, LOAD, ReLOAD, FORCE, Tcoef, JFixVec, JFixFORCE, Acoef, Acoef_t, &
@@ -325,6 +353,13 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
 
      AllocationsDone = .TRUE.
   END IF
+  NULLIFY(AuxEdgeSolver)
+  i = ListGetInteger(SolverParams,'Auxiliary Edge Solver',Found)
+  IF(i > 0) THEN
+    AuxEdgeSolver => Model % Solvers(i)
+    IF(.NOT. ALLOCATED(AuxEStiff)) ALLOCATE(AuxEStiff(Mesh % MaxElementDOFs, Mesh % MaxElementDOFs), &
+        AuxEF(Mesh % MaxElementDOFs))
+  END IF
   
   Omega = GetAngularFrequency(Found=Found)
   IF(.NOT. Found .AND. .NOT. EigenSystem ) THEN
@@ -389,6 +424,7 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   DO i=1,NoIterationsMax
     ExtNewton = ( i > NewtonIter .OR. Solver % Variable % NonlinChange < NewtonTol )
 
+    IF(ASSOCIATED(AuxEdgeSolver)) CALL ListAddLogical(AuxEdgeSolver % Values,'Linear System Refactorize',.TRUE.)
     IF( DoSolve(i) ) THEN
       IF(i>=NoIterationsMin) EXIT
     END IF
@@ -420,6 +456,10 @@ CONTAINS
     ! System assembly:
     !-----------------
     CALL DefaultInitialize()
+    IF(ASSOCIATED(AuxEdgeSolver)) THEN
+      AuxEdgeSolver % Matrix % Values = 0.0_dp
+      AuxEdgeSolver % Matrix % RHS = 0.0_dp
+    END IF
     Active = GetNOFActive()
 
     DO t=1,active
@@ -561,6 +601,7 @@ CONTAINS
        !Update global matrix and rhs vector from local matrix & vector:
        !---------------------------------------------------------------
        CALL DefaultUpdateEquations( STIFF, FORCE )
+       IF( ASSOCIATED(AuxEdgeSolver) ) CALL AssembleAuxEdge(Element, n, nd)
        IF (EigenSystem) CALL DefaultUpdateMass(MASS)
        
        ! Memorize stuff for the fixing potential
@@ -789,6 +830,33 @@ END BLOCK
     Converged = Solver % Variable % NonlinConverged==1
 !------------------------------------------------------------------------------
   END FUNCTION DoSolve
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Real edge auxiliary matrix K + omega*sigma*M: the edge-edge block of the
+!> complex element matrix, real part plus the (sign-corrected) imaginary part.
+!------------------------------------------------------------------------------
+  SUBROUTINE AssembleAuxEdge(Element, n, nd)
+!------------------------------------------------------------------------------
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: n, nd
+!------------------------------------------------------------------------------
+    INTEGER :: ne
+    REAL(KIND=dp) :: sgn
+!------------------------------------------------------------------------------
+    ne = nd - n
+    IF(ne <= 0) RETURN
+    IF(ne /= Element % TYPE % NumberOfEdges) CALL Fatal('WhitneyAVHarmonicSolver', &
+        'The edge auxiliary space supports lowest-order edge elements only')
+    sgn = 1.0_dp
+    IF(AIMAG(STIFF(n+1,n+1)) < 0.0_dp) sgn = -1.0_dp
+    AuxEStiff(1:ne,1:ne) = REAL(STIFF(n+1:nd,n+1:nd)) + sgn * AIMAG(STIFF(n+1:nd,n+1:nd))
+    AuxEF(1:ne) = 0.0_dp
+    CurrentModel % Solver => AuxEdgeSolver
+    CALL DefaultUpdateEquations(AuxEStiff(1:ne,1:ne),AuxEF(1:ne),UElement=Element,USolver=AuxEdgeSolver)
+    CurrentModel % Solver => pSolver
+!------------------------------------------------------------------------------
+  END SUBROUTINE AssembleAuxEdge
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------

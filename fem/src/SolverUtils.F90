@@ -13639,6 +13639,38 @@ END FUNCTION SearchNodeL
         END IF
 
         IF ( ComplexMatrix ) THEN
+          ! Optionally scale rows with a zero complex diagonal (e.g. circuit equations)
+          ! by their row norm, as the real branch does; with weight one they would
+          ! dominate the scaled residual and the stopping criterion.
+          IF( ListGetLogical( Solver % Values,'Linear System Scaling Row Norm Fallback', Found ) ) THEN
+            s = 0.0_dp
+            DO i=1,n,2
+              IF( ABS(CMPLX(Diag(i),-Diag(i+1),KIND=dp)) <= TINY(bnorm) ) THEN
+                s = 1.0_dp
+                EXIT
+              END IF
+            END DO
+            IF(Parallel) s = ParallelReduction(s,2)
+            IF( s > TINY(s) ) THEN
+              DO i=1,n,2
+                IF( ABS(CMPLX(Diag(i),-Diag(i+1),KIND=dp)) <= TINY(bnorm) ) THEN
+                  Diag(i) = SUM( ABS(A % Values(A % Rows(i):A % Rows(i+1)-1)) )
+                  Diag(i+1) = 0.0_dp
+                ELSE
+                  j = A % Diag(i)
+                  IF(j>0) THEN
+                    Diag(i) = A % Values(j)
+                    Diag(i+1) = A % Values(j+1)
+                  ELSE
+                    Diag(i) = 0.0_dp
+                    Diag(i+1) = 0.0_dp
+                  END IF
+                END IF
+              END DO
+              IF ( Parallel ) CALL ParallelSumVector(A, Diag)
+            END IF
+          END IF
+
           !$OMP PARALLEL DO &
           !$OMP SHARED(Diag, A, N) &
           !$OMP PRIVATE(i, j, DiagC, s) &

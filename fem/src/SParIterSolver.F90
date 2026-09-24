@@ -1841,6 +1841,10 @@ SUBROUTINE SParIterSolver( SourceMatrix, ParallelInfo, XVec, &
 #ifdef HAVE_HYPRE
     CALL SolveHypre(SourceMatrix,XVec,RHSVec,Solver,&
         ParallelInfo,SplittedMatrix)    
+    ! Restore the caller's descriptor: a Hypre solve nested in another
+    ! parallel Krylov solve (e.g. an auxiliary-space slave) must not leave
+    ! GlobalData pointing at its own matrix.
+    GlobalData => SaveGlobalData
     RETURN
 #else
     CALL Fatal(Caller,'This version has been compiled without HYPRE!')

@@ -46,11 +46,26 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   warns if it is explicitly off or if `Electrode Boundaries` is missing. Nothing changes at
   `omega > 0` unless the keyword is set. Tests: `circuits_harmonic_foil_dc`,
   `circuits_harmonic_flatwire_dc`.
+- Circuit preconditioner (`Linear System Preconditioning = Circuit`, new module
+  `CircuitAuxPrec`): the circuit block is summed over the ranks and LU-factored densely with
+  LAPACK on every rank, replacing the UMFPACK/MUMPS solve. By default the field block keeps its
+  ILU and the preconditioner stays block diagonal, as before. For complex (harmonic) systems,
+  `Circuit Prec Block Method = schur` uses the Schur complement (one field preconditioner
+  application per circuit column coupled to the field), and for `WhitneyAVHarmonicSolver`
+  `Circuit Prec Field Method = "auxiliary space"` wraps ILU smoothing around a PRESB correction
+  with the real edge operator `K + omega*sigma*M`, solved by Hypre AMS in the helper solver
+  `HarmonicEdgePrecSolver` (needs `WITH_Hypre`; solver sections as in the test sif).
+  `Linear System Scaling Row Norm Fallback = True` scales the zero-diagonal circuit rows of
+  complex systems by their row norm, so they do not dominate the stopping test. A Hypre solve
+  nested in a parallel Krylov solve now restores the caller's `GlobalData` (`SParIterSolver`).
+  Tests: `circuits_harmonic_massive_schur`, `circuits_harmonic_massive_ams` (Hypre only).
 
 ## Building
 
 The TRAFOLO product is a **Windows-only** solver bundle built with the standard Elmer CMake
-system (MSYS2 UCRT64 toolchain). The direct solver is Elmer's vendored UMFPACK 4.4. Build and
+system (MSYS2 UCRT64 toolchain). The direct solver is Elmer's vendored UMFPACK 4.4. Hypre,
+built from source without SuperLU_dist and ParMETIS, is needed for the harmonic
+auxiliary-space circuit preconditioner (`WITH_Hypre=ON`). Build and
 packaging tooling is maintained internally by TRAFOLO and is **not** part of this repository;
 this repo carries source only. There is no CI here — validation is run locally.
 
