@@ -6,6 +6,8 @@
 ! with electrodes on the symmetry plane and "Circuit Equation Voltage Factor =
 ! 0.5". Its loss and field energy agree with this one to 0.52 % per step.
 ! Mesh: circuits_harmonic_foil/6459 mirrored about z=0 (ElmerGrid -mirror 0 0 1).
+! The cut plane crosses this ring once, so "Single Coil Cut" has nothing to drop
+! here and only covers that a coil with one crossing is left alone.
 Check Keywords "Warn"
 INCLUDE sif/6459r-circuits.definitions
 INCLUDE 6459r/mesh.names
@@ -47,6 +49,7 @@ Solver 1  !---- CoilSolver, CoilSolver
    Linear System Residual Output = 1000
    Coil Closed = Logical True
    Narrow Interface = Logical True
+   Single Coil Cut = Logical True
 End
 Solver 2  !---- CircuitsAndDynamics, CircuitsAndDynamics
    Exec Solver = Always

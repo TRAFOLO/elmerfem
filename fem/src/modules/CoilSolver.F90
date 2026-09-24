@@ -200,6 +200,9 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
   LOGICAL, ALLOCATABLE :: GotCurr(:), GotDens(:), NormalizeCoil(:), CoilBodies(:)
   REAL(KIND=dp) :: CoilCenter(3), CoilNormal(3), CoilTangent1(3), CoilTangent2(3), &
       MinCurr(3),MaxCurr(3),TmpCurr(3)
+  REAL(KIND=dp) :: CutDirA(3), CutNormalA(3), CutDirB(3), CutNormalB(3), SelectDir(3)
+  INTEGER :: KeepPieceA, KeepPieceB
+  LOGICAL :: TangentGiven
   INTEGER, ALLOCATABLE :: CoilIndex(:)
   INTEGER, ALLOCATABLE :: CoilCompInd(:)
   CHARACTER(LEN=MAX_NAME_LEN) :: CondName, EqName
@@ -290,7 +293,8 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
   TestCut = .FALSE.
   OneCut = .FALSE.
   IF( CoilParts == 2 ) THEN
-    OneCut = GetLogical( Params,'Single Coil Cut',Found )
+    OneCut = GetLogical( Params,'Single Coil Cut',Found ) .OR. &
+        ListGetLogicalAnyComponent( Model,'Single Coil Cut')
     TestCut = GetLogical( Params,'Test Coil Cut',Found )
         
     ALLOCATE( SetB(nsize) )
@@ -383,7 +387,7 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
         SelectNodes = .TRUE.      
         CALL DefineCoilCenter( CoilCenter, CoilList, TargetBodies )
         CALL DefineCoilParameters( CoilNormal, CoilTangent1, CoilTangent2, &
-            CoilList, TargetBodies )
+            TangentGiven, CoilList, TargetBodies )
       END IF
     ELSE
       IF( NoCoils > 0 ) THEN
@@ -405,20 +409,30 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
       CoilList => Params
       IF( CoilClosed ) THEN
         CALL DefineCoilCenter( CoilCenter, Params )
-        CALL DefineCoilParameters( CoilNormal, CoilTangent1, CoilTangent2, Params )
+        CALL DefineCoilParameters( CoilNormal, CoilTangent1, CoilTangent2, &
+            TangentGiven, Params )
       END IF
       CoilNormals(NoCoils,:) = CoilNormal
     END IF
 
     ! Choose nodes where the Dirichlet values are set. 
     IF( CoilClosed ) THEN
+      CALL ChooseCleanCut( TangentGiven .OR. ListCheckPresent( Params,'Coil Tangent') )
+
       Set => SetA
-      CALL ChooseFixedBulkNodesNarrow(Set,1,SelectNodes)
-      IF( OneCut ) CALL ChooseCoilCut(Set,SelectNodes)
+      CALL ChooseFixedBulkNodesNarrow(Set,1,SelectNodes,CutDirA,CutNormalA)
+      IF( OneCut ) CALL ChooseCoilCut(Set,SelectNodes,KeepPieceA)
 
       Set => SetB
-      CALL ChooseFixedBulkNodesNarrow(Set,2,SelectNodes)
-      IF( OneCut ) CALL ChooseCoilCut(Set,SelectNodes)
+      CALL ChooseFixedBulkNodesNarrow(Set,2,SelectNodes,CutDirB,CutNormalB)
+      IF( OneCut ) CALL ChooseCoilCut(Set,SelectNodes,KeepPieceB)
+
+      ! The circuit side reads this back to know that the cut potential it
+      ! normalizes ramps once over the whole wire instead of once per turn.
+      IF( OneCut .AND. CoilCompInd(NoCoils) > 0 ) THEN
+        CALL ListAddLogical( Model % Components(CoilCompInd(NoCoils)) % Values, &
+            'Single Coil Cut', .TRUE. )
+      END IF
     ELSE
       Set => SetA
       CALL ChooseFixedEndNodes(Set)
@@ -926,8 +940,9 @@ CONTAINS
   ! in the middle of the coil.
   !----------------------------------------------------------------------------  
   SUBROUTINE DefineCoilParameters(CoilNormal, CoilTangent1, CoilTangent2, &
-      Params, TargetBodies )
+      TangentGiven, Params, TargetBodies )
     REAL(KIND=dp) :: CoilNormal(3), CoilTangent1(3), CoilTangent2(3)
+    LOGICAL :: TangentGiven
     TYPE(ValueList_t), POINTER :: Params
     INTEGER, POINTER, OPTIONAL :: TargetBodies(:)
 
@@ -944,6 +959,7 @@ CONTAINS
     INTEGER :: EigInfo, Three
     REAL(KIND=dp) :: rArray(1:3,1)
     
+    TangentGiven = .FALSE.
     FitCoil = GetLogical( Params,'Fit Coil',Found )
     IF(.NOT. Found ) FitCoil = .TRUE. 
 
@@ -953,6 +969,7 @@ CONTAINS
       IF(Found) THEN
         CoilNormal(1:3) = HelperArray(1:3,1)
         HelperArray => ListGetConstRealArray( Params, 'Coil Tangent', Found2)
+        TangentGiven = Found2
         IF( Found2 ) THEN
           CoilTangent1(1:3) = HelperArray(1:3,1)
           CoilTangent2 = CrossProduct(CoilNormal,CoilTangent1)
@@ -1086,15 +1103,16 @@ CONTAINS
   
   ! Chooses bulk nodes which are used to set the artificial boundary conditions
   ! in the middle of the coil. Narrow version where just one layer of connections
-  ! is affected. 
+  ! is affected. The layer lies on the half plane that leaves the coil axis along
+  ! CutDir, and CutNormal points to its positive side. Set 0 is a trial layer.
   !----------------------------------------------------------------------------  
-  SUBROUTINE ChooseFixedBulkNodesNarrow( Set, SetNo, SelectNodes )
+  SUBROUTINE ChooseFixedBulkNodesNarrow( Set, SetNo, SelectNodes, CutDir, CutNormal )
     
     INTEGER :: SetNo
     INTEGER, POINTER :: Set(:)
     LOGICAL :: SelectNodes
+    REAL(KIND=dp) :: CutDir(3), CutNormal(3)
 
-    LOGICAL :: Mirror 
     TYPE(Mesh_t), POINTER :: Mesh
     REAL(KIND=dp) :: x,y,z,x0,y0
     REAL(KIND=dp) :: r(3),rp(3),MinCut, MaxCut, CutDist(27)
@@ -1104,9 +1122,7 @@ CONTAINS
     INTEGER, POINTER :: Indexes(:)
 
 
-    CALL Info(Caller,'Choosing fixing nodes for set: '//I2S(SetNo))
-
-    Mirror = ( SetNo == 2 )
+    IF( SetNo > 0 ) CALL Info(Caller,'Choosing fixing nodes for set: '//I2S(SetNo))
 
     Mesh => Solver % Mesh
 
@@ -1137,16 +1153,15 @@ CONTAINS
         r(3) = Mesh % Nodes % z(i)
 
         r = r - CoilCenter
-        IF( mirror ) r = -r
 
         ! Coordinate projected to coil coordinates
-        rp(1) = SUM( CoilTangent1 * r ) 
-        rp(2) = SUM( CoilTangent2 * r ) 
+        rp(1) = SUM( CutDir * r ) 
+        rp(2) = SUM( CutNormal * r ) 
         rp(3) = SUM( CoilNormal * r ) 
 
         IF( SetNo == 1 ) THEN
           ! This is used to determine "left" and "right" side of the coil
-          PotSelect % Values( PotSelect % Perm(i) ) = rp(1)
+          PotSelect % Values( PotSelect % Perm(i) ) = SUM( SelectDir * r )
         END IF
 
         ! This element can not be an the interface as it is on the wrong side
@@ -1206,25 +1221,28 @@ CONTAINS
 
 
 
-  ! Choose only one cut of the many. There may be many cuts, for example, if the coil
-  ! has multiple circles. 
+  ! Colour the Dirichlet layer in Set into its connected pieces, through the
+  ! elements of the coil only. Every node of a piece ends up with the largest
+  ! global node index of the piece as its label, in serial and in parallel alike.
+  ! Returns the number of pieces, exact in parallel too, and the label of the
+  ! piece that "Single Coil Cut" keeps: the largest, or with "Select Min Coil
+  ! Cut" the smallest.
   !---------------------------------------------------------------------------------
-  SUBROUTINE ChooseCoilCut(Set, SelectNodes )
+  SUBROUTINE LabelCutPieces( Set, SelectNodes, MeshPiece, NoPieces, KeptPiece )
     INTEGER, POINTER :: Set(:)
     LOGICAL :: SelectNodes
+    INTEGER :: MeshPiece(:), NoPieces, KeptPiece
 
     LOGICAL :: Ready, GotAny, Parallel
-    INTEGER :: i,j,k,l,n,t,MinIndex,MaxIndex,Loop,ParLoop,NoPieces,jmax,m,NoCand
-    INTEGER, ALLOCATABLE :: MeshPiece(:)
+    INTEGER :: i,j,k,n,t,MinIndex,MaxIndex,Loop,ParLoop,jmax,NoCand
     TYPE(Element_t), POINTER :: Element
     INTEGER, POINTER :: Indexes(:)
-    INTEGER :: pIndexes(20)
+    INTEGER, ALLOCATABLE :: pIndexes(:), PrevPiece(:)
 
     
     Parallel = ( ParEnv % PEs > 1 )
+    ALLOCATE( pIndexes(Mesh % MaxElementNodes), PrevPiece(SIZE(MeshPiece)) )
 
-    m = Solver % Matrix % NumberOfRows
-    ALLOCATE( MeshPiece(m) ) 
     MeshPiece = 0
     
     ! Only set the piece for the nodes that are used by some element
@@ -1270,12 +1288,20 @@ CONTAINS
 100 DO WHILE(.NOT. Ready) 
       Ready = .TRUE.
 
-      DO t = 1, Mesh % NumberOfBulkElements
-        Element => Mesh % Elements(t)        
+      ! Only the elements of the coil carry the piece index from node to node.
+      ! Filtering by node is not enough: an element of the surrounding mesh that
+      ! fits in the gap between two turns has all of its nodes on the coil
+      ! surface, and it merges the two cuts there into one piece.
+      DO t = 1, GetNOFActive()
+        Element => GetActiveElement(t)
         Indexes => Element % NodeIndexes
         n = Element % TYPE % NumberOfNodes
         pIndexes(1:n) = Perm(Indexes)
-        
+
+        IF( SelectNodes ) THEN
+          IF( ANY( CoilIndex(Indexes(1:n)) /= NoCoils ) ) CYCLE
+        END IF
+
         GotAny = .FALSE.
         DO i=1,n
           j = Perm(Indexes(i))
@@ -1324,14 +1350,14 @@ CONTAINS
 
     ! In parallel we might not be ready. The coil cut may be shared at the interface.
     IF( Parallel ) THEN
-      i = SUM(MeshPiece)
+      PrevPiece = MeshPiece
 
       ! Take parallel maximum at the interfaces
       CALL ParallelSumVectorInt(Solver % Matrix,MeshPiece,2)
 
       ! Was there any need to communicate?
       ! If even one node needed to be communicated then repeat the serial algo. 
-      j = SUM(MeshPiece)-i
+      j = COUNT( MeshPiece /= PrevPiece )
       k = ParallelReduction(j)
 
       IF(k > 0 ) THEN
@@ -1342,62 +1368,379 @@ CONTAINS
       END IF
     END IF
         
-    ! Compute the true number of different pieces starting from the biggest one.
-    ! This does not really give the correct count in parallel. Only in serial.
-    IF( NoCand > 0 ) THEN
-      MaxIndex = MAXVAL(MeshPiece)
-    ELSE
-      MaxIndex = 0
-    END IF
-    MinIndex = MaxIndex
-    
+    ! One node of each piece carries its own index as the label, and only the
+    ! partition that owns it counts it.
     NoPieces = 0
-    l = 0
-    IF( MaxIndex > 0 ) THEN
-      NoPieces = 1      
-      k = MaxIndex
-      !PRINT *,'number of cuts:',k,COUNT(MeshPiece==k)
-200   j = 0
-      ! Find the biggest piece tag that is not the latest biggest
-      DO i=1,m
-        IF(MeshPiece(i)>j .AND. MeshPiece(i)<k) THEN
-          j=MeshPiece(i)
-        END IF
-      END DO
-      ! If we found a bigger one then that is one piece more 
-      IF( j>0 ) THEN
-        !PRINT *,'number of cuts:',j,COUNT(MeshPiece==j)
-        NoPieces = NoPieces + 1        
-        k = j
-        MinIndex = j
-        GOTO 200 
+    DO i = 1, Mesh % NumberOfNodes
+      j = Perm(i)
+      IF( j == 0 ) CYCLE
+      IF( MeshPiece(j) == 0 ) CYCLE
+      IF( Parallel ) THEN
+        IF( Solver % Matrix % ParallelInfo % NeighbourList(j) % Neighbours(1) &
+            /= ParEnv % MyPe ) CYCLE
+        IF( MeshPiece(j) /= Mesh % ParallelInfo % GlobalDOFs(i) ) CYCLE
+      ELSE
+        IF( MeshPiece(j) /= i ) CYCLE
       END IF
-    END IF
-
-    !PRINT *,'MinMax:',ParEnv % MyPe, MinIndex, MaxIndex, NoPieces, COUNT( MeshPiece > 0 )
-    
+      NoPieces = NoPieces + 1
+    END DO
     NoPieces = ParallelReduction(NoPieces)
-    CALL Info(Caller,'Number of separate cuts in mesh is '//I2S(NoPieces),Level=12)
-    IF(NoPieces == 1 ) RETURN
-
-    MaxIndex = ParallelReduction(MaxIndex,2)
-
 
     IF( ListGetLogical( Solver % Values,'Select Min Coil Cut',Found ) ) THEN
-      ! We may choose the minimum index
-      IF( NoCand > 0 ) THEN
-        MinIndex = MINVAL(MeshPiece,MeshPiece>0)
-      ELSE
-        MinIndex = MaxIndex
-      END IF
-      MinIndex = ParallelReduction(MinIndex,1)      
-      WHERE ( MeshPiece /= MinIndex ) Set = 0
-    ELSE      
-      ! Or the maximum. We don't really know how many there are.
-      WHERE ( MeshPiece /= MaxIndex) Set = 0
+      KeptPiece = HUGE(KeptPiece)
+      IF( ANY( MeshPiece > 0 ) ) KeptPiece = MINVAL( MeshPiece, MeshPiece > 0 )
+      KeptPiece = ParallelReduction(KeptPiece,1)
+    ELSE
+      KeptPiece = ParallelReduction(MAXVAL(MeshPiece),2)
     END IF
- 
+
+  END SUBROUTINE LabelCutPieces
+
+
+  ! Choose only one cut of the many. There may be many cuts, for example, if the coil
+  ! has multiple circles. KeepPiece, when not 0, is the label of the piece to keep
+  ! instead of the one the default rule keeps.
+  !---------------------------------------------------------------------------------
+  SUBROUTINE ChooseCoilCut(Set, SelectNodes, KeepPiece )
+    INTEGER, POINTER :: Set(:)
+    LOGICAL :: SelectNodes
+    INTEGER :: KeepPiece
+
+    INTEGER :: NoPieces, KeptPiece
+    INTEGER, ALLOCATABLE :: MeshPiece(:)
+
+    ALLOCATE( MeshPiece(Solver % Matrix % NumberOfRows) )
+    CALL LabelCutPieces( Set, SelectNodes, MeshPiece, NoPieces, KeptPiece )
+    IF( KeepPiece > 0 ) KeptPiece = KeepPiece
+    CALL Info(Caller,'Number of separate cuts in mesh is '//I2S(NoPieces),Level=5)
+
+    ! Only the nodes tagged above are cleared: the set is shared by all the coils
+    ! of the solver, and the pieces of the other coils are not tagged here.
+    IF( NoPieces > 1 ) THEN
+      WHERE ( MeshPiece > 0 .AND. MeshPiece /= KeptPiece ) Set = 0
+    END IF
+
   END SUBROUTINE ChooseCoilCut
+
+
+  ! The cut of a closed coil that is cut once. ChooseCoilCut keeps one piece of
+  ! the Dirichlet layer, by default the one with the largest node number. When
+  ! the half plane runs along a straight part of the loop, such as the return
+  ! bar of a helix whose ends both sit at its azimuth, that piece can be a slab
+  ! along the wire instead of a cross section: the branch then does not ramp
+  ! along the wire, the two branches disagree, and the direction field jumps
+  ! where they meet. The layers of half planes all around the coil normal give
+  ! the size of a cross section of the wire; a piece is clean when it holds both
+  ! sides of the cut and is about that size. Each branch keeps the piece of the
+  ! default rule when it is clean and otherwise a clean piece of its half plane.
+  ! Only when a half plane of the default orientation has no clean piece, and
+  ! "Coil Tangent" does not fix the orientation, do the branches move to other
+  ! half planes, as far as possible from those without one.
+  !------------------------------------------------------------------------------
+  SUBROUTINE ChooseCleanCut( TangentGiven )
+    LOGICAL :: TangentGiven
+
+    INTEGER, PARAMETER :: NoCand = 24, MinSeparation = NoCand / 6, MaxPieces = 64
+    ! A cross section is about as long as the smallest piece of a typical half
+    ! plane; a slab along the wire is several times longer, a sliver shorter.
+    REAL(KIND=dp), PARAMETER :: MaxExtentRatio = 1.5_dp, MaxNodeRatio = 3.0_dp
+    INTEGER, ALLOCATABLE, TARGET :: TrialSet(:)
+    INTEGER, POINTER :: Trial(:)
+    INTEGER, ALLOCATABLE :: MeshPiece(:)
+    INTEGER :: k, a, b, p, Pieces(NoCand), NoMeasured(NoCand), DefPiece(NoCand), &
+        Keep(NoCand), Label(MaxPieces,NoCand), NoPlus(MaxPieces,NoCand), &
+        NoMinus(MaxPieces,NoCand), Margin(NoCand), Score, BestScore, BestA, BestB, &
+        Sep, Tie, BestTie, pDef, pKeep, NoNodes
+    REAL(KIND=dp) :: Dir(3,NoCand), Nrm(3,NoCand), Extent(MaxPieces,NoCand), &
+        SmallExtent(NoCand), SmallNodes(NoCand), c, s, RefExtent, RefNodes
+    LOGICAL :: Clean(MaxPieces,NoCand), Crossed(NoCand), Good(NoCand), SelectMin, Found
+    CHARACTER(LEN=40) :: Verdict
+
+    CutDirA = CoilTangent1
+    CutNormalA = CoilTangent2
+    CutDirB = -CoilTangent1
+    CutNormalB = -CoilTangent2
+    SelectDir = CoilTangent1
+    KeepPieceA = 0
+    KeepPieceB = 0
+    IF( .NOT. OneCut ) RETURN
+
+    SelectMin = ListGetLogical( Solver % Values,'Select Min Coil Cut',Found )
+
+    ! Azimuths from Tangent1 towards Tangent2; k and k+NoCand/2 are exact opposites.
+    DO k = 1, NoCand/2
+      IF( k == 1 ) THEN
+        c = 1.0_dp
+        s = 0.0_dp
+      ELSE IF( k == 1 + NoCand/4 ) THEN
+        c = 0.0_dp
+        s = 1.0_dp
+      ELSE
+        c = COS( 2*PI*(k-1)/NoCand )
+        s = SIN( 2*PI*(k-1)/NoCand )
+      END IF
+      Dir(:,k) = c * CoilTangent1 + s * CoilTangent2
+      Nrm(:,k) = c * CoilTangent2 - s * CoilTangent1
+      Dir(:,k+NoCand/2) = -Dir(:,k)
+      Nrm(:,k+NoCand/2) = -Nrm(:,k)
+    END DO
+
+    ALLOCATE( TrialSet(nsize), MeshPiece(Solver % Matrix % NumberOfRows) )
+    Trial => TrialSet
+    DO k = 1, NoCand
+      TrialSet = 0
+      CALL ChooseFixedBulkNodesNarrow( Trial, 0, SelectNodes, Dir(:,k), Nrm(:,k) )
+      CALL LabelCutPieces( Trial, SelectNodes, MeshPiece, Pieces(k), DefPiece(k) )
+      ! Largest label first, so the default piece is among those measured.
+      NoMeasured(k) = MIN( Pieces(k), MaxPieces )
+      IF( Pieces(k) > MaxPieces ) CALL Warn(Caller,'Only the '//I2S(MaxPieces)// &
+          ' pieces of largest node number are scored out of '//I2S(Pieces(k)))
+      p = HUGE(p)
+      DO a = 1, NoMeasured(k)
+        p = ParallelReduction( MAXVAL( MeshPiece, MeshPiece < p ), 2 )
+        Label(a,k) = p
+        CALL MeasureCutPiece( Trial, MeshPiece, p, Dir(:,k), NoNodes, NoPlus(a,k), &
+            NoMinus(a,k), Extent(a,k) )
+      END DO
+    END DO
+    DEALLOCATE( TrialSet, MeshPiece )
+
+    ! The smallest piece that holds both sides of the cut, half plane by half plane.
+    DO k = 1, NoCand
+      Crossed(k) = .FALSE.
+      DO a = 1, NoMeasured(k)
+        IF( NoPlus(a,k) == 0 .OR. NoMinus(a,k) == 0 ) CYCLE
+        IF( Crossed(k) ) THEN
+          IF( Extent(a,k) >= SmallExtent(k) ) CYCLE
+        END IF
+        Crossed(k) = .TRUE.
+        SmallExtent(k) = Extent(a,k)
+        SmallNodes(k) = 1.0_dp * ( NoPlus(a,k) + NoMinus(a,k) )
+      END DO
+    END DO
+    IF( .NOT. ANY( Crossed ) ) THEN
+      CALL Warn(Caller,'No half plane around the normal of coil '//I2S(NoCoils)// &
+          ' crosses it: keeping the default cut. Check "Coil Normal" and "Coil Center".')
+      RETURN
+    END IF
+    RefExtent = MedianOf( PACK( SmallExtent, Crossed ) )
+    RefNodes = MedianOf( PACK( SmallNodes, Crossed ) )
+
+    ! The default piece when it is clean, else the clean piece the default rule
+    ! would pick among the clean ones.
+    Keep = 0
+    DO k = 1, NoCand
+      DO a = 1, NoMeasured(k)
+        Clean(a,k) = NoPlus(a,k) > 0 .AND. NoMinus(a,k) > 0 .AND. &
+            Extent(a,k) <= MaxExtentRatio * RefExtent .AND. &
+            MaxExtentRatio * Extent(a,k) >= RefExtent .AND. &
+            NoPlus(a,k) + NoMinus(a,k) <= MaxNodeRatio * RefNodes
+        IF( .NOT. Clean(a,k) ) CYCLE
+        IF( Keep(k) == 0 ) THEN
+          Keep(k) = Label(a,k)
+        ELSE IF( SelectMin ) THEN
+          Keep(k) = Label(a,k)
+        END IF
+        IF( Label(a,k) == DefPiece(k) ) THEN
+          Keep(k) = DefPiece(k)
+          EXIT
+        END IF
+      END DO
+    END DO
+    Good = ( Keep > 0 )
+
+    WRITE( Message,'(A,3F7.3,A,ES10.3,A)') 'Cut candidates of coil '//I2S(NoCoils)// &
+        ': half planes at azimuths from (',CoilTangent1,'), a cross section is',RefExtent,' long'
+    CALL Info(Caller,Message,Level=5)
+    DO k = 1, NoCand
+      pDef = 0
+      pKeep = 0
+      DO a = 1, NoMeasured(k)
+        IF( Label(a,k) == DefPiece(k) ) pDef = a
+        IF( Label(a,k) == Keep(k) ) pKeep = a
+      END DO
+      IF( pDef == 0 ) CYCLE
+      IF( .NOT. Good(k) ) THEN
+        Verdict = ': no clean piece'
+      ELSE IF( pKeep == pDef ) THEN
+        Verdict = ': clean'
+      ELSE
+        WRITE( Verdict,'(A,I6,A)') ': not clean, keeps',NoPlus(pKeep,k)+NoMinus(pKeep,k),' nodes'
+      END IF
+      WRITE( Message,'(A,I4,A,I4,A,I7,A,I6,A,I6,A,ES10.3,A)') 'Cut candidate',360*(k-1)/NoCand, &
+          ' deg:',Pieces(k),' pieces, the default one of',NoPlus(pDef,k)+NoMinus(pDef,k), &
+          ' nodes (',NoPlus(pDef,k),' +,',NoMinus(pDef,k),' -) and length',Extent(pDef,k), &
+          TRIM(Verdict)
+      CALL Info(Caller,Message,Level=5)
+    END DO
+
+    IF( Good(1) .AND. Good(1+NoCand/2) ) THEN
+      KeepPieceA = Keep(1)
+      KeepPieceB = Keep(1+NoCand/2)
+      CALL Info(Caller,'Cut of coil '//I2S(NoCoils)//': default orientation',Level=5)
+      RETURN
+    END IF
+
+    IF( TangentGiven ) THEN
+      KeepPieceA = Keep(1)
+      KeepPieceB = Keep(1+NoCand/2)
+      IF( .NOT. Good(1) ) CALL Warn(Caller,'Branch A of the cut of coil '//I2S(NoCoils)// &
+          ' has no clean cross section of the wire in the half plane of "Coil Tangent": '// &
+          'give another "Coil Tangent", or none to have the CoilSolver choose one.')
+      IF( .NOT. Good(1+NoCand/2) ) CALL Warn(Caller,'Branch B of the cut of coil '//I2S(NoCoils)// &
+          ' has no clean cross section of the wire in the half plane opposite to "Coil Tangent": '// &
+          'give another "Coil Tangent", or none to have the CoilSolver choose one.')
+      RETURN
+    END IF
+
+    ! Steps to the nearest half plane without a clean piece.
+    DO k = 1, NoCand
+      Margin(k) = NoCand
+      DO a = 1, NoCand
+        IF( .NOT. Good(a) ) Margin(k) = MIN( Margin(k), ABS(k-a), NoCand-ABS(k-a) )
+      END DO
+    END DO
+
+    ! Opposite branches as by default, when a pair of them has clean pieces.
+    BestA = 0
+    BestB = 0
+    BestScore = -1
+    BestTie = HUGE(BestTie)
+    DO a = 1, NoCand
+      b = 1 + MODULO( a-1+NoCand/2, NoCand )
+      IF( .NOT. ( Good(a) .AND. Good(b) ) ) CYCLE
+      Score = MIN( Margin(a), Margin(b) )
+      Tie = MIN( a-1, NoCand-a+1 )
+      IF( Score > BestScore .OR. ( Score == BestScore .AND. Tie < BestTie ) ) THEN
+        BestScore = Score
+        BestTie = Tie
+        BestA = a
+        BestB = b
+      END IF
+    END DO
+
+    ! Otherwise two half planes far enough apart for each cut to lie where the
+    ! other branch is used, the branches switching half way between them.
+    IF( BestA == 0 ) THEN
+      DO a = 1, NoCand
+        IF( .NOT. Good(a) ) CYCLE
+        DO b = 1, NoCand
+          IF( .NOT. Good(b) ) CYCLE
+          Sep = MIN( ABS(a-b), NoCand-ABS(a-b) )
+          IF( Sep < MinSeparation ) CYCLE
+          Score = MIN( 2*Margin(a), 2*Margin(b), Sep )
+          Tie = NoCand * ( NoCand/2 - Sep ) + MIN( a-1, NoCand-a+1 )
+          IF( Score > BestScore .OR. ( Score == BestScore .AND. Tie < BestTie ) ) THEN
+            BestScore = Score
+            BestTie = Tie
+            BestA = a
+            BestB = b
+          END IF
+        END DO
+      END DO
+    END IF
+
+    IF( BestA == 0 ) THEN
+      CALL Warn(Caller,'No two half planes at least '//I2S(360*MinSeparation/NoCand)// &
+          ' deg apart cross coil '//I2S(NoCoils)//' in a clean cross section of the wire: '// &
+          'keeping the default cut. Set "Coil Tangent" and "Coil Center" to put it on one.')
+      RETURN
+    END IF
+
+    CutDirA = Dir(:,BestA)
+    CutNormalA = Nrm(:,BestA)
+    CutDirB = Dir(:,BestB)
+    CutNormalB = Nrm(:,BestB)
+    KeepPieceA = Keep(BestA)
+    KeepPieceB = Keep(BestB)
+    IF( BestB == 1 + MODULO( BestA-1+NoCand/2, NoCand ) ) THEN
+      SelectDir = CutDirA
+    ELSE
+      SelectDir = ( CutDirA - CutDirB ) / SQRT( SUM( ( CutDirA - CutDirB )**2 ) )
+    END IF
+
+    WRITE( Message,'(A,I4,A,I4,A)') 'Cut of coil '//I2S(NoCoils)//' turned: branch A at', &
+        360*(BestA-1)/NoCand,' deg, branch B at',360*(BestB-1)/NoCand,' deg'
+    CALL Info(Caller,Message,Level=5)
+
+  END SUBROUTINE ChooseCleanCut
+
+
+  ! Size of one piece of a layer: its nodes on either side, and the larger of its
+  ! radial and axial extents in the half plane.
+  !------------------------------------------------------------------------------
+  SUBROUTINE MeasureCutPiece( Set, MeshPiece, KeptPiece, CutDir, NoNodes, &
+      NoPlus, NoMinus, Extent )
+    INTEGER, POINTER :: Set(:)
+    INTEGER :: MeshPiece(:), KeptPiece, NoNodes, NoPlus, NoMinus
+    REAL(KIND=dp) :: CutDir(3), Extent
+
+    REAL(KIND=dp) :: r(3), Lim(4)
+    INTEGER :: i, j, k
+
+    NoPlus = 0
+    NoMinus = 0
+    Lim = -HUGE(1.0_dp)
+    DO i = 1, Mesh % NumberOfNodes
+      j = Perm(i)
+      IF( j == 0 .OR. KeptPiece == 0 ) CYCLE
+      IF( MeshPiece(j) /= KeptPiece ) CYCLE
+
+      r(1) = Mesh % Nodes % x(i) - CoilCenter(1)
+      r(2) = Mesh % Nodes % y(i) - CoilCenter(2)
+      r(3) = Mesh % Nodes % z(i) - CoilCenter(3)
+      Lim(1) = MAX( Lim(1), SUM( CutDir * r ) )
+      Lim(2) = MAX( Lim(2), SUM( CoilNormal * r ) )
+      Lim(3) = MAX( Lim(3), -SUM( CutDir * r ) )
+      Lim(4) = MAX( Lim(4), -SUM( CoilNormal * r ) )
+
+      IF( ParEnv % PEs > 1 ) THEN
+        IF( Solver % Matrix % ParallelInfo % NeighbourList(j) % Neighbours(1) &
+            /= ParEnv % MyPe ) CYCLE
+      END IF
+      IF( Set(j) > 0 ) THEN
+        NoPlus = NoPlus + 1
+      ELSE
+        NoMinus = NoMinus + 1
+      END IF
+    END DO
+
+    NoPlus = ParallelReduction(NoPlus)
+    NoMinus = ParallelReduction(NoMinus)
+    NoNodes = NoPlus + NoMinus
+    DO k = 1, 4
+      Lim(k) = ParallelReduction(Lim(k),2)
+    END DO
+    Extent = 0.0_dp
+    IF( NoNodes > 0 ) Extent = MAX( Lim(1) + Lim(3), Lim(2) + Lim(4) )
+
+  END SUBROUTINE MeasureCutPiece
+
+
+  FUNCTION MedianOf( v ) RESULT( m )
+    REAL(KIND=dp) :: v(:), m
+
+    REAL(KIND=dp) :: w(SIZE(v)), t
+    INTEGER :: i, j, n
+
+    n = SIZE(v)
+    w = v
+    DO i = 2, n
+      t = w(i)
+      j = i - 1
+      DO WHILE( j >= 1 )
+        IF( w(j) <= t ) EXIT
+        w(j+1) = w(j)
+        j = j - 1
+      END DO
+      w(j+1) = t
+    END DO
+    IF( MODULO(n,2) == 1 ) THEN
+      m = w((n+1)/2)
+    ELSE
+      m = 0.5_dp * ( w(n/2) + w(n/2+1) )
+    END IF
+  END FUNCTION MedianOf
 
   
   ! Choose end nodes as assigned by "Coil Start" and "Coil End" flags.
