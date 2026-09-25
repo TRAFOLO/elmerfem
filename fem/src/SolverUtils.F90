@@ -19920,6 +19920,8 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
   REAL(KIND=dp), ALLOCATABLE, TARGET :: CollectionSolution(:)
   INTEGER :: NumberOfRows, NumberOfValues, MultiplierDOFs, istat, NoEmptyRows 
   INTEGER :: i, j, k, l, m, n, p,q, ix, Loop, colj, nIter
+  INTEGER :: RelaxAfter
+  LOGICAL :: GotIt
   TYPE(Variable_t), POINTER :: MultVar, iterV
   REAL(KIND=dp) :: scl, rowsum, Relax, val
   LOGICAL :: Found, ExportMultiplier, NotExplicit, Refactorize, EnforceDirichlet, &
@@ -20550,6 +20552,16 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
             j=j+MAX(0,AddMatrix % NumberOfRows - StiffMatrix % NumberOFRows)
 
         Relax = ListGetCReal( Params,'Lagrange Multiplier Relaxation Factor', Found )
+        IF( .NOT. Found ) THEN
+          ! Follow the relaxation of the field in ComputeChange so that the exported
+          ! multiplier (e.g. circuit voltages and currents) is the same iterate as
+          ! the relaxed solution.
+          Relax = ListGetCReal( Params,'Nonlinear System Relaxation Factor', Found )
+          IF( Found ) THEN
+            RelaxAfter = ListGetInteger( Params,'Nonlinear System Relaxation After', GotIt )
+            IF( GotIt ) Found = ( RelaxAfter < nIter )
+          END IF
+        END IF
         IF( ResidualMode .AND. nIter > 1 ) THEN
           IF( Found ) THEN          
             MultiplierValues(1:j) = MultiplierValues(1:j) + &
