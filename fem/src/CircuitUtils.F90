@@ -1817,37 +1817,68 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> DC resistance of a strand piece of volume wgt: the uniform-J block value
-!> N_j^2 dV / (ff sigma VoltageFactor) that the foil winding block model
-!> reports, so the resistance the component publishes is the same at every
-!> frequency and for every strand layout. One band per turn smears the copper
-!> over the pitch, so 'Foil Sheet Sigma DC' is already ff*sigma and the pieces
-!> fill the block; copper only bands carry the copper conductivity and visit
-!> only ff of the block, hence the second ff.
+!> DC resistance of a foil sheet component, the r_component it publishes: the
+!> DC loss of the strand currents the model carries, over the terminal current
+!> squared. At DC the strand row gives c_kj = sigma f V_k g_kj / gres_kj, so a
+!> strand is the conductance sigma g_kj^2 / gres_kj on its cell voltage, with
+!> g = int t.grad(W) and gres = int |t|^2 over the strand. The strands of a
+!> cell (its segments across the turn and its sub-layers through it) are in
+!> parallel and the cells, m_k turns each, in series:
+!>   R = sum_k m_k^2 / (sigma f sum_j g_kj^2 / gres_kj),
+!> sigma being the DC sheet conductivity (ff*sigma for one band per turn, the
+!> copper one for copper only bands, whose width carries the fill factor) and
+!> f the Circuit Equation Voltage Factor. Where t is uniform this is the
+!> uniform-J value N_j^2 V / (ff sigma f); a turn whose width varies around the
+!> loop carries a current density that follows the width, and 'Electrode Area'
+!> is then just one of its sections, so N_j is no measure of it.
+!> Called after CheckFoilSheetStrands has reduced the strand fluxes, so that
+!> every partition publishes the same whole-component value.
 !------------------------------------------------------------------------------
-  FUNCTION FoilSheetDcResistance(Comp, CompParams, wgt) RESULT(r)
+  SUBROUTINE ComputeFoilSheetDcResistance(Comp, CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     TYPE(Component_t) :: Comp
     TYPE(ValueList_t), POINTER :: CompParams
-    REAL(KIND=dp) :: wgt, r
 
-    REAL(KIND=dp) :: sdc, ff
+    REAL(KIND=dp) :: sdc, gk, r
+    INTEGER :: k, ls, j, ind, nw
     LOGICAL :: Found
+
+    ! One reduction per strand, with a trip count that is the same on every
+    ! partition, as in CheckFoilSheetStrands.
+    nw = 0
+    IF (ALLOCATED(Comp % StrandResWeight)) nw = SIZE(Comp % StrandResWeight)
+    nw = ParallelReduction(nw, 2)
+    Comp % Resistance = 0._dp
+    IF (nw <= 0) RETURN
+    IF (.NOT. ALLOCATED(Comp % StrandResWeight)) THEN
+      ALLOCATE(Comp % StrandResWeight(nw))
+      Comp % StrandResWeight = 0._dp
+    END IF
+    DO ind = 1, nw
+      Comp % StrandResWeight(ind) = ParallelReduction(Comp % StrandResWeight(ind))
+    END DO
+    IF (.NOT. ALLOCATED(Comp % StrandWeight)) RETURN
+    IF (SIZE(Comp % StrandWeight) /= nw) RETURN
 
     sdc = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
     IF (.NOT. Found .OR. sdc <= 0._dp) sdc = Comp % SigmaRef
 
-    ff = Comp % FillFactor
-    IF (ff <= 0._dp) ff = 1._dp
-
-    IF (Comp % nSublayers > 1) THEN
-      r = Comp % N_j**2 * wgt / (ff**2 * sdc * Comp % VoltageFactor)
-    ELSE
-      r = Comp % N_j**2 * wgt / (sdc * Comp % VoltageFactor)
-    END IF
+    r = 0._dp
+    DO k = 1, Comp % nCells
+      gk = 0._dp
+      DO ls = 1, Comp % nSublayers
+        DO j = 1, Comp % nSegments
+          ind = ((k-1) * Comp % nSublayers + ls - 1) * Comp % nSegments + j
+          IF (Comp % StrandResWeight(ind) > 0._dp) &
+              gk = gk + Comp % StrandWeight(ind)**2 / Comp % StrandResWeight(ind)
+        END DO
+      END DO
+      IF (gk > 0._dp) r = r + REAL(Comp % foilsPerCell, dp)**2 / gk
+    END DO
+    Comp % Resistance = r / (sdc * Comp % VoltageFactor)
 !------------------------------------------------------------------------------
-  END FUNCTION FoilSheetDcResistance
+  END SUBROUTINE ComputeFoilSheetDcResistance
 !------------------------------------------------------------------------------
 
 
@@ -3131,7 +3162,9 @@ END FUNCTION isComponentName
 !> conducting continuum. The block is split into nCells cells along the stacking
 !> direction (the turn normal) and each cell into nSegments strands across it
 !> (the turn width). Cell k lumps foilsPerCell = N/nCells turns; strand (k,j)
-!> carries a uniform current density c_kj*grad(W). The intra-turn skin effect is
+!> carries the current density c_kj*t, t = grad(stack) x grad(across) (see
+!> FoilSheetDirection), whose flux is the same through every section of the
+!> strand, so the density follows the turn width. The intra-turn skin effect is
 !> in the complex sheet conductivity (Sigma 33 / Sigma 33 im) and the intra-turn
 !> proximity effect in the complex reluctivity (Nu 11/22/33), so the block
 !> itself carries no volumetric eddy current.
@@ -3152,7 +3185,8 @@ END FUNCTION isComponentName
 !>   Sheet Sublayers        strand layers through the thickness of one turn
 !>                          (default 1 = one uniform current layer per turn,
 !>                          0 = chosen from t/delta at the run frequency)
-!>   Electrode Area         or Electrode Boundaries, as for foil winding
+!>   Electrode Area         or Electrode Boundaries, as for foil winding; neither
+!>                          enters the DC resistance, which comes from the strands
 !>   Sigma 33 [im]          complex sheet conductivity (harmonic)
 !>   Homogenization Model + Nu 11/22/33 [im]   complex reluctivity via RotM
 !>
@@ -3767,6 +3801,9 @@ END FUNCTION isComponentName
     IF (ALLOCATED(Comp % StrandWeight)) DEALLOCATE(Comp % StrandWeight)
     ALLOCATE(Comp % StrandWeight(nLayers * Comp % nSegments))
     Comp % StrandWeight = 0._dp
+    IF (ALLOCATED(Comp % StrandResWeight)) DEALLOCATE(Comp % StrandResWeight)
+    ALLOCATE(Comp % StrandResWeight(nLayers * Comp % nSegments))
+    Comp % StrandResWeight = 0._dp
 
     ! Scale of the strand dofs: with c_kj = SigmaRef * y_kj the unknown y_kj is a
     ! voltage (y_kj = f V_k at DC), so the circuit block is as well conditioned
