@@ -1023,6 +1023,7 @@ CONTAINS
       Comp % Resistance = 0._dp 
       Comp % Conductance = 0._dp 
       IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
+      IF (ALLOCATED(Comp % StrandResWeight)) Comp % StrandResWeight = 0._dp
       ! The strand resistance weights are re-accumulated with the matrix.
       IF (fskin_allocated) THEN
         IF (Comp % ComponentId >= 1 .AND. Comp % ComponentId <= SIZE(FSkin)) THEN
@@ -1170,7 +1171,10 @@ CONTAINS
         END IF
       END DO
 
-      IF (Comp % CoilType == 'foil sheet') CALL CheckFoilSheetStrands(Comp)
+      IF (Comp % CoilType == 'foil sheet') THEN
+        CALL CheckFoilSheetStrands(Comp)
+        CALL ComputeFoilSheetDcResistance(Comp, CompParams)
+      END IF
 
       ! Slice 2 (n=1, conductivity convention): no v_hist RHS term.
       ! The (y0, alpha, sigma) triplet is fitted as a frequency-dependent
@@ -1187,7 +1191,10 @@ CONTAINS
     IF( Parallel ) THEN
       DO CompInd = 1, Circuit % n_comp
         Comp => Circuit % Components(CompInd)
-        Comp % Resistance = ParallelReduction(Comp % Resistance)
+        ! A foil sheet's resistance comes from strand sums that are already
+        ! reduced over the partitions.
+        IF (Comp % CoilType /= 'foil sheet') &
+            Comp % Resistance = ParallelReduction(Comp % Resistance)
         Comp % Conductance = ParallelReduction(Comp % Conductance)
       END DO
     END IF
@@ -1915,10 +1922,9 @@ CONTAINS
       g = wgt*SUM(tvec*gradv)
       gres = wgt*SUM(tvec*tvec)
       Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
-
-      ! Reported component resistance: the DC value, the same for every layout.
-      ! -----------------------------------------------------------------------
-      Comp % Resistance = Comp % Resistance + FoilSheetDcResistance(Comp, CompParams, wgt)
+      ! The reported DC resistance is built from these per strand sums once
+      ! the whole block is in (ComputeFoilSheetDcResistance).
+      Comp % StrandResWeight(sInd) = Comp % StrandResWeight(sInd) + gres
 
       ! Strand equation and cell current balance
       ! ----------------------------------------
@@ -2733,6 +2739,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       Comp % Resistance = 0._dp 
       Comp % Conductance = 0._dp 
       IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
+      IF (ALLOCATED(Comp % StrandResWeight)) Comp % StrandResWeight = 0._dp
 
       Cvar => Comp % vvar
       vvarId = Comp % vvar % ValueId + nm
@@ -2837,13 +2844,19 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
                                               sigma_33, sigmaim_33, .True.)
       END DO
 
-      IF (Comp % CoilType == 'foil sheet') CALL CheckFoilSheetStrands(Comp)
+      IF (Comp % CoilType == 'foil sheet') THEN
+        CALL CheckFoilSheetStrands(Comp)
+        CALL ComputeFoilSheetDcResistance(Comp, CompParams)
+      END IF
     END DO
 
     IF( Circuit % Parallel ) THEN
       DO CompInd = 1, Circuit % n_comp
         Comp => Circuit % Components(CompInd)
-        Comp % Resistance = ParallelReduction(Comp % Resistance)
+        ! A foil sheet's resistance comes from strand sums that are already
+        ! reduced over the partitions.
+        IF (Comp % CoilType /= 'foil sheet') &
+            Comp % Resistance = ParallelReduction(Comp % Resistance)
         Comp % Conductance = ParallelReduction(Comp % Conductance)
       END DO
     END IF
@@ -3647,11 +3660,10 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       g = wgt*SUM(tvec*gradv)
       gres = wgt*SUM(tvec*tvec)
       Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
-
-      ! Reported component resistance: the DC value, because Re(1/sigma_s) is
-      ! the AC plate resistance and would drift with the frequency.
-      ! ---------------------------------------------------------------------
-      Comp % Resistance = Comp % Resistance + FoilSheetDcResistance(Comp, CompParams, wgt)
+      ! The reported resistance is the DC one, built from these per strand
+      ! sums with the DC sheet conductivity (ComputeFoilSheetDcResistance):
+      ! Re(1/sigma_s) is the AC plate resistance and drifts with the frequency.
+      Comp % StrandResWeight(sInd) = Comp % StrandResWeight(sInd) + gres
 
       ! (R1) strand equation
       ! --------------------
