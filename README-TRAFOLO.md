@@ -124,6 +124,14 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `A` with an unrelaxed `V` in `E = -i*omega*A - V*grad W` of massive coils, and the current density
   and Joule loss of a nonlinear loop that stopped before convergence came out orders of magnitude
   too large. Test: `circuits_harmonic_massive_relaxation`.
+- MUMPS direct solver interface (`DirectSolve`): the status of every MUMPS call is checked, so a
+  failed initialization, factorization or solve stops all ranks with `INFOG(1)`/`INFOG(2)` and a
+  hint instead of returning an unusable solution. New options `Mumps Null Pivot Detection`
+  (`ICNTL(24)`), `Mumps Null Pivot Tolerance` (`CNTL(3)`) and `Mumps Sequential Root`
+  (`ICNTL(13)`); the ordering, factor size and null-pivot threshold used are logged.
+  `Mumps Residual Check = True` reports the residual of the system handed to MUMPS before and after
+  each solve, separately for the field rows and the constraint (circuit) rows. Tested with the
+  public-domain MUMPS 4.10.0 (DEV-1462).
 
 ## Building
 
