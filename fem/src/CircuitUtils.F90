@@ -1205,6 +1205,33 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Sum a per-strand array over the partitions in one call, over the same ranks
+!> as ParallelReduction. Every partition must pass the same length.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetSumOverPartitions(a)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: a(:)
+    REAL(KIND=dp), ALLOCATABLE :: s(:)
+    INTEGER :: comm, ierr, i
+
+    IF (ParEnv % PEs <= 1 .OR. SIZE(a) == 0) RETURN
+    IF (.NOT. ASSOCIATED(ParEnv % Active)) THEN
+      DO i = 1, SIZE(a)
+        a(i) = ParallelReduction(a(i))
+      END DO
+      RETURN
+    END IF
+    comm = ParEnv % ActiveComm
+    IF (COUNT(ParEnv % Active) <= 0) comm = ELMER_COMM_WORLD
+    ALLOCATE(s(SIZE(a)))
+    CALL MPI_ALLREDUCE(a, s, SIZE(a), MPI_DOUBLE_PRECISION, MPI_SUM, comm, ierr)
+    a = s
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetSumOverPartitions
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> A foil sheet strand with no integration point of its own would leave a zero
 !> row in the circuit matrix. Fail early and say which (cell, segment) is empty.
 !------------------------------------------------------------------------------
@@ -1215,9 +1242,9 @@ CONTAINS
     REAL(KIND=dp) :: w, wmax, bs1, bs2, bandflux
     INTEGER :: k, j, ind, nempty, nLayers, nw
 
-    ! One reduction per strand, so the trip count has to be the same on every
-    ! partition. Reduce the length first and make the array match it, rather
-    ! than returning early where the state happens to be missing.
+    ! The array is summed over the partitions, so its length has to be the same
+    ! on every partition. Reduce the length first and make the array match it,
+    ! rather than returning early where the state happens to be missing.
     nw = 0
     IF (ALLOCATED(Comp % StrandWeight)) nw = SIZE(Comp % StrandWeight)
     nw = ParallelReduction(nw, 2)
@@ -1227,11 +1254,8 @@ CONTAINS
       Comp % StrandWeight = 0._dp
     END IF
 
-    wmax = 0._dp
-    DO ind = 1, SIZE(Comp % StrandWeight)
-      Comp % StrandWeight(ind) = ParallelReduction(Comp % StrandWeight(ind))
-      wmax = MAX(wmax, Comp % StrandWeight(ind))
-    END DO
+    CALL FoilSheetSumOverPartitions(Comp % StrandWeight)
+    wmax = MAXVAL(Comp % StrandWeight)
     IF (wmax <= 0._dp) RETURN
 
     nempty = 0
@@ -1896,8 +1920,8 @@ CONTAINS
     INTEGER :: k, ls, j, ind, nw
     LOGICAL :: Found
 
-    ! One reduction per strand, with a trip count that is the same on every
-    ! partition, as in CheckFoilSheetStrands.
+    ! One array reduction with a length that is the same on every partition, as
+    ! in CheckFoilSheetStrands.
     nw = 0
     IF (ALLOCATED(Comp % StrandResWeight)) nw = SIZE(Comp % StrandResWeight)
     nw = ParallelReduction(nw, 2)
@@ -1907,9 +1931,7 @@ CONTAINS
       ALLOCATE(Comp % StrandResWeight(nw))
       Comp % StrandResWeight = 0._dp
     END IF
-    DO ind = 1, nw
-      Comp % StrandResWeight(ind) = ParallelReduction(Comp % StrandResWeight(ind))
-    END DO
+    CALL FoilSheetSumOverPartitions(Comp % StrandResWeight(1:nw))
     IF (.NOT. ALLOCATED(Comp % StrandWeight)) RETURN
     IF (SIZE(Comp % StrandWeight) /= nw) RETURN
 
@@ -3447,7 +3469,11 @@ END FUNCTION isComponentName
     INTEGER :: m
     REAL(KIND=dp) :: omega, delta, ratio, mu0
     REAL(KIND=dp), POINTER :: fptr(:,:)
-    LOGICAL :: Found
+    LOGICAL :: Found, FreqVaries
+    TYPE(ValueList_t), POINTER :: Lst
+    TYPE(ValueListEntry_t), POINTER :: ptr
+    CHARACTER(LEN=17), PARAMETER :: FreqKey(2) = ['Frequency        ', 'Angular Frequency']
+    INTEGER :: il, ik
 
     mu0 = 4.0d-7 * PI
 
@@ -3461,13 +3487,31 @@ END FUNCTION isComponentName
     END IF
 
     ! The count fixes the circuit dof layout, so it is resolved once at init.
-    ! A SIF that scans several frequencies would keep the first one's choice.
-    fptr => ListGetConstRealArray(CurrentModel % Simulation, 'Frequency', Found)
-    IF (Found) THEN
-      IF (SIZE(fptr) > 1) CALL Warn('Circuits_Init', &
-          'Foil sheet: "Sheet Sublayers = 0" is resolved once at init, but this '// &
-          'simulation carries several frequencies; give "Sheet Sublayers" explicitly.')
+    ! A SIF that scans several frequencies, as a 'Frequency' array or as a
+    ! frequency that is a function (of time, say), keeps the first one's choice.
+    FreqVaries = .FALSE.
+    DO il = 1, 2
+      IF (il == 1) THEN
+        Lst => CurrentModel % Simulation
+      ELSE
+        IF (.NOT. ASSOCIATED(CurrentModel % ASolver)) EXIT
+        Lst => CurrentModel % ASolver % Values
+      END IF
+      DO ik = 1, 2
+        ptr => ListFind(Lst, TRIM(FreqKey(ik)), Found)
+        IF (.NOT. Found) CYCLE
+        IF (ANY(ptr % TYPE == [LIST_TYPE_VARIABLE_SCALAR, LIST_TYPE_VARIABLE_SCALAR_STR, &
+            LIST_TYPE_CONSTANT_SCALAR_PROC, LIST_TYPE_VARIABLE_TENSOR, &
+            LIST_TYPE_VARIABLE_TENSOR_STR])) FreqVaries = .TRUE.
+      END DO
+    END DO
+    IF (.NOT. FreqVaries) THEN
+      fptr => ListGetConstRealArray(CurrentModel % Simulation, 'Frequency', Found)
+      IF (Found) FreqVaries = SIZE(fptr) > 1
     END IF
+    IF (FreqVaries) CALL Warn('Circuits_Init', &
+        'Foil sheet: "Sheet Sublayers = 0" is resolved once at init, but this '// &
+        'simulation carries several frequencies; give "Sheet Sublayers" explicitly.')
     omega = GetAngularFrequency(Found = Found)
     IF (.NOT. Found) omega = 0._dp
     ratio = 0._dp
@@ -4186,6 +4230,8 @@ END FUNCTION isComponentName
     REAL(KIND=dp) :: MaxMismatch
     LOGICAL :: GotLimit
     CHARACTER(LEN=12) :: Num(6)
+    CHARACTER(LEN=MAX_NAME_LEN) :: SolverProc
+    CHARACTER(LEN=32) :: CondOption
 !------------------------------------------------------------------------------
 
     ! Measuring it again on the already normalized field would just return 1.
@@ -4234,19 +4280,32 @@ END FUNCTION isComponentName
           'Cut = Logical True" to the CoilSolver to cut the wire once instead.')
     END IF
 
-    ! The identity holds for the conductivity the cut potential was solved with.
-    ! 'Coil Conductivity Fix' iterates that conductivity towards a uniform
-    ! current density, which is what a stranded winding wants of its direction
-    ! field but not what a solid conductor does, and it biases this measurement
-    ! by about half a percent.
+    ! The identity holds for the conductivity the cut potential was solved with,
+    ! and the circulation below reads the material 'Electric Conductivity'. A
+    ! CoilSolver that solves with another conductivity biases the measurement:
+    ! 'Coil Conductivity Fix' iterates it towards a uniform current density (about
+    ! half a percent for a solid conductor), unity, another keyword or a tensor
+    ! by an amount that depends on how non-uniform the material is. The CoilSolver
+    ! is found by its procedure, as 'Coil Closed' may sit in the Components only.
     DO i = 1, CurrentModel % NumberOfSolvers
-      IF (.NOT. ListCheckPresent(CurrentModel % Solvers(i) % Values, 'Coil Closed')) CYCLE
-      IF (.NOT. ListGetLogical(CurrentModel % Solvers(i) % Values, &
-          'Coil Conductivity Fix', Found)) CYCLE
-      CALL Warn(Caller, 'Solver '//I2S(i)//' runs the CoilSolver with "Coil '// &
-          'Conductivity Fix", so its cut potential is not the solid coil own DC '// &
-          'field. Component '//I2S(CompInd)//' will get a biased circulation and '// &
-          'a biased DC resistance.')
+      SolverProc = ListGetString(CurrentModel % Solvers(i) % Values, 'Procedure', Found)
+      IF (.NOT. Found) CYCLE
+      IF (INDEX(SolverProc, 'CoilSolver') == 0 .AND. INDEX(SolverProc, 'coilsolver') == 0) CYCLE
+      CondOption = ' '
+      IF (ListGetLogical(CurrentModel % Solvers(i) % Values, 'Coil Conductivity Fix', Found)) &
+          CondOption = '"Coil Conductivity Fix"'
+      IF (ListGetLogical(CurrentModel % Solvers(i) % Values, 'Use Unity Conductivity', Found)) &
+          CondOption = '"Use Unity Conductivity"'
+      IF (ListGetLogical(CurrentModel % Solvers(i) % Values, 'Coil Anisotropic', Found)) &
+          CondOption = '"Coil Anisotropic"'
+      SolverProc = ListGetString(CurrentModel % Solvers(i) % Values, 'Electric Conductivity Name', Found)
+      IF (Found .AND. SolverProc /= 'Electric Conductivity' .AND. SolverProc /= 'electric conductivity') &
+          CondOption = '"Electric Conductivity Name"'
+      IF (LEN_TRIM(CondOption) == 0) CYCLE
+      CALL Warn(Caller, 'Solver '//I2S(i)//' runs the CoilSolver with '//TRIM(CondOption)// &
+          ', so its cut potential is not solved with the material "Electric Conductivity" '// &
+          'this circulation uses. Component '//I2S(CompInd)//' will get a biased circulation '// &
+          'and a biased DC resistance.')
     END DO
 
     ALLOCATE(Basis(nmax), dBasisdx(nmax,3), Wloc(nmax), Ploc(nmax), Chi(nmax), ElCond(nmax))

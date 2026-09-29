@@ -233,15 +233,29 @@ CONTAINS
     ! transient would restart them from zero under the restored fields, an
     ! artificial step in voltage and loss. 'Restart Time = 0' starts a new
     ! transient from the restored fields (as TRAFOLO's thermal iterations do).
+    ! Without 'Restart Time' the file may as well be a steady result, which has
+    ! no ladder state to lose, so that case only warns.
     IF (ANY(FSkin % Active) .AND. ListCheckPresent(CurrentModel % Simulation, 'Restart File')) THEN
       IF (ListGetString(CurrentModel % Simulation, 'Simulation Type', found) == 'transient') THEN
         rt = ListGetConstReal(CurrentModel % Simulation, 'Restart Time', found)
-        IF (.NOT. found .OR. rt /= 0._dp) CALL Fatal('InitFoilSkinLadder', &
-            'Transient foil sheet cannot continue a restarted transient: its skin-effect state '// &
-            'is not stored in restart files. Set "Restart Time = 0" to start a new transient '// &
-            'from the restored fields.')
+        IF (.NOT. found) THEN
+          CALL Warn('InitFoilSkinLadder', 'Transient foil sheet restarted without "Restart Time": '// &
+              'its skin-effect state starts from zero. Continuing an energized transient this way '// &
+              'gives an artificial step in voltage and loss; "Restart Time = 0" silences this.')
+        ELSE IF (rt /= 0._dp) THEN
+          CALL Fatal('InitFoilSkinLadder', &
+              'Transient foil sheet cannot continue a restarted transient: its skin-effect state '// &
+              'is not stored in restart files. Set "Restart Time = 0" to start a new transient '// &
+              'from the restored fields.')
+        END IF
       END IF
     END IF
+
+    ! PrepareFoilSkinStep runs once per step number, so a step retried with
+    ! another size keeps the factors of the rejected one.
+    IF (ANY(FSkin % Active) .AND. ListGetLogical(CurrentModel % Simulation, 'Adaptive Timestepping', found)) &
+        CALL Warn('InitFoilSkinLadder', 'Transient foil sheet with adaptive time stepping: a retried '// &
+            'step keeps the skin-ladder factors of the rejected time step size.')
   END SUBROUTINE InitFoilSkinLadder
 
   !----------------------------------------------------------------------------

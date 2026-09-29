@@ -3,7 +3,9 @@
 ! "Fill Factor = 0.2": the 8 bands of a turn sit in its central fifth. The
 ! matrix preallocation used to spread the bands over the whole pitch, so
 ! entries fell outside the CRS structure and the result was wrong
-! (1.46E+03 instead of 5.77E-04). Serial and 4 partitions give the reference.
+! (1.46E+03 instead of 5.77E-04). The test runs serial; 4 partitions gave the
+! same value by hand. The pinned norm is the first saved scalar, res: Eddy
+! current power.
 ! Based on the geometry of circuits_harmonic_foil.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: May 2017

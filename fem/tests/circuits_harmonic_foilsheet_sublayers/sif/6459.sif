@@ -9,7 +9,7 @@
 ! factor of 0.5, the strand flux ratio is exactly 1.0000000000, and
 ! Sigma 33 = 3.59989E+07 is the copper conductivity, not the smeared one.
 ! The turn thickness is still derived by Elmer from the block geometry.
-! Reference: three identical serial runs, 3.176629506778E-04 every time.
+! Reference (pinned below): 3.260945210693E-04.
 ! Based on the geometry of circuits_harmonic_foil.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: May 2017
