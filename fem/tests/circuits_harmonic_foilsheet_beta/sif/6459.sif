@@ -9,7 +9,7 @@
 ! 0.1 m, and the reluctivity mapping: Nu 11 = Nu 33 = 7.96370E+05 + 1.83878E+04 i
 ! with Nu 22 = 1/mu0. CheckFoilSheetStrands reports a strand flux ratio of
 ! exactly 1.0000000000, so the strand layout follows the stacking direction.
-! Reference: three identical serial runs, 3.174654618451E-04 every time.
+! Reference (pinned below): 3.227923275408E-04.
 ! Based on the geometry of circuits_harmonic_foil.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: May 2017

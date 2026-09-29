@@ -1696,12 +1696,17 @@ Component:Real:      'Coil Circulation'
 ! smallest, unless that piece is no clean cross section of the wire: another
 ! one of the half plane is kept then, or without "Coil Tangent" other half
 ! planes are taken. A closed solid coil of several turns needs it: it is then
-! cut once and carries one series current. The CoilSolver writes "Single Coil
-! Cut" into the Component it applied it to, which is where the circuits solver
-! reads it.
+! cut once and carries one series current. The flag is one per CoilSolver: set
+! in the Solver section or in any one Component, it applies to every coil that
+! CoilSolver cuts. The CoilSolver writes "Single Coil Cut" into each Component
+! it applied it to, which is where the circuits solver reads it.
 Solver:Logical:      'Single Coil Cut'
 Solver:Logical:      'Select Min Coil Cut'
 Component:Logical:   'Single Coil Cut'
+! Direction in the coil plane of the half plane that holds branch A of the cut
+! (branch B takes the opposite one). Given, the cut is not turned elsewhere.
+Solver:Real:         'Coil Tangent'
+Component:Real:      'Coil Tangent'
 ! Relative difference of the loop current the two branches of the cut of a
 ! closed massive coil may show before the run stops. Unset, it is half the
 ! share of the loop resistance the two cut layers take, between 1 % and 3 %.

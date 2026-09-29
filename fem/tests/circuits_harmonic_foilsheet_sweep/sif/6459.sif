@@ -3,7 +3,8 @@
 ! 5 kHz, with one strand per turn. Sigma 33 and the stack reluctivity follow
 ! the frequency, so the second step equals a separate 5 kHz run, which is the
 ! reference (3.074824311574E-03; the scan gives 3.0748243037E-03). Before the
-! fix the material stayed at 50 Hz and the second step gave 1.12E-03.
+! fix the material stayed at 50 Hz and the second step gave 1.12E-03. The
+! pinned norm is the first saved scalar, res: Eddy current power.
 ! Based on the geometry of circuits_harmonic_foil.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: May 2017
