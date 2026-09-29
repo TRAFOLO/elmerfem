@@ -1103,6 +1103,58 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Strand bands l1..l2 that an element spanning stacking coordinates
+!> [smin, smax] can touch, with one band of margin on each side for higher
+!> order elements. Uses the band edges of FoilSheetBand, so sub-layers packed
+!> into the copper fraction of the pitch are preallocated where they are
+!> assembled; with one band per turn this is the uniform range of before.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetBandRange(nCells, nSublayers, ff, smin, smax, l1, l2)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSublayers, l1, l2
+    REAL(KIND=dp) :: ff, smin, smax
+    INTEGER :: nLayers, k, l
+    REAL(KIND=dp) :: s1, s2
+
+    nLayers = nCells * nSublayers
+    IF (nSublayers == 1) THEN
+      l1 = MAX(1, FLOOR(smin * nLayers))
+      l2 = MIN(nLayers, FLOOR(smax * nLayers) + 2)
+      RETURN
+    END IF
+
+    ! First band ending at or above smin, searched in the turn holding smin;
+    ! none there means smin is in the upper margin, so the next turn starts it.
+    k = MIN(nCells, MAX(1, FLOOR(smin * nCells) + 1))
+    l1 = k * nSublayers + 1
+    DO l = (k-1) * nSublayers + 1, k * nSublayers
+      CALL FoilSheetBand(nCells, nSublayers, ff, l, s1, s2)
+      IF (s2 >= smin) THEN
+        l1 = l
+        EXIT
+      END IF
+    END DO
+
+    ! Last band starting at or below smax; none in its turn means smax is in
+    ! the lower margin, so the previous turn ends it.
+    k = MIN(nCells, MAX(1, FLOOR(smax * nCells) + 1))
+    l2 = (k-1) * nSublayers
+    DO l = k * nSublayers, (k-1) * nSublayers + 1, -1
+      CALL FoilSheetBand(nCells, nSublayers, ff, l, s1, s2)
+      IF (s1 <= smax) THEN
+        l2 = l
+        EXIT
+      END IF
+    END DO
+
+    l1 = MIN(nLayers, MAX(1, l1 - 1))
+    l2 = MAX(1, MIN(nLayers, l2 + 1))
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetBandRange
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Turn cell of a sub-layer: sub-layers (k-1)*nSublayers+1 .. k*nSublayers are
 !> the same conductor in parallel and share the voltage dof of turn cell k.
 !------------------------------------------------------------------------------
@@ -1817,37 +1869,68 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> DC resistance of a strand piece of volume wgt: the uniform-J block value
-!> N_j^2 dV / (ff sigma VoltageFactor) that the foil winding block model
-!> reports, so the resistance the component publishes is the same at every
-!> frequency and for every strand layout. One band per turn smears the copper
-!> over the pitch, so 'Foil Sheet Sigma DC' is already ff*sigma and the pieces
-!> fill the block; copper only bands carry the copper conductivity and visit
-!> only ff of the block, hence the second ff.
+!> DC resistance of a foil sheet component, the r_component it publishes: the
+!> DC loss of the strand currents the model carries, over the terminal current
+!> squared. At DC the strand row gives c_kj = sigma f V_k g_kj / gres_kj, so a
+!> strand is the conductance sigma g_kj^2 / gres_kj on its cell voltage, with
+!> g = int t.grad(W) and gres = int |t|^2 over the strand. The strands of a
+!> cell (its segments across the turn and its sub-layers through it) are in
+!> parallel and the cells, m_k turns each, in series:
+!>   R = sum_k m_k^2 / (sigma f sum_j g_kj^2 / gres_kj),
+!> sigma being the DC sheet conductivity (ff*sigma for one band per turn, the
+!> copper one for copper only bands, whose width carries the fill factor) and
+!> f the Circuit Equation Voltage Factor. Where t is uniform this is the
+!> uniform-J value N_j^2 V / (ff sigma f); a turn whose width varies around the
+!> loop carries a current density that follows the width, and 'Electrode Area'
+!> is then just one of its sections, so N_j is no measure of it.
+!> Called after CheckFoilSheetStrands has reduced the strand fluxes, so that
+!> every partition publishes the same whole-component value.
 !------------------------------------------------------------------------------
-  FUNCTION FoilSheetDcResistance(Comp, CompParams, wgt) RESULT(r)
+  SUBROUTINE ComputeFoilSheetDcResistance(Comp, CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     TYPE(Component_t) :: Comp
     TYPE(ValueList_t), POINTER :: CompParams
-    REAL(KIND=dp) :: wgt, r
 
-    REAL(KIND=dp) :: sdc, ff
+    REAL(KIND=dp) :: sdc, gk, r
+    INTEGER :: k, ls, j, ind, nw
     LOGICAL :: Found
+
+    ! One reduction per strand, with a trip count that is the same on every
+    ! partition, as in CheckFoilSheetStrands.
+    nw = 0
+    IF (ALLOCATED(Comp % StrandResWeight)) nw = SIZE(Comp % StrandResWeight)
+    nw = ParallelReduction(nw, 2)
+    Comp % Resistance = 0._dp
+    IF (nw <= 0) RETURN
+    IF (.NOT. ALLOCATED(Comp % StrandResWeight)) THEN
+      ALLOCATE(Comp % StrandResWeight(nw))
+      Comp % StrandResWeight = 0._dp
+    END IF
+    DO ind = 1, nw
+      Comp % StrandResWeight(ind) = ParallelReduction(Comp % StrandResWeight(ind))
+    END DO
+    IF (.NOT. ALLOCATED(Comp % StrandWeight)) RETURN
+    IF (SIZE(Comp % StrandWeight) /= nw) RETURN
 
     sdc = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
     IF (.NOT. Found .OR. sdc <= 0._dp) sdc = Comp % SigmaRef
 
-    ff = Comp % FillFactor
-    IF (ff <= 0._dp) ff = 1._dp
-
-    IF (Comp % nSublayers > 1) THEN
-      r = Comp % N_j**2 * wgt / (ff**2 * sdc * Comp % VoltageFactor)
-    ELSE
-      r = Comp % N_j**2 * wgt / (sdc * Comp % VoltageFactor)
-    END IF
+    r = 0._dp
+    DO k = 1, Comp % nCells
+      gk = 0._dp
+      DO ls = 1, Comp % nSublayers
+        DO j = 1, Comp % nSegments
+          ind = ((k-1) * Comp % nSublayers + ls - 1) * Comp % nSegments + j
+          IF (Comp % StrandResWeight(ind) > 0._dp) &
+              gk = gk + Comp % StrandWeight(ind)**2 / Comp % StrandResWeight(ind)
+        END DO
+      END DO
+      IF (gk > 0._dp) r = r + REAL(Comp % foilsPerCell, dp)**2 / gk
+    END DO
+    Comp % Resistance = r / (sdc * Comp % VoltageFactor)
 !------------------------------------------------------------------------------
-  END FUNCTION FoilSheetDcResistance
+  END SUBROUTINE ComputeFoilSheetDcResistance
 !------------------------------------------------------------------------------
 
 
@@ -1858,6 +1941,17 @@ MODULE CircuitsMod
 
   USE DefUtils
   IMPLICIT NONE
+
+  ! Relative difference of the loop current that the two cut branches of a
+  ! closed solid coil may measure. Each branch loses the share of the loop
+  ! resistance of its own Dirichlet layer, the circulation excess Circ-1, and
+  ! clean cuts differ by 0.02-0.27 of that share: 0.01-0.2 % on meshes with a
+  ! few elements across the wire, 2.2 % on the coarse ring of the closed massive
+  ! tests. A cut along the wire gave 1.3-1.5 times the share, 5.9-18 %, and
+  ! inflates the share itself, hence the cap. "Coil Cut Disagreement Limit"
+  ! overrides it for meshes too coarse or too graded along the wire for that.
+  REAL(KIND=dp), PARAMETER :: MinCutBranchMismatch = 0.01_dp, &
+      MaxCutBranchMismatch = 0.03_dp, CutLayerShareMismatch = 0.5_dp
 
 CONTAINS 
 
@@ -2294,6 +2388,8 @@ END FUNCTION isComponentName
         SELECT CASE (Comp % CoilType) 
         CASE ('foil winding', 'flat wire', 'foil sheet')
           CALL ComputeCoilCirculation(CompParams, CompInd)
+        CASE ('massive')
+          CALL ComputeClosedMassiveCirculation(CompParams, CompInd)
         END SELECT
       END IF
 
@@ -3131,7 +3227,9 @@ END FUNCTION isComponentName
 !> conducting continuum. The block is split into nCells cells along the stacking
 !> direction (the turn normal) and each cell into nSegments strands across it
 !> (the turn width). Cell k lumps foilsPerCell = N/nCells turns; strand (k,j)
-!> carries a uniform current density c_kj*grad(W). The intra-turn skin effect is
+!> carries the current density c_kj*t, t = grad(stack) x grad(across) (see
+!> FoilSheetDirection), whose flux is the same through every section of the
+!> strand, so the density follows the turn width. The intra-turn skin effect is
 !> in the complex sheet conductivity (Sigma 33 / Sigma 33 im) and the intra-turn
 !> proximity effect in the complex reluctivity (Nu 11/22/33), so the block
 !> itself carries no volumetric eddy current.
@@ -3152,7 +3250,8 @@ END FUNCTION isComponentName
 !>   Sheet Sublayers        strand layers through the thickness of one turn
 !>                          (default 1 = one uniform current layer per turn,
 !>                          0 = chosen from t/delta at the run frequency)
-!>   Electrode Area         or Electrode Boundaries, as for foil winding
+!>   Electrode Area         or Electrode Boundaries, as for foil winding; neither
+!>                          enters the DC resistance, which comes from the strands
 !>   Sigma 33 [im]          complex sheet conductivity (harmonic)
 !>   Homogenization Model + Nu 11/22/33 [im]   complex reluctivity via RotM
 !>
@@ -3248,7 +3347,7 @@ END FUNCTION isComponentName
     REAL(KIND=dp) :: sInt, vol, detJ, smin, smax
     CHARACTER(LEN=MAX_NAME_LEN) :: Missing
     INTEGER :: e, n, gp, nmax
-    LOGICAL :: stat, Found2
+    LOGICAL :: stat, Found2, DepsOk
 
     sgm = 0._dp
     Varies = .FALSE.
@@ -3263,8 +3362,12 @@ END FUNCTION isComponentName
 
     ! The keyword is a function. Without its argument there is nothing to
     ! evaluate, so say so and let the caller keep the value it already has
-    ! rather than Fatal deep inside the list machinery.
-    IF (.NOT. FoilSheetDepsResolved(ptr, CompParams, Missing)) THEN
+    ! rather than Fatal deep inside the list machinery. The decision is taken
+    ! over all partitions, as the reductions below are collective.
+    DepsOk = FoilSheetDepsResolved(ptr, CompParams, Missing)
+    IF (ParEnv % PEs > 1) DepsOk = ParallelReduction(MERGE(1._dp, 0._dp, DepsOk), 1) > 0.5_dp
+    IF (.NOT. DepsOk) THEN
+      IF (LEN_TRIM(Missing) == 0) Missing = 'a variable missing on another partition'
       CALL Warn('Circuits_Init','Foil sheet "Sheet Conductivity" depends on ['// &
           TRIM(Missing)//'], which does not exist; keeping the previous value')
       Found = .FALSE.
@@ -3435,6 +3538,7 @@ END FUNCTION isComponentName
     omega = GetAngularFrequency(Found = FoundFreq)
     IF (.NOT. FoundFreq) omega = 0._dp
     IF (omega < 0._dp) RETURN
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Omega', omega)
 
     ! Frequency = 0 is an ordinary case: the harmonic solver is driven there for
     ! the DC resistance and inductance points. FoilSheetTanhOverU is 1 at omega
@@ -3474,21 +3578,28 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Refresh the harmonic sheet material from a temperature dependent
-!> 'Sheet Conductivity'. Called on every harmonic circuits solver call, so a
-!> thermal iteration that updates the temperature field also updates the coil
-!> material. A constant keyword, an explicit 'Sigma 33' or a transient run all
-!> leave this a no-op.
+!> Refresh the derived harmonic sheet material when its inputs change: a
+!> temperature dependent 'Sheet Conductivity' (a thermal iteration updates the
+!> temperature field) or the frequency (a sweep within one run). Called on every
+!> harmonic circuits solver call. Explicit 'Sigma 33' / 'Nu 33' are never
+!> overwritten, and the sub-layer count chosen at init stays.
 !------------------------------------------------------------------------------
   SUBROUTINE UpdateFoilSheetMaterial(CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
-    REAL(KIND=dp) :: tfoil, ff, sgm
+    REAL(KIND=dp) :: tfoil, ff, sgm, omega, omegaUsed
     INTEGER :: nSub
-    LOGICAL :: FoundT, FoundF, FoundS, Found, Varies, StackAlongAlpha
+    LOGICAL :: FoundT, FoundF, FoundS, Found, Varies, StackAlongAlpha, FoundFreq, FoundW
 
-    IF (.NOT. GetLogical(CompParams, 'Foil Sheet Sigma Varies', Found)) RETURN
+    IF (.NOT. GetLogical(CompParams, 'Foil Sheet Sigma Varies', Found)) THEN
+      ! 'Foil Sheet Omega' is stored by each derivation; without it nothing was derived.
+      omegaUsed = GetConstReal(CompParams, 'Foil Sheet Omega', FoundW)
+      IF (.NOT. FoundW) RETURN
+      omega = GetAngularFrequency(Found = FoundFreq)
+      IF (.NOT. FoundFreq) omega = 0._dp
+      IF (ABS(omega - omegaUsed) <= 1.0d-12 * MAX(1._dp, ABS(omegaUsed))) RETURN
+    END IF
 
     tfoil = GetConstReal(CompParams, 'Foil Thickness', FoundT)
     ff    = GetConstReal(CompParams, 'Fill Factor', FoundF)
@@ -3767,6 +3878,9 @@ END FUNCTION isComponentName
     IF (ALLOCATED(Comp % StrandWeight)) DEALLOCATE(Comp % StrandWeight)
     ALLOCATE(Comp % StrandWeight(nLayers * Comp % nSegments))
     Comp % StrandWeight = 0._dp
+    IF (ALLOCATED(Comp % StrandResWeight)) DEALLOCATE(Comp % StrandResWeight)
+    ALLOCATE(Comp % StrandResWeight(nLayers * Comp % nSegments))
+    Comp % StrandResWeight = 0._dp
 
     ! Scale of the strand dofs: with c_kj = SigmaRef * y_kj the unknown y_kj is a
     ! voltage (y_kj = f V_k at DC), so the circuit block is as well conditioned
@@ -4008,6 +4122,447 @@ END FUNCTION isComponentName
     DEALLOCATE(Basis, dBasisdx, Wloc, Aloc, Bloc)
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeCoilCirculation
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+! Circulation of a closed solid (massive) coil's cut potential, measured
+! without a direction field. A solid conductor of arbitrary shape has no
+! Alpha/Beta faces, so ComputeCoilCirculation has no current tube density to
+! integrate against and cannot be used here.
+!
+! For a potential with div(sigma grad W) = 0 and a jump across the cut,
+!   int sigma |grad W|^2 dV = [W] * (flux of sigma grad W through the cut),
+! both sides being computable from the CoilSolver's own solution. GetCoilWBase
+! composes the two branches so that each is taken only where its own Dirichlet
+! layer is not, so the volume integral runs over the whole loop while the flux
+! is still measured at the crossings of one branch's layer. Their ratio is
+! therefore the resistance of the whole loop over the resistance of the loop
+! minus that layer, 1.02-1.05, which is what the composite field ramps through.
+!
+! One crossing only. The CoilSolver pins the cut potential at every crossing of
+! the cut plane, so with several crossings each segment between them is a
+! separate Dirichlet problem and carries its own current 1/R_segment instead of
+! one series current. No scalar normalization then gives both unit circulation
+! and the right DC resistance: the conductance comes out low by
+! 1 - N^2/((sum 1/R_k)(sum R_k)), measured as 12.3 % on a 3-turn helix whose
+! return leg doubles one of its three segments.
+!
+! The CoilSolver keyword "Single Coil Cut" reduces the Dirichlet layer to one
+! crossing, which is what a multi-turn coil needs: the potential then ramps once
+! over the whole wire, the identity above holds for the whole wire, and the
+! number of turns does not enter the normalization at all.
+!------------------------------------------------------------------------------
+  SUBROUTINE ComputeClosedMassiveCirculation(CompParams, CompInd)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: CompInd
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Mesh_t), POINTER :: Mesh
+    TYPE(ValueList_t), POINTER :: Material
+    TYPE(Variable_t), POINTER :: PotVar
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), Wloc(:), Ploc(:), &
+        Chi(:), ElCond(:), ElemFlux(:,:)
+    INTEGER, ALLOCATABLE :: gIdx(:)
+    LOGICAL, ALLOCATABLE :: IsCross(:,:)
+    REAL(KIND=dp) :: detJ, gw(3), gc(3), sig, efl, ely, Ener, Flux(2), Mult(2), &
+        Circ, Ratio, Turns, FluxRef, FluxErr, PatchSpread(2), MultMax, MultMin, &
+        LayerEner(2), LayerShare(2)
+    INTEGER :: e, n, gp, nmax, nno, nbulk, b, i, m, nPatch(2)
+    INTEGER, POINTER :: Indexes(:)
+    LOGICAL :: stat, Found, Parallel, Changed, OneCut
+    CHARACTER(*), PARAMETER :: Caller = 'Circuits_Init'
+    CHARACTER(*), PARAMETER :: MultName(2) = [ CHARACTER(32) :: &
+        'Coil Potential Multiplier', 'Coil Potential Multiplier B' ]
+    ! The cut potential runs over [0,1] and is pinned to exactly 0 and 1 on the
+    ! two sides of the single element layer it is cut at, so half of the full
+    ! range separates a crossing element from every other element of the coil.
+    REAL(KIND=dp), PARAMETER :: CrossingJump = 0.5_dp
+    REAL(KIND=dp), PARAMETER :: MinRatio = 0.5_dp, MaxRatio = 2.0_dp
+    REAL(KIND=dp), PARAMETER :: MaxPatchSpread = 0.02_dp
+    REAL(KIND=dp) :: MaxMismatch
+    LOGICAL :: GotLimit
+    CHARACTER(LEN=12) :: Num(6)
+!------------------------------------------------------------------------------
+
+    ! Measuring it again on the already normalized field would just return 1.
+    IF (ListCheckPresent(CompParams, 'Coil Circulation')) RETURN
+
+    Mesh => CurrentModel % Mesh
+    nmax = Mesh % MaxElementNodes
+    nno = Mesh % NumberOfNodes
+    nbulk = Mesh % NumberOfBulkElements
+    Parallel = (ParEnv % PEs > 1)
+
+    ! The CoilSolver returns before it scales anything on a partition that holds
+    ! no element of the coil, which is the normal case for a coil small against
+    ! the model, so the multipliers are missing there. Every partition that did
+    ! scale got the same value and the others hold zero, so reducing over all of
+    ! them hands that value to every one. It is taken by magnitude because the
+    ! sign of the multiplier is the winding sense of the cut, either way round.
+    DO b = 1, 2
+      Mult(b) = ListGetConstReal(CompParams, MultName(b), Found)
+      IF (.NOT. Found) Mult(b) = 0._dp
+      MultMax = ParallelReduction(Mult(b), 2)
+      MultMin = ParallelReduction(Mult(b), 1)
+      Mult(b) = MERGE(MultMax, MultMin, ABS(MultMax) >= ABS(MultMin))
+      IF (.NOT. Found .AND. Mult(b) /= 0._dp) &
+          CALL ListAddConstReal(CompParams, MultName(b), Mult(b))
+    END DO
+
+    IF (ALL(Mult == 0._dp)) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
+        ' is a closed massive coil but the CoilSolver has not run with '// &
+        '"Coil Closed": there is no cut potential to normalize.')
+    IF (ANY(Mult == 0._dp)) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
+        ': the CoilSolver scaled the cut potential to zero current.')
+
+    ! The CoilSolver writes this into the component when it has reduced the cut
+    ! to one crossing. The wire is then cut once however many turns it makes, so
+    ! the turns do not enter the normalization and are not read.
+    OneCut = ListGetLogical(CompParams, 'Single Coil Cut', Found)
+
+    IF (.NOT. OneCut) THEN
+      Turns = GetConstReal(CompParams, 'Number of Turns', Found)
+      IF (.NOT. Found) Turns = 1._dp
+      IF (ABS(Turns - 1._dp) > 1.0e-6_dp) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
+          ': a closed massive coil supports one cut crossing only, so "Number of Turns" '// &
+          'must be 1: the CoilSolver pins the cut potential at every crossing and the '// &
+          'segments between crossings then carry independent currents. Add "Single Coil '// &
+          'Cut = Logical True" to the CoilSolver to cut the wire once instead.')
+    END IF
+
+    ! The identity holds for the conductivity the cut potential was solved with.
+    ! 'Coil Conductivity Fix' iterates that conductivity towards a uniform
+    ! current density, which is what a stranded winding wants of its direction
+    ! field but not what a solid conductor does, and it biases this measurement
+    ! by about half a percent.
+    DO i = 1, CurrentModel % NumberOfSolvers
+      IF (.NOT. ListCheckPresent(CurrentModel % Solvers(i) % Values, 'Coil Closed')) CYCLE
+      IF (.NOT. ListGetLogical(CurrentModel % Solvers(i) % Values, &
+          'Coil Conductivity Fix', Found)) CYCLE
+      CALL Warn(Caller, 'Solver '//I2S(i)//' runs the CoilSolver with "Coil '// &
+          'Conductivity Fix", so its cut potential is not the solid coil own DC '// &
+          'field. Component '//I2S(CompInd)//' will get a biased circulation and '// &
+          'a biased DC resistance.')
+    END DO
+
+    ALLOCATE(Basis(nmax), dBasisdx(nmax,3), Wloc(nmax), Ploc(nmax), Chi(nmax), ElCond(nmax))
+    ALLOCATE(IsCross(nbulk,2), ElemFlux(nbulk,2), gIdx(nno))
+    IsCross = .FALSE.
+    ElemFlux = 0._dp
+
+    DO i = 1, nno
+      gIdx(i) = i
+    END DO
+    IF (Parallel) THEN
+      IF (ASSOCIATED(Mesh % ParallelInfo % GlobalDOFs)) &
+          gIdx(1:nno) = Mesh % ParallelInfo % GlobalDOFs(1:nno)
+    END IF
+
+    Ener = 0._dp
+    Flux = 0._dp
+    LayerEner = 0._dp
+
+    DO e = 1, GetNOFActive()
+      Element => GetActiveElement(e)
+      IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+      n = GetElementNOFNodes(Element)
+      Indexes => Element % NodeIndexes
+      CALL GetElementNodes(Nodes, Element)
+      CALL GetCoilWBase(Element, n, CompParams, Wloc)
+
+      Material => GetMaterial(Element)
+      ElCond(1:n) = GetReal(Material, 'Electric Conductivity', Found, Element)
+      IF (.NOT. Found) ElCond(1:n) = 1._dp
+
+      IP = GaussPoints(Element)
+      DO gp = 1, IP % n
+        stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
+            detJ, Basis, dBasisdx)
+        gw = MATMUL(Wloc(1:n), dBasisdx(1:n,:))
+        sig = SUM(Basis(1:n) * ElCond(1:n))
+        Ener = Ener + IP % s(gp) * detJ * sig * SUM(gw*gw)
+      END DO
+
+      DO b = 1, 2
+        IF (b == 1) THEN
+          PotVar => VariableGet(Mesh % Variables, 'CoilPot')
+        ELSE
+          PotVar => VariableGet(Mesh % Variables, 'CoilPotB')
+        END IF
+        IF (.NOT. ASSOCIATED(PotVar)) CYCLE
+        IF (ANY(PotVar % Perm(Indexes(1:n)) == 0)) CYCLE
+        Ploc(1:n) = PotVar % Values(PotVar % Perm(Indexes(1:n))) / Mult(b)
+        IF (MAXVAL(Ploc(1:n)) - MINVAL(Ploc(1:n)) < CrossingJump) CYCLE
+
+        IsCross(Element % ElementIndex, b) = .TRUE.
+        WHERE (Ploc(1:n) > 0.5_dp)
+          Chi(1:n) = 1._dp
+        ELSEWHERE
+          Chi(1:n) = 0._dp
+        END WHERE
+
+        efl = 0._dp
+        ely = 0._dp
+        DO gp = 1, IP % n
+          stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
+              detJ, Basis, dBasisdx)
+          gw = MATMUL(Wloc(1:n), dBasisdx(1:n,:))
+          gc = MATMUL(Chi(1:n), dBasisdx(1:n,:))
+          sig = SUM(Basis(1:n) * ElCond(1:n))
+          efl = efl + IP % s(gp) * detJ * sig * SUM(gc*gw)
+          ely = ely + IP % s(gp) * detJ * sig * SUM(gw*gw)
+        END DO
+        ElemFlux(Element % ElementIndex, b) = efl
+        Flux(b) = Flux(b) + efl
+        LayerEner(b) = LayerEner(b) + ely
+      END DO
+    END DO
+
+    Ener = ParallelReduction(Ener)
+    ! The sign is the winding sense of the cut, which carries no information here.
+    DO b = 1, 2
+      Flux(b) = ABS(ParallelReduction(Flux(b)))
+      LayerEner(b) = ParallelReduction(LayerEner(b))
+    END DO
+
+    ! The branches are cut in different places, so their crossings are two cross
+    ! sections of the same series loop: equal up to the discretization error.
+    IF (ALL(Flux > 0._dp)) THEN
+      FluxRef = 0.5_dp * (Flux(1) + Flux(2))
+      FluxErr = ABS(Flux(1) - Flux(2)) / FluxRef
+    ELSE
+      FluxRef = MAXVAL(Flux)
+      FluxErr = 0._dp
+    END IF
+
+    IF (FluxRef <= 0._dp) CALL Fatal(Caller, 'Component '//I2S(CompInd)// &
+        ': no cut crossing of the closed massive coil carries any current. '// &
+        'Check "Coil Normal" and "Coil Center".')
+
+    Ratio = Ener / FluxRef
+    Circ = Ratio
+
+    ! The composite field is smooth across both layers, so the part of its loss
+    ! in a layer is the share of the loop resistance that layer takes; the two
+    ! add up to the circulation excess. A slab along the wire takes a large one.
+    LayerShare = 0._dp
+    IF (Ener > 0._dp) LayerShare = LayerEner / Ener
+
+    CALL CountCrossingPatches()
+
+    WRITE(Message,'(A,ES13.6)') 'Component '//I2S(CompInd)// &
+        ' closed massive coil circulation: ', Circ
+    CALL Info(Caller, Message, Level=5)
+    WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES9.2)') 'Component '//I2S(CompInd)// &
+        ' cut crossing flux: branch A ', Flux(1), ', branch B ', Flux(2), &
+        ', relative difference ', FluxErr
+    CALL Info(Caller, Message, Level=5)
+    WRITE(Message,'(A,ES9.2,A,ES9.2)') 'Component '//I2S(CompInd)// &
+        ' share of the loop resistance in the cut layer: branch A ', LayerShare(1), &
+        ', branch B ', LayerShare(2)
+    CALL Info(Caller, Message, Level=5)
+    WRITE(Message,'(A,ES9.2,A,ES9.2,A)') 'Component '//I2S(CompInd)// &
+        ' cut crossing patches: '//I2S(nPatch(1))//' (branch A) and '// &
+        I2S(nPatch(2))//' (branch B), flux spread ', PatchSpread(1), ' and ', &
+        PatchSpread(2), ' over one turn'
+    CALL Info(Caller, Message, Level=5)
+
+    IF (MAXVAL(PatchSpread) > MaxPatchSpread) THEN
+      WRITE(Message,'(A,ES11.4,A)') 'Component '//I2S(CompInd)//': the cut crossings '// &
+          'of the closed massive coil carry currents that differ by ', &
+          MAXVAL(PatchSpread), '. They are cross sections of one series loop, so the '// &
+          'cut potential is not a valid direction field: each crossing is pinned '// &
+          'separately and ramps over its own segment.'
+      CALL Warn(Caller, Message)
+    END IF
+
+    IF (Ratio < MinRatio .OR. Ratio > MaxRatio) THEN
+      WRITE(Message,'(A,ES13.6,A)') 'Component '//I2S(CompInd)// &
+          ' closed massive coil circulation per turn is ', Ratio, ', expected near 1. '// &
+          'The CoilSolver cut potential is not a valid direction field: check '// &
+          '"Coil Normal", "Coil Center" and that the coil really is a closed loop.'
+      CALL Fatal(Caller, Message)
+    END IF
+
+    IF (ANY(nPatch /= 1)) THEN
+      IF (OneCut) THEN
+        CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut potential still jumps '// &
+            'on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
+            ' (branch B), so the CoilSolver did not reduce the cut to one crossing and '// &
+            'the segments between the crossings carry currents of their own: the '// &
+            'resistance of this component would be wrong. Check "Coil Normal" and '// &
+            '"Coil Center", and that the coil is one connected loop. Unless "Coil Tangent" '// &
+            'is given, the CoilSolver chooses the cut of a coil with "Single Coil Cut" itself '// &
+            'and lists the half planes it tried at info level 5; "Coil Tangent" and "Coil '// &
+            'Center" in the component set it by hand.')
+      ELSE
+        CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the cut plane crosses the '// &
+            'coil on '//I2S(nPatch(1))//' patches (branch A) and '//I2S(nPatch(2))// &
+            ' (branch B); a closed massive coil supports one crossing only. Check '// &
+            '"Coil Normal" and "Coil Center".')
+      END IF
+    END IF
+
+    ! Where the two branches meet, the direction field jumps by as much as they
+    ! disagree, and at high frequency that jump drives spurious eddy currents.
+    MaxMismatch = GetConstReal(CompParams, 'Coil Cut Disagreement Limit', GotLimit)
+    IF (.NOT. GotLimit) MaxMismatch = MIN(MAX(MinCutBranchMismatch, &
+        CutLayerShareMismatch * (Circ - 1._dp)), MaxCutBranchMismatch)
+    IF (FluxErr > MaxMismatch) THEN
+      WRITE(Num(1),'(ES12.5)') Flux(1)
+      WRITE(Num(2),'(ES12.5)') Flux(2)
+      WRITE(Num(3),'(F7.2,A)') 100*FluxErr, ' %'
+      WRITE(Num(4),'(F7.2,A)') 100*MaxMismatch, ' %'
+      WRITE(Num(5),'(F7.2,A)') 100*LayerShare(1), ' %'
+      WRITE(Num(6),'(F7.2,A)') 100*LayerShare(2), ' %'
+      CALL Fatal(Caller, 'Component '//I2S(CompInd)//': the two branches of the cut of '// &
+          'the closed massive coil disagree on the loop current, branch A '// &
+          TRIM(ADJUSTL(Num(1)))//' and branch B '//TRIM(ADJUSTL(Num(2)))//', by '// &
+          TRIM(ADJUSTL(Num(3)))//' where a clean cut of this mesh gives at most '// &
+          TRIM(ADJUSTL(Num(4)))//'. The cut layer of branch A takes '//TRIM(ADJUSTL(Num(5)))// &
+          ' of the loop resistance, that of branch B '//TRIM(ADJUSTL(Num(6)))// &
+          ', and a layer that runs along the wire takes a large share. '// &
+          'One of the two cuts is not a cross section of the wire, '// &
+          'and the current density where the branches meet would be wrong. Unless "Coil '// &
+          'Tangent" is given, the CoilSolver chooses the cut of a coil with "Single Coil Cut" '// &
+          'itself and lists the half planes it tried at info level 5; "Coil Tangent" and '// &
+          '"Coil Center" in the component set it by hand. A mesh much coarser or graded '// &
+          'along the wire can make even clean cuts disagree: remesh the wire, or set '// &
+          '"Coil Cut Disagreement Limit" in the component to the fraction to accept.')
+    END IF
+
+    CALL ListAddConstReal(CompParams, 'Coil Circulation', Circ)
+
+    DEALLOCATE(Basis, dBasisdx, Wloc, Ploc, Chi, ElCond, IsCross, ElemFlux, gIdx)
+
+  CONTAINS
+
+    ! Label the crossing elements of each branch into connected patches and sum
+    ! the flux per patch. The crossing elements are few, so every partition
+    ! gathers all of them by their global node indices and labels them itself:
+    ! the count is exact in parallel too, also for a patch that straddles
+    ! partitions. The patches are cross sections of one series loop, so a spread
+    ! of the flux between them is the cut potential driving a different current
+    ! through each of them.
+    !--------------------------------------------------------------------------
+    SUBROUTINE CountCrossingPatches()
+      INTEGER :: nw, nLoc, nAll, nId, k, p, q, LastId, ierr, comm, nPE
+      INTEGER, ALLOCATABLE :: LocNodes(:), AllNodes(:), Counts(:), Displ(:), &
+          Srt(:), Order(:), Uid(:), Lab(:), Self(:)
+      REAL(KIND=dp), ALLOCATABLE :: LocFlux(:), AllFlux(:), PatchFlux(:)
+
+      nw = nmax
+      IF (Parallel) THEN
+        nw = ParallelReduction(nw, 2)
+        ! The communicator ParallelReduction uses, so the same ranks take part.
+        comm = ParEnv % ActiveComm
+        IF (COUNT(ParEnv % Active) <= 0) comm = ELMER_COMM_WORLD
+        CALL MPI_COMM_SIZE(comm, nPE, ierr)
+        ALLOCATE(Counts(nPE), Displ(nPE))
+      END IF
+
+      PatchSpread = 0._dp
+      DO b = 1, 2
+        nLoc = COUNT(IsCross(:,b))
+        ALLOCATE(LocNodes(nw*MAX(nLoc,1)), LocFlux(MAX(nLoc,1)))
+        LocNodes = 0
+        LocFlux = 0._dp
+        k = 0
+        DO e = 1, nbulk
+          IF (.NOT. IsCross(e,b)) CYCLE
+          Element => Mesh % Elements(e)
+          n = Element % TYPE % NumberOfNodes
+          LocNodes(k*nw+1:k*nw+n) = gIdx(Element % NodeIndexes(1:n))
+          k = k + 1
+          LocFlux(k) = ElemFlux(e,b)
+        END DO
+
+        IF (Parallel) THEN
+          CALL MPI_ALLGATHER(nLoc, 1, MPI_INTEGER, Counts, 1, MPI_INTEGER, comm, ierr)
+          nAll = SUM(Counts)
+          Displ(1) = 0
+          DO p = 2, nPE
+            Displ(p) = Displ(p-1) + Counts(p-1)
+          END DO
+          ALLOCATE(AllNodes(nw*MAX(nAll,1)), AllFlux(MAX(nAll,1)))
+          AllNodes = 0
+          AllFlux = 0._dp
+          CALL MPI_ALLGATHERV(LocFlux, nLoc, MPI_DOUBLE_PRECISION, AllFlux, Counts, &
+              Displ, MPI_DOUBLE_PRECISION, comm, ierr)
+          CALL MPI_ALLGATHERV(LocNodes, nw*nLoc, MPI_INTEGER, AllNodes, nw*Counts, &
+              nw*Displ, MPI_INTEGER, comm, ierr)
+        ELSE
+          nAll = nLoc
+          ALLOCATE(AllNodes(SIZE(LocNodes)), AllFlux(SIZE(LocFlux)))
+          AllNodes = LocNodes
+          AllFlux = LocFlux
+        END IF
+
+        ! Number the distinct nodes 1..nId; 0 pads the elements with fewer nodes.
+        k = nw*nAll
+        ALLOCATE(Srt(MAX(k,1)), Order(MAX(k,1)), Uid(MAX(k,1)))
+        Srt(1:k) = AllNodes(1:k)
+        DO p = 1, k
+          Order(p) = p
+        END DO
+        CALL SortI(k, Srt, Order)
+        Uid = 0
+        nId = 0
+        LastId = 0
+        DO p = 1, k
+          IF (Srt(p) == 0) CYCLE
+          IF (Srt(p) /= LastId) THEN
+            nId = nId + 1
+            LastId = Srt(p)
+          END IF
+          Uid(Order(p)) = nId
+        END DO
+
+        ALLOCATE(Lab(MAX(nId,1)), Self(MAX(nId,1)), PatchFlux(MAX(nId,1)))
+        DO p = 1, nId
+          Self(p) = p
+        END DO
+        Lab = Self
+        Changed = .TRUE.
+        DO WHILE (Changed)
+          Changed = .FALSE.
+          DO e = 0, nAll-1
+            m = 0
+            DO p = e*nw+1, e*nw+nw
+              IF (Uid(p) > 0) m = MAX(m, Lab(Uid(p)))
+            END DO
+            DO p = e*nw+1, e*nw+nw
+              IF (Uid(p) == 0) CYCLE
+              IF (Lab(Uid(p)) /= m) THEN
+                Lab(Uid(p)) = m
+                Changed = .TRUE.
+              END IF
+            END DO
+          END DO
+        END DO
+
+        ! Each patch is labelled by its largest node number, which labels itself.
+        PatchFlux = 0._dp
+        DO e = 0, nAll-1
+          q = Lab(Uid(e*nw+1))
+          PatchFlux(q) = PatchFlux(q) + AllFlux(e+1)
+        END DO
+        nPatch(b) = COUNT(Lab(1:nId) == Self(1:nId))
+        IF (nPatch(b) > 1) THEN
+          PatchFlux = ABS(PatchFlux)
+          PatchSpread(b) = nPatch(b) * (MAXVAL(PatchFlux(1:nId)) - &
+              MINVAL(PatchFlux(1:nId), Lab(1:nId) == Self(1:nId))) / SUM(PatchFlux(1:nId))
+        END IF
+
+        DEALLOCATE(LocNodes, LocFlux, AllNodes, AllFlux, Srt, Order, Uid, Lab, Self, PatchFlux)
+      END DO
+    END SUBROUTINE CountCrossingPatches
+!------------------------------------------------------------------------------
+  END SUBROUTINE ComputeClosedMassiveCirculation
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -5142,7 +5697,7 @@ CONTAINS
     OPTIONAL :: Cols
     INTEGER :: Rows(:), Cols(:), Cnts(:)
     INTEGER :: Indexes(nd)
-    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs, nLayers
+    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs
     INTEGER, POINTER :: PS(:)
     LOGICAL, OPTIONAL :: Harmonic
     LOGICAL :: harm
@@ -5166,9 +5721,8 @@ CONTAINS
 
     ! Strands the element can touch: the nodal range plus one cell of margin
     ! for higher order elements and strand borders cutting through elements.
-    nLayers = Comp % nCells * Comp % nSublayers
-    ks1 = MAX(1, FLOOR(MINVAL(sStack) * nLayers))
-    ks2 = MIN(nLayers, FLOOR(MAXVAL(sStack) * nLayers) + 2)
+    CALL FoilSheetBandRange(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
+        MINVAL(sStack), MAXVAL(sStack), ks1, ks2)
     ka1 = MAX(1, FLOOR(MINVAL(sAcross) * Comp % nSegments))
     ka2 = MIN(Comp % nSegments, FLOOR(MAXVAL(sAcross) * Comp % nSegments) + 2)
 
