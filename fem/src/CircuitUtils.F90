@@ -1103,6 +1103,58 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Strand bands l1..l2 that an element spanning stacking coordinates
+!> [smin, smax] can touch, with one band of margin on each side for higher
+!> order elements. Uses the band edges of FoilSheetBand, so sub-layers packed
+!> into the copper fraction of the pitch are preallocated where they are
+!> assembled; with one band per turn this is the uniform range of before.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetBandRange(nCells, nSublayers, ff, smin, smax, l1, l2)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSublayers, l1, l2
+    REAL(KIND=dp) :: ff, smin, smax
+    INTEGER :: nLayers, k, l
+    REAL(KIND=dp) :: s1, s2
+
+    nLayers = nCells * nSublayers
+    IF (nSublayers == 1) THEN
+      l1 = MAX(1, FLOOR(smin * nLayers))
+      l2 = MIN(nLayers, FLOOR(smax * nLayers) + 2)
+      RETURN
+    END IF
+
+    ! First band ending at or above smin, searched in the turn holding smin;
+    ! none there means smin is in the upper margin, so the next turn starts it.
+    k = MIN(nCells, MAX(1, FLOOR(smin * nCells) + 1))
+    l1 = k * nSublayers + 1
+    DO l = (k-1) * nSublayers + 1, k * nSublayers
+      CALL FoilSheetBand(nCells, nSublayers, ff, l, s1, s2)
+      IF (s2 >= smin) THEN
+        l1 = l
+        EXIT
+      END IF
+    END DO
+
+    ! Last band starting at or below smax; none in its turn means smax is in
+    ! the lower margin, so the previous turn ends it.
+    k = MIN(nCells, MAX(1, FLOOR(smax * nCells) + 1))
+    l2 = (k-1) * nSublayers
+    DO l = k * nSublayers, (k-1) * nSublayers + 1, -1
+      CALL FoilSheetBand(nCells, nSublayers, ff, l, s1, s2)
+      IF (s1 <= smax) THEN
+        l2 = l
+        EXIT
+      END IF
+    END DO
+
+    l1 = MIN(nLayers, MAX(1, l1 - 1))
+    l2 = MAX(1, MIN(nLayers, l2 + 1))
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetBandRange
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Turn cell of a sub-layer: sub-layers (k-1)*nSublayers+1 .. k*nSublayers are
 !> the same conductor in parallel and share the voltage dof of turn cell k.
 !------------------------------------------------------------------------------
@@ -3295,7 +3347,7 @@ END FUNCTION isComponentName
     REAL(KIND=dp) :: sInt, vol, detJ, smin, smax
     CHARACTER(LEN=MAX_NAME_LEN) :: Missing
     INTEGER :: e, n, gp, nmax
-    LOGICAL :: stat, Found2
+    LOGICAL :: stat, Found2, DepsOk
 
     sgm = 0._dp
     Varies = .FALSE.
@@ -3310,8 +3362,12 @@ END FUNCTION isComponentName
 
     ! The keyword is a function. Without its argument there is nothing to
     ! evaluate, so say so and let the caller keep the value it already has
-    ! rather than Fatal deep inside the list machinery.
-    IF (.NOT. FoilSheetDepsResolved(ptr, CompParams, Missing)) THEN
+    ! rather than Fatal deep inside the list machinery. The decision is taken
+    ! over all partitions, as the reductions below are collective.
+    DepsOk = FoilSheetDepsResolved(ptr, CompParams, Missing)
+    IF (ParEnv % PEs > 1) DepsOk = ParallelReduction(MERGE(1._dp, 0._dp, DepsOk), 1) > 0.5_dp
+    IF (.NOT. DepsOk) THEN
+      IF (LEN_TRIM(Missing) == 0) Missing = 'a variable missing on another partition'
       CALL Warn('Circuits_Init','Foil sheet "Sheet Conductivity" depends on ['// &
           TRIM(Missing)//'], which does not exist; keeping the previous value')
       Found = .FALSE.
@@ -3482,6 +3538,7 @@ END FUNCTION isComponentName
     omega = GetAngularFrequency(Found = FoundFreq)
     IF (.NOT. FoundFreq) omega = 0._dp
     IF (omega < 0._dp) RETURN
+    CALL ListAddConstReal(CompParams, 'Foil Sheet Omega', omega)
 
     ! Frequency = 0 is an ordinary case: the harmonic solver is driven there for
     ! the DC resistance and inductance points. FoilSheetTanhOverU is 1 at omega
@@ -3521,21 +3578,28 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Refresh the harmonic sheet material from a temperature dependent
-!> 'Sheet Conductivity'. Called on every harmonic circuits solver call, so a
-!> thermal iteration that updates the temperature field also updates the coil
-!> material. A constant keyword, an explicit 'Sigma 33' or a transient run all
-!> leave this a no-op.
+!> Refresh the derived harmonic sheet material when its inputs change: a
+!> temperature dependent 'Sheet Conductivity' (a thermal iteration updates the
+!> temperature field) or the frequency (a sweep within one run). Called on every
+!> harmonic circuits solver call. Explicit 'Sigma 33' / 'Nu 33' are never
+!> overwritten, and the sub-layer count chosen at init stays.
 !------------------------------------------------------------------------------
   SUBROUTINE UpdateFoilSheetMaterial(CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: CompParams
-    REAL(KIND=dp) :: tfoil, ff, sgm
+    REAL(KIND=dp) :: tfoil, ff, sgm, omega, omegaUsed
     INTEGER :: nSub
-    LOGICAL :: FoundT, FoundF, FoundS, Found, Varies, StackAlongAlpha
+    LOGICAL :: FoundT, FoundF, FoundS, Found, Varies, StackAlongAlpha, FoundFreq, FoundW
 
-    IF (.NOT. GetLogical(CompParams, 'Foil Sheet Sigma Varies', Found)) RETURN
+    IF (.NOT. GetLogical(CompParams, 'Foil Sheet Sigma Varies', Found)) THEN
+      ! 'Foil Sheet Omega' is stored by each derivation; without it nothing was derived.
+      omegaUsed = GetConstReal(CompParams, 'Foil Sheet Omega', FoundW)
+      IF (.NOT. FoundW) RETURN
+      omega = GetAngularFrequency(Found = FoundFreq)
+      IF (.NOT. FoundFreq) omega = 0._dp
+      IF (ABS(omega - omegaUsed) <= 1.0d-12 * MAX(1._dp, ABS(omegaUsed))) RETURN
+    END IF
 
     tfoil = GetConstReal(CompParams, 'Foil Thickness', FoundT)
     ff    = GetConstReal(CompParams, 'Fill Factor', FoundF)
@@ -5633,7 +5697,7 @@ CONTAINS
     OPTIONAL :: Cols
     INTEGER :: Rows(:), Cols(:), Cnts(:)
     INTEGER :: Indexes(nd)
-    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs, nLayers
+    INTEGER :: j, q, k, ks, ka, ks1, ks2, ka1, ka2, dofId, vvarId, nm, ncdofs
     INTEGER, POINTER :: PS(:)
     LOGICAL, OPTIONAL :: Harmonic
     LOGICAL :: harm
@@ -5657,9 +5721,8 @@ CONTAINS
 
     ! Strands the element can touch: the nodal range plus one cell of margin
     ! for higher order elements and strand borders cutting through elements.
-    nLayers = Comp % nCells * Comp % nSublayers
-    ks1 = MAX(1, FLOOR(MINVAL(sStack) * nLayers))
-    ks2 = MIN(nLayers, FLOOR(MAXVAL(sStack) * nLayers) + 2)
+    CALL FoilSheetBandRange(Comp % nCells, Comp % nSublayers, Comp % FillFactor, &
+        MINVAL(sStack), MAXVAL(sStack), ks1, ks2)
     ka1 = MAX(1, FLOOR(MINVAL(sAcross) * Comp % nSegments))
     ka2 = MIN(Comp % nSegments, FLOOR(MAXVAL(sAcross) * Comp % nSegments) + 2)
 

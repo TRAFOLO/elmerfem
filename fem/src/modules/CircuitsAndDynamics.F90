@@ -130,10 +130,14 @@ MODULE TransientHomogCircuitState
     INTEGER :: nPiece = 0
     INTEGER, ALLOCATABLE :: pElem(:), pStrand(:)
     REAL(KIND=dp), ALLOCATABLE :: pW(:)
+    ! Step count (fskin_step) at the last AdvanceFoilSkin of this component.
+    INTEGER :: AdvancedStep = 0
   END TYPE FoilSkin_t
 
   TYPE(FoilSkin_t), ALLOCATABLE, SAVE :: FSkin(:)
   LOGICAL, SAVE :: fskin_allocated = .FALSE.
+  ! Number of timesteps PrepareFoilSkinStep has started.
+  INTEGER, SAVE :: fskin_step = 0
 
   ! Per element of the 'Proximity Loss' field: the value found before the skin
   ! ladder's share was added, and the value written (PublishFoilSkinExcess).
@@ -153,7 +157,7 @@ CONTAINS
     LOGICAL :: found
     CHARACTER(LEN=MAX_NAME_LEN) :: ctype
     LOGICAL :: ladderon
-    REAL(KIND=dp) :: tau0, rest
+    REAL(KIND=dp) :: tau0, rest, rt
 
     IF (fskin_allocated) RETURN
     n_comp = CurrentModel % NumberOfComponents
@@ -224,6 +228,20 @@ CONTAINS
         CALL Info('InitFoilSkinLadder', Message, Level=5)
       END DO
     END DO
+
+    ! The ladder states are not in restart files. Continuing a restarted
+    ! transient would restart them from zero under the restored fields, an
+    ! artificial step in voltage and loss. 'Restart Time = 0' starts a new
+    ! transient from the restored fields (as TRAFOLO's thermal iterations do).
+    IF (ANY(FSkin % Active) .AND. ListCheckPresent(CurrentModel % Simulation, 'Restart File')) THEN
+      IF (ListGetString(CurrentModel % Simulation, 'Simulation Type', found) == 'transient') THEN
+        rt = ListGetConstReal(CurrentModel % Simulation, 'Restart Time', found)
+        IF (.NOT. found .OR. rt /= 0._dp) CALL Fatal('InitFoilSkinLadder', &
+            'Transient foil sheet cannot continue a restarted transient: its skin-effect state '// &
+            'is not stored in restart files. Set "Restart Time = 0" to start a new transient '// &
+            'from the restored fields.')
+      END IF
+    END IF
   END SUBROUTINE InitFoilSkinLadder
 
   !----------------------------------------------------------------------------
@@ -240,6 +258,22 @@ CONTAINS
 
     IF (.NOT. fskin_allocated) RETURN
     IF (dt <= 0._dp) RETURN
+
+    ! The states of the finished step come from AdvanceFoilSkin, which only
+    ! CircuitsOutput calls. Without it the history would silently stay stale and
+    ! the output schedule would change the solution.
+    IF (fskin_step > 0) THEN
+      DO i = 1, SIZE(FSkin)
+        IF (.NOT. FSkin(i) % Active) CYCLE
+        IF (FSkin(i) % AdvancedStep == fskin_step) CYCLE
+        IF (.NOT. ListCheckPresent(CurrentModel % Components(i) % Values, &
+            'Circuit Voltage Variable Id')) CYCLE
+        CALL Fatal('PrepareFoilSkinStep','Transient foil sheet: the skin-effect state was not '// &
+            'advanced in the previous time step. Run the "CircuitsOutput" solver in every '// &
+            'time step (Exec Solver = Always).')
+      END DO
+    END IF
+    fskin_step = fskin_step + 1
 
     c = bdfw(1)/dt
 
@@ -304,6 +338,7 @@ CONTAINS
         FSkin(i) % x(k,j) = (ynew(j) + hx) * FSkin(i) % Minv(k)
       END DO
     END DO
+    FSkin(i) % AdvancedStep = fskin_step
   END SUBROUTINE AdvanceFoilSkin
 
   !----------------------------------------------------------------------------
