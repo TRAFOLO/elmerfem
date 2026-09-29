@@ -143,7 +143,7 @@ CONTAINS
     MinOutputLevel = ListGetInteger( OutputList,'Min Output Level', GotIt )
     MaxOutputLevel = ListGetInteger( OutputList,'Max Output Level', GotIt )
     IF ( .NOT. GotIt ) MaxOutputLevel = 10
-    DO i=0,31
+    DO i=0,SIZE(OutputLevelMask)-1
       OutputLevelMask(i) = ( i >= MinOutputLevel .AND. i <= MaxOutputLevel )
     END DO
     

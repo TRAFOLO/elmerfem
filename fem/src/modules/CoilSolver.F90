@@ -201,6 +201,7 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
   REAL(KIND=dp) :: CoilCenter(3), CoilNormal(3), CoilTangent1(3), CoilTangent2(3), &
       MinCurr(3),MaxCurr(3),TmpCurr(3)
   INTEGER, ALLOCATABLE :: CoilIndex(:)
+  INTEGER, ALLOCATABLE :: CoilCompInd(:)
   CHARACTER(LEN=MAX_NAME_LEN) :: CondName, EqName
   LOGICAL :: OneCut, TestCut
   CHARACTER(*), PARAMETER :: Caller = 'CoilSolver'
@@ -329,7 +330,9 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
   MaxNoCoils = MAX( 1, Model % NumberOfComponents ) 
   ALLOCATE( DesiredCoilCurrent( MaxNoCoils ), DesiredCurrentDensity(MaxNoCoils), &
       GotCurr( MaxNoCoils ), GotDens( MaxNoCoils), NormalizeCoil(MaxNoCoils), &
-      CoilHelicity(MaxNoCoils),CoilNormals(MaxNoCoils,3))
+      CoilHelicity(MaxNoCoils),CoilNormals(MaxNoCoils,3),CoilCompInd(MaxNoCoils))
+  ! 0 marks a coil defined by the Solver section rather than by a Component.
+  CoilCompInd = 0
   DesiredCoilCurrent = 0.0_dp
   GotCurr = .FALSE.
   GotDens = .FALSE.
@@ -374,6 +377,7 @@ SUBROUTINE CoilSolver( Model,Solver,dt,TransientSimulation )
         NoCoils = NoCoils - 1
         CYCLE
       END IF
+      CoilCompInd(NoCoils) = i
       
       IF( CoilClosed ) THEN
         SelectNodes = .TRUE.      
@@ -1942,6 +1946,7 @@ CONTAINS
     REAL(KIND=dp) :: InitialCurrent,possum, negsum, sumerr
     INTEGER :: i,j,k,Coil,nsize,posi,negi, sgn
     LOGICAL :: DoIt, Fail
+    CHARACTER(LEN=MAX_NAME_LEN) :: MultName
 
     CALL Info(Caller,'Performing scaling of potential for desired current for '//I2S(NoCoils)//' coil',Level=30)
     
@@ -2040,6 +2045,21 @@ CONTAINS
 
       WRITE( Message,'(A,ES12.4)') 'Coil potential multiplier:',Coeff
       CALL Info(Caller,Message,Level=5)
+
+      ! Closed-coil circuit components use this potential as a direction
+      ! field of unit circulation, so they have to be able to undo this scaling.
+      ! Part 2 (CoilPotB) is cut elsewhere and gets its own multiplier.
+      IF( Part == 2 ) THEN
+        MultName = 'Coil Potential Multiplier B'
+      ELSE
+        MultName = 'Coil Potential Multiplier'
+      END IF
+      IF( CoilCompInd(Coil) > 0 ) THEN
+        CALL ListAddConstReal( Model % Components(CoilCompInd(Coil)) % Values, &
+            MultName, Coeff )
+      ELSE
+        CALL ListAddConstReal( Params, MultName, Coeff )
+      END IF
 
       IF( NoCoils == 1 ) THEN
         PotVar % Values = Coeff * PotVar % Values     

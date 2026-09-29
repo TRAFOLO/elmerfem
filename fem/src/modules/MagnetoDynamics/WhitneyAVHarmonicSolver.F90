@@ -487,7 +487,7 @@ CONTAINS
               END IF
            CASE ('massive')
               CoilBody = .TRUE.
-           CASE ('foil winding','flat wire')
+           CASE ('foil winding','flat wire','foil sheet')
               CoilBody = .TRUE.
               CALL GetElementRotM(Element, RotM, n)
            CASE DEFAULT
@@ -745,6 +745,10 @@ BLOCK
 
       IF(ASSOCIATED(Electrodes)) THEN
         IF(ALL(Electrodes/=Element % BoundaryInfo % Constraint)) CYCLE
+      ELSE IF(GetLogical(CompParams,'Coil Closed',Found)) THEN
+        ! A closed coil has no electrodes, so without the list this
+        ! would pin the whole coil surface. One node is pinned below instead.
+        CYCLE
       END IF
 
       DO i=1,Element % Type % NumberOfNodes
@@ -752,6 +756,61 @@ BLOCK
         A % ConstrainedDOF(j:j+1) = .TRUE.
       END DO
     END DO
+
+    ! Fix the constant of the nodal potential of every closed coil at
+    ! exactly one node. The smallest global node index of the coil's bodies is
+    ! the same choice on every partition; all partitions holding it constrain
+    ! it, so the shared row stays consistent.
+    BLOCK
+      INTEGER, PARAMETER :: NoNode = HUGE(1)
+      INTEGER :: c, e, ni, gnode, MinGNode
+      TYPE(Element_t), POINTER :: BulkElement
+      LOGICAL :: Parallel
+
+      Parallel = ( ParEnv % PEs > 1 )
+      IF(Parallel) Parallel = ASSOCIATED(Mesh % ParallelInfo % GlobalDOFs)
+
+      DO c=1,Model % NumberOfComponents
+        CompParams => Model % Components(c) % Values
+        IF(.NOT.ASSOCIATED(CompParams)) CYCLE
+        IF(.NOT.GetLogical(CompParams,'Coil Closed',Found)) CYCLE
+        IF(.NOT.GetLogical(CompParams,'Activate Constraint',Found)) CYCLE
+        AutomaticBC = GetLogical(CompParams,'Automatic electrode BC',Found)
+        IF(.NOT.Found) AutomaticBC = .TRUE.
+        IF(.NOT.AutomaticBC) CYCLE
+        Electrodes => ListGetIntegerArray(CompParams,'Electrode Boundaries',Found)
+        IF(ASSOCIATED(Electrodes)) CYCLE
+
+        MinGNode = NoNode
+        DO e=1,GetNOFActive()
+          BulkElement => GetActiveElement(e)
+          IF(.NOT.ASSOCIATED(GetComponentParams(BulkElement),CompParams)) CYCLE
+          DO i=1,BulkElement % TYPE % NumberOfNodes
+            ni = BulkElement % NodeIndexes(i)
+            IF(Solver % Variable % Perm(ni) == 0) CYCLE
+            gnode = ni
+            IF(Parallel) gnode = Mesh % ParallelInfo % GlobalDOFs(ni)
+            MinGNode = MIN(MinGNode,gnode)
+          END DO
+        END DO
+
+        IF(ParEnv % PEs > 1) MinGNode = NINT(ParallelReduction(1._dp*MinGNode,1))
+        IF(MinGNode >= NoNode) CYCLE
+
+        DO ni=1,Mesh % NumberOfNodes
+          IF(Solver % Variable % Perm(ni) == 0) CYCLE
+          gnode = ni
+          IF(Parallel) gnode = Mesh % ParallelInfo % GlobalDOFs(ni)
+          IF(gnode /= MinGNode) CYCLE
+          j = 2*(Solver % Variable % Perm(ni)-1)+1
+          A % ConstrainedDOF(j:j+1) = .TRUE.
+          EXIT
+        END DO
+
+        CALL Info('WhitneyAVHarmonicSolver','Closed coil component '//I2S(c)//&
+            ': nodal potential pinned at global node '//I2S(MinGNode),Level=6)
+      END DO
+    END BLOCK
 END BLOCK
 
     CALL DefaultDirichletBCs()
@@ -1328,7 +1387,13 @@ END BLOCK
     StrandedHomogenization = .FALSE.
     UseRotM = .FALSE.
     IF(CoilBody) THEN
-      IF (CoilType == 'stranded') THEN 
+      ! 'foil sheet' uses the same homogenized complex reluctivity as
+      ! 'stranded': 1/mu0 on the stacking normal, the complex stack reluctivity
+      ! on the two components in the turn plane. Which tensor component is which
+      ! follows 'Stacking Direction' and is decided where the keywords are
+      ! written, in SetFoilSheetHarmonicMaterial, so nothing is direction aware
+      ! here.
+      IF (CoilType == 'stranded' .OR. CoilType == 'foil sheet') THEN
         CompParams => GetComponentParams( Element )
         StrandedHomogenization = GetLogical(CompParams, 'Homogenization Model', Found)
 
@@ -1356,6 +1421,7 @@ END BLOCK
 
           UseRotM = .TRUE.
         END IF
+        IF (CoilType == 'foil sheet') UseRotM = .TRUE.
       ELSE IF( CoilType == 'foil winding' .OR. CoilType == 'flat wire') THEN
         UseRotM = .TRUE.
       END IF
@@ -1589,7 +1655,8 @@ END BLOCK
               SUM(MATMUL(Nu, RotWBasis(j,:))*RotWBasis(i,:))*detJ*IP%s(t)
 
            ! Compute the conductivity term <j * omega * C A,eta> 
-           ! for stiffness matrix (anisotropy taken into account)
+           ! for stiffness matrix (anisotropy taken into account). C is zero for
+           ! a foil sheet, which carries no volumetric eddy current either.
            ! ----------------------------------------------------
            IF (CoilType /= 'stranded') DAMP(p,q) = DAMP(p,q) + &
                 SUM(MATMUL(C, WBasis(j,:))*WBasis(i,:))*detJ*IP % s(t)

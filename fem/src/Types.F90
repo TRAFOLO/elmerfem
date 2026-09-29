@@ -1003,6 +1003,17 @@ MODULE Types
     INTEGER :: nStack = 1, nAcross = 1
     LOGICAL :: StackAlongAlpha = .FALSE.
     REAL(KIND=dp) :: FillFactor = 1._dp
+    ! foil sheet: cells along Alpha, segments along Beta, foils per cell
+    INTEGER :: nCells = 1, nSegments = 1, foilsPerCell = 1
+    ! foil sheet: strand layers through the thickness of one turn. The cells
+    ! along the stack are subdivided nSublayers times, but the sub-layers of a
+    ! turn share its voltage dof and its current constraint.
+    INTEGER :: nSublayers = 1
+    ! foil sheet: scale of the strand current dofs, c_kj = SigmaRef * y_kj, so
+    ! that the unknowns y_kj are voltages like V_k instead of sigma*voltage
+    REAL(KIND=dp) :: SigmaRef = 1._dp
+    ! foil sheet: int |grad W|^2 dV per strand, used to detect empty strands
+    REAL(KIND=dp), ALLOCATABLE :: StrandWeight(:)
     INTEGER, POINTER :: ElBoundaries(:) => NULL()
     INTEGER, POINTER :: BodyIds(:) => NULL()
     CHARACTER(:), ALLOCATABLE :: CoilType, ComponentType
