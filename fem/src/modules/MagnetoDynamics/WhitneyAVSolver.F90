@@ -1507,6 +1507,10 @@ BLOCK
         IF(.NOT.ASSOCIATED(CompParams)) CYCLE
         IF(.NOT.GetLogical(CompParams,'Coil Closed',Found)) CYCLE
         IF(.NOT.GetLogical(CompParams,'Activate Constraint',Found)) CYCLE
+        ! The closed massive coil is driven only through its cut potential,
+        ! which the nodal constraint cancels: the solution would be zero.
+        IF(GetString(CompParams,'Coil Type',Found) == 'massive') CALL Fatal('WhitneyAVSolver', &
+            'Component '//I2S(c)//': "Activate Constraint" is not supported for a closed massive coil.')
         AutomaticBC = GetLogical(CompParams,'Automatic electrode BC',Found)
         IF(.NOT.Found) AutomaticBC = .TRUE.
         IF(.NOT.AutomaticBC) CYCLE
