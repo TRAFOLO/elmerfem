@@ -306,6 +306,11 @@ CONTAINS
 
     ALLOCATE( Active(ParEnv % PEs) )
 
+    ! A stale array of the wrong length would be written past its end by the
+    ! reduction below, so size it here rather than only on the first call.
+    IF ( ASSOCIATED(ParEnv % Active) ) THEN
+      IF ( SIZE(ParEnv % Active) /= ParEnv % PEs ) ParEnv % Active => NULL()
+    END IF
     IF ( .NOT. ASSOCIATED(ParEnv % Active) ) THEN
       ALLOCATE( ParEnv % Active(ParEnv % PEs) )
     END IF

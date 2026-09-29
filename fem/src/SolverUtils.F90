@@ -19989,15 +19989,38 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
       CALL Info( Caller,'Trying to keep previous collection matrix structures',Level=10)
     END IF
   ELSE
-    IF(ASSOCIATED(Solver % ParEnv % Active)) THEN
-      DEALLOCATE(Solver % ParEnv % Active)
-      Solver % ParEnv % Active => Null()
-    END IF
+    ! These two arrays are shared: ParEnv_Common is structure copied into a
+    ! solver's ParEnv (ParallelUtils) and back (SolveEquations), so several
+    ! ParEnv_t hold the same target. Freeing it here left the others pointing
+    ! at freed memory, and their readers (SParIterActive, FindActivePEs) test
+    ! ASSOCIATED, which a dangling pointer passes: they then write PEs logicals
+    ! through it into whatever the allocator has since handed out. Free only
+    ! what nobody else references - the same guard FreeMatrix already uses.
+    BLOCK
+      LOGICAL :: Shared
+      INTEGER :: si
+      IF(ASSOCIATED(Solver % ParEnv % Active)) THEN
+        Shared = ASSOCIATED(ParEnv_Common % Active, Solver % ParEnv % Active)
+        DO si=1,CurrentModel % NumberOfSolvers
+          IF(CurrentModel % Solvers(si) % SolverId == Solver % SolverId) CYCLE
+          IF(ASSOCIATED(Solver % ParEnv % Active, &
+              CurrentModel % Solvers(si) % ParEnv % Active)) Shared = .TRUE.
+        END DO
+        IF(.NOT. Shared) DEALLOCATE(Solver % ParEnv % Active)
+        Solver % ParEnv % Active => Null()
+      END IF
 
-    IF(ASSOCIATED(Solver % ParEnv % IsNeighbour)) THEN
-      DEALLOCATE(Solver % ParEnv % IsNeighbour)
-      Solver % ParEnv % Isneighbour => Null()
-    END IF
+      IF(ASSOCIATED(Solver % ParEnv % IsNeighbour)) THEN
+        Shared = ASSOCIATED(ParEnv_Common % IsNeighbour, Solver % ParEnv % IsNeighbour)
+        DO si=1,CurrentModel % NumberOfSolvers
+          IF(CurrentModel % Solvers(si) % SolverId == Solver % SolverId) CYCLE
+          IF(ASSOCIATED(Solver % ParEnv % IsNeighbour, &
+              CurrentModel % Solvers(si) % ParEnv % IsNeighbour)) Shared = .TRUE.
+        END DO
+        IF(.NOT. Shared) DEALLOCATE(Solver % ParEnv % IsNeighbour)
+        Solver % ParEnv % Isneighbour => Null()
+      END IF
+    END BLOCK
   END IF
 
   IF(.NOT.ASSOCIATED(CollectionMatrix)) THEN
