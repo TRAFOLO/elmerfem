@@ -1,0 +1,240 @@
+! Edgewise flat wire sheet whose turn width varies around the loop (DEV-1531).
+! Four turns with a round inner boundary (radius 8 mm) and a square outer one
+! (half side 14 mm): a turn is 6 mm wide at the middle of a side and 11.8 mm
+! across a corner. Pitch 2 mm with 1 mm copper (fill factor 0.5), 58 MS/m.
+! Half model like the other flat wire sheet tests: cut through the middle of
+! two sides, electrodes on the symmetry plane z = 0, coil axis y, 50 Hz, 1 A rms.
+!
+! The strand current density c_kj grad(Beta) x grad(Alpha) keeps the strand
+! current along the turn wherever its width changes, so the published DC
+! resistance r_component(1) is taken from the strands themselves: the segments
+! of a turn in parallel, the turns in series. On this mesh it is 6.8577E-04
+! Ohm, which is also the DC loss of the model (the same SIF at 0 Hz gives
+! 2 x eddy current power = 6.8577E-04), while N_j^2 V/(ff sigma f) with the
+! 6 x 8 mm electrode section gave 1.1192E-03 Ohm. Four explicit copper plates
+! give 6.8226E-04 Ohm (StatCurrentSolve, mesh converged).
+!
+! Pins r_component(1) and the eddy current power of the half model at 50 Hz,
+! the same numbers with 1 and 4 partitions.
+Check Keywords "Warn"
+INCLUDE sif/square-circuits.definitions
+INCLUDE square/mesh.names
+Header
+  Mesh DB "." "square"
+End
+Constants
+  Permittivity of Vacuum = 8.8542e-12
+End
+Simulation
+  Max Output Level = 3
+  Coordinate System = Cartesian 3D
+  Coordinate Scaling = 0.001
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+  Frequency = Real 50
+End
+Solver 1  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-12
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Alpha
+  Variable = Alpha
+End
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-12
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Beta
+  Variable = Beta
+End
+Solver 3  !---- CoordinateTransform, RotMSolver
+  Exec Solver = Before All
+  Equation = Transformation matrix
+  Procedure = "CoordinateTransform" "RotMSolver"
+  Variable = -nooutput Dummy
+  Optimize Bandwidth = False
+  Polar Decomposition Determinant Tolerance = Real 1.0e-9
+  Polar Decomposition Max Iterations = Integer 100
+  Exported Variable 1 = -nooutput RotM E[RotM E:9]
+  Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+  Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+  Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+  Discontinuous Galerkin = True
+End
+Solver 4  !---- WPotentialSolver, Wsolve
+  Exec Solver = Before All
+  Procedure = "WPotentialSolver" "Wsolve"
+  Equation = "Wire direction"
+  Variable = W
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Max Iterations = 10000
+  Linear System Convergence Tolerance = 1.0e-12
+  Linear System Preconditioning = ILU0
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+End
+Solver 5  !---- CircuitsAndDynamics, CircuitsAndDynamicsHarmonic
+  Exec Solver = Always
+  Equation = Circuits
+  Variable = X
+  No Matrix = Logical True
+  Procedure = "CircuitsAndDynamics" "CircuitsAndDynamicsHarmonic"
+End
+Solver 6  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
+  Exec Solver = Always
+  Equation = "MGDynamics"
+  Variable = "A[A re:1 A im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Export Lagrange Multiplier = Logical True
+  Linear System Symmetric = Logical True
+  Linear System Complex = Logical True
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BicgstabL
+  BicgStabL Polynomial Degree = 4
+  Linear System Preconditioning = Circuit
+  Linear System Convergence Tolerance = 1.0e-11
+  Linear System Abort Not Converged = False
+  Linear System Max Iterations = 5000
+  Linear System Residual Output = 1000
+  Steady State Convergence Tolerance = 1e-08
+End
+Solver 7  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
+  Exec Solver = Always
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "A"
+  Linear System Symmetric = True
+  Calculate Current Density = Logical True
+  Calculate Homogenization Loss = Logical True
+  Calculate Nodal Fields = Logical False
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 1000
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 8  !---- CircuitsAndDynamics, CircuitsOutput
+  Exec Solver = Always
+  Equation = Circuits Output
+  Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 9  !---- SaveData, SaveScalars: the published DC resistance
+  Exec Solver = Always
+  Equation = "sv rdc"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = square/dat/rdc.dat
+  Show Norm Name = String "res: r_component(1)"
+End
+Solver 10  !---- SaveData, SaveScalars: the 50 Hz loss
+  Exec Solver = Always
+  Equation = "sv loss"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = square/dat/loss.dat
+  Show Norm Name = String "res: eddy current power"
+End
+Equation 1
+  Active Solvers(2) = 6 7
+End
+Equation 2
+  Active Solvers(10) = 1 2 3 4 5 6 7 8 9 10
+End
+Material 1  !---- air
+  Name = air
+  Electric Conductivity = 0
+  Relative Permeability = 1
+  Relative Permittivity = 1
+End
+Material 2  !---- the winding block
+  Name = copper block
+  Electric Conductivity = 29e6
+  Relative Permeability = 1
+  Relative Permittivity = 1
+End
+Body 1  !---- coil
+  Name = coil
+  Target Bodies(1) = $ coil
+  Equation = 2
+  Material = 2
+  Body Force = 1
+  Alpha reference (3) = Real 1 0 0
+  Beta reference (3) = Real 0 1 0
+End
+Body 2  !---- air
+  Name = air
+  Target Bodies(1) = $ air
+  Equation = 1
+  Material = 1
+End
+Component 1  !---- coil
+  Name = String coil
+  Master Bodies(1) = Integer 1
+  Coil Type = String foil sheet
+  Stacking Direction = String beta
+  Number of Turns = Real 4
+  Foil Thickness = Real 1.0e-3
+  Fill Factor = Real 0.5
+  Sheet Conductivity = Real 58e6
+  Sheet Cells = Integer 4
+  Sheet Segments = Integer 8
+  Sheet Sublayers = Integer 1
+  Electrode Boundaries(2) = Integer 2 3
+  Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
+  Homogenization Model = Logical True
+End
+Body Force 1  !---- Circuit
+  Name = "Circuit"
+  S1 Re = Real 1.41421356237
+  S1 Im = Real 0
+End
+Boundary Condition 1  !---- symmetry plane and outer boundary
+  Target Boundaries(2) = $ sym outer
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 2  !---- electrode
+  Target Boundaries(1) = $ coil_left
+  W = Real 1
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 3  !---- electrode
+  Target Boundaries(1) = $ coil_right
+  W = Real 0
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 4  !---- square outer faces
+  Target Boundaries(1) = $ coil_outer
+  Alpha = Real 0
+End
+Boundary Condition 5  !---- round inner face
+  Target Boundaries(1) = $ coil_inner
+  Alpha = Real 1
+End
+Boundary Condition 6  !---- bottom of the stack
+  Target Boundaries(1) = $ coil_bottom
+  Beta = Real 0
+End
+Boundary Condition 7  !---- top of the stack
+  Target Boundaries(1) = $ coil_top
+  Beta = Real 1
+End
+Solver 9 :: Reference Norm = Real 6.857740563201E-04
+Solver 9 :: Reference Norm Tolerance = Real 1E-8
+Solver 10 :: Reference Norm = Real 3.430199272019E-04
+Solver 10 :: Reference Norm Tolerance = Real 1E-7
+$fprintf( stderr, "TEST CASE 1\n");
