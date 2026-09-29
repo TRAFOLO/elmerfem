@@ -1689,6 +1689,21 @@ Component:Logical:   'Coil Closed'
 Component:Real:      'Coil Potential Multiplier'
 Component:Real:      'Coil Potential Multiplier B'
 Component:Real:      'Coil Circulation'
+! Keep the Dirichlet layer of the cut at one crossing of the cut plane, the
+! piece with the largest global node index or, with "Select Min Coil Cut", the
+! smallest, unless that piece is no clean cross section of the wire: another
+! one of the half plane is kept then, or without "Coil Tangent" other half
+! planes are taken. A closed solid coil of several turns needs it: it is then
+! cut once and carries one series current. The CoilSolver writes "Single Coil
+! Cut" into the Component it applied it to, which is where the circuits solver
+! reads it.
+Solver:Logical:      'Single Coil Cut'
+Solver:Logical:      'Select Min Coil Cut'
+Component:Logical:   'Single Coil Cut'
+! Relative difference of the loop current the two branches of the cut of a
+! closed massive coil may show before the run stops. Unset, it is half the
+! share of the loop resistance the two cut layers take, between 1 % and 3 %.
+Component:Real:      'Coil Cut Disagreement Limit'
 ! Flat wire winding (per-turn cell model).
 Component:Integer:   'Turns Across'
 Component:String:    'Stacking Direction'
