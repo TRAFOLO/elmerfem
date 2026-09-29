@@ -46,6 +46,13 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   warns if it is explicitly off or if `Electrode Boundaries` is missing. Nothing changes at
   `omega > 0` unless the keyword is set. Tests: `circuits_harmonic_foil_dc`,
   `circuits_harmonic_flatwire_dc`.
+- The Lagrange multiplier separated from the collection solution (`SolveWithLinearRestriction`)
+  follows `Nonlinear System Relaxation Factor` (and `Nonlinear System Relaxation After`) unless
+  `Lagrange Multiplier Relaxation Factor` is given, so the exported circuit voltages and currents
+  are the same iterate as the relaxed field. Before, `MagnetoDynamicsCalcFields` combined a relaxed
+  `A` with an unrelaxed `V` in `E = -i*omega*A - V*grad W` of massive coils, and the current density
+  and Joule loss of a nonlinear loop that stopped before convergence came out orders of magnitude
+  too large. Test: `circuits_harmonic_massive_relaxation`.
 
 ## Building
 
