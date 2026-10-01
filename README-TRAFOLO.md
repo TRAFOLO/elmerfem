@@ -11,6 +11,11 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
 
 - `htc_udf` — temperature-dependent convective heat-transfer-coefficient BC.
 - `ProcessFields`, `LoadFields` — transient winding-homogenization post-processing.
+  `ProcessFields` scales the core loss (harmonic and transient GSE/iGSE) per node by the optional
+  Material keyword `Harmonic Loss Temperature Factor` (e.g. `Variable Temperature` LUA), evaluated
+  at the current Temperature field. The Steinmetz thermal correction can't go into the
+  `Harmonic Loss * Coefficient` keywords: CalcFields reads them with `ListGetFun(..., Freq)`, which
+  evaluates any dependency at the frequency.
 - `StatElecSolveVec` — thin-layer Robin coefficient fix (missing `Eps0`).
 - Transient winding homogenization (CalcFields effective conductivity).
 - Windows SIF path handling fix in the Lua layer.
