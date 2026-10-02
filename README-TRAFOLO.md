@@ -58,8 +58,14 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   frequency (one at DC, one per turn in transient or several-frequency runs), not a count tied to the
   mesh: on coarse meshes that lumped all turns into one cell and lost the gap fringing loss
   (DEV-1545). `Sheet Sublayers = 0` keeps its sub-layers on elements up to one skin depth and,
-  while an element spans at most 2.3 sub-layers, up to two (DEV-1545). Tests:
+  while an element spans at most 2.3 sub-layers, up to two (DEV-1545). The coil body may mix
+  linear tetrahedra and linear wedges (prism boundary layers): each wedge is cut into three
+  tetrahedra for the strand geometry and its strand source is mapped to the wedge edges, so it stays
+  exactly divergence free (DEV-1545; it stopped with a Fatal before). Tests:
   `circuits_harmonic_foilsheet*`, `circuits_transient_foilsheet*`.
+- `WPotentialSolver` (`Wsolve`) grows its rotation matrix buffer to the element it saves; on a
+  mesh mixing element types (tetrahedra and wedges in a coil) it wrote past the buffer left by the
+  last assembled element and corrupted the heap (DEV-1545).
 - The Lagrange multiplier separated from the collection solution (`SolveWithLinearRestriction`)
   follows `Nonlinear System Relaxation Factor` (and `Nonlinear System Relaxation After`) unless
   `Lagrange Multiplier Relaxation Factor` is given, so the exported circuit voltages and currents

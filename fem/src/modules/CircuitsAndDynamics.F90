@@ -1895,8 +1895,9 @@ CONTAINS
     LOGICAL :: stat, PiolaVersion, Found
     TYPE(Nodes_t), SAVE :: Nodes
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww
+    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww, cpl(nd)
     TYPE(FoilSheetQuad_t) :: FsQ
+    LOGICAL :: Classic
     INTEGER :: CompId
     LOGICAL :: SkinLadder, HaveSkinState
     REAL(KIND=dp) :: Kfac
@@ -1923,6 +1924,7 @@ CONTAINS
     ASolver => CurrentModel % Asolver
     IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')
     CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+    Classic = .NOT. PiolaVersion .AND. EdgeBasisDegree <= 1
 
     PS => Asolver % Variable % Perm
     CM => CurrentModel % CircuitMatrix
@@ -1971,9 +1973,10 @@ CONTAINS
       stat = ElementInfo( Element, Nodes, uu, vv, ww, &
           detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
       wgt = FoilSheetQuadWeight(FsQ, t, detJ)
-      gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+      gradv = FoilSheetQuadGradient(FsQ, t, WBase, dBasisdx, nn)
       ! Euler potential strand direction; see the harmonic Add_foil_sheet.
-      tvec = FoilSheetDirection(sStack, sAcross, dBasisdx, nn, DirSign)
+      tvec = FoilSheetQuadDirection(FsQ, t, sStack, sAcross, dBasisdx, nn, DirSign)
+      CALL FoilSheetQuadCoupling(FsQ, t, tvec, WBasis, ncdofs, Classic, cpl)
 
       CALL FoilSheetQuadStrand(FsQ, Comp, t, sStack, sAcross, Basis, nn, kc, js)
       IF (kc <= 0) CYCLE
@@ -2013,13 +2016,13 @@ CONTAINS
         IF ( TransientSimulation ) THEN
           ! -(d/dt a, t) in the strand equation
           ! -----------------------------------
-          val = -wgt*SUM(Wbasis(j,:)*tvec)/dt
+          val = -wgt*cpl(j)/dt
           CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(q)), sdofscl * tscl * val)
           CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + sdofscl * pPOT(q) * val
         END IF
         ! Source of the a equation: SigmaRef y_kj (t, a')
         ! -----------------------------------------------
-        val = Comp % SigmaRef * wgt*SUM(tvec*Wbasis(j,:))
+        val = Comp % SigmaRef * wgt*cpl(j)
         CALL AddToMatrixElement(CM, PS(Indexes(q)), sdof+nm, val / sdofscl)
       END DO
     END DO
@@ -3659,8 +3662,9 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname
     TYPE(VariableHandle_t), SAVE :: Wvec_h
     REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww
+    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww, cpl(nd)
     TYPE(FoilSheetQuad_t) :: FsQ
+    LOGICAL :: Classic
     TYPE(Variable_t), POINTER, SAVE :: Wpot
     LOGICAL, SAVE :: First = .TRUE., CoilUseWvec0 = .FALSE.
 
@@ -3677,6 +3681,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     ASolver => CurrentModel % Asolver
     IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')
     CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+    Classic = .NOT. PiolaVersion .AND. EdgeBasisDegree <= 1
 
     PS => Asolver % Variable % Perm
     CM => CurrentModel % CircuitMatrix
@@ -3706,13 +3711,14 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (CoilUseWvec) THEN
         gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = 3 )
       ELSE
-        gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+        gradv = FoilSheetQuadGradient(FsQ, t, WBase, dBasisdx, nn)
       END IF
 
       ! Euler potential strand direction: exactly solenoidal and exactly
       ! tangential to the strand interfaces, which are iso-surfaces of the
       ! stacking and across fields. See FoilSheetDirection.
-      tvec = FoilSheetDirection(sStack, sAcross, dBasisdx, nn, DirSign)
+      tvec = FoilSheetQuadDirection(FsQ, t, sStack, sAcross, dBasisdx, nn, DirSign)
+      CALL FoilSheetQuadCoupling(FsQ, t, tvec, WBasis, ncdofs, Classic, cpl)
 
       sigma_s = SUM( Tcoef(3,3,1:nn) * Basis(1:nn) )
       IF (sigma_s == CMPLX(0._dp,0._dp,KIND=dp)) &
@@ -3752,11 +3758,11 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         q = j + nn
         ! -(i omega a, t) in the strand equation
         ! --------------------------------------
-        val = -im * Omega * wgt*SUM(Wbasis(j,:)*tvec)
+        val = -im * Omega * wgt*cpl(j)
         CALL AddToCmplxMatrixElement(CM, sdof+nm, ReIndex(PS(Indexes(q))), REAL(val), AIMAG(val))
         ! Source of the a equation: SigmaRef y_kj (t, a')
         ! -----------------------------------------------
-        val = Comp % SigmaRef * wgt*SUM(tvec*Wbasis(j,:))
+        val = Comp % SigmaRef * wgt*cpl(j)
         CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(q))), sdof+nm, REAL(val), AIMAG(val))
       END DO
     END DO
