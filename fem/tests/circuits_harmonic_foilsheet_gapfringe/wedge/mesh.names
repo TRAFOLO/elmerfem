@@ -1,0 +1,13 @@
+! ----- names for bodies -----
+$ core = 1
+$ air = 2
+$ coil = 3
+! ----- names for boundaries -----
+$ coil_phi0 = 1
+$ coil_phi1 = 2
+$ coil_inner = 3
+$ coil_outer = 4
+$ coil_bottom = 5
+$ coil_top = 6
+$ sym = 7
+$ outer = 8

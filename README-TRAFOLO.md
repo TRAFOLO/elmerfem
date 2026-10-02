@@ -51,6 +51,15 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   warns if it is explicitly off or if `Electrode Boundaries` is missing. Nothing changes at
   `omega > 0` unless the keyword is set. Tests: `circuits_harmonic_foil_dc`,
   `circuits_harmonic_flatwire_dc`.
+- `Coil Type = foil sheet` — foil and flat wire windings as conducting sheets (`CircuitsAndDynamics`,
+  3D, harmonic and transient), split into `Sheet Cells` turn cells along the stack and `Sheet
+  Segments` strands across the turn width. `Sheet Cells = 0` takes the fewest cells, a divisor of the
+  turn count, at most `FOIL_SHEET_CELL_SKIN_DEPTHS` (0.55) stack skin depths thick at the run
+  frequency (one at DC, one per turn in transient or several-frequency runs), not a count tied to the
+  mesh: on coarse meshes that lumped all turns into one cell and lost the gap fringing loss
+  (DEV-1545). `Sheet Sublayers = 0` keeps its sub-layers on elements up to one skin depth and,
+  while an element spans at most 2.3 sub-layers, up to two (DEV-1545). Tests:
+  `circuits_harmonic_foilsheet*`, `circuits_transient_foilsheet*`.
 - The Lagrange multiplier separated from the collection solution (`SolveWithLinearRestriction`)
   follows `Nonlinear System Relaxation Factor` (and `Nonlinear System Relaxation After`) unless
   `Lagrange Multiplier Relaxation Factor` is given, so the exported circuit voltages and currents

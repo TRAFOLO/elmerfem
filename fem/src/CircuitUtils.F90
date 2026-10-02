@@ -1975,6 +1975,18 @@ MODULE CircuitsMod
   REAL(KIND=dp), PARAMETER :: MinCutBranchMismatch = 0.01_dp, &
       MaxCutBranchMismatch = 0.03_dp, CutLayerShareMismatch = 0.5_dp
 
+  ! Thickest automatic foil sheet cell in stack skin depths (FoilSheetAutoCells).
+  ! Lumping error ~ (cell/delta_h)^2: 2.9 % at 0.55 on a 1 mm gap next to the winding, 0.5 % at 0.52
+  ! on a gapped foil reactor, where the cells of 0.4 cost up to twice the solve time.
+  REAL(KIND=dp), PARAMETER :: FOIL_SHEET_CELL_SKIN_DEPTHS = 0.55_dp
+
+  ! Automatic sub-layers on elements past one skin depth (FoilSheetAutoSublayers) stay while the
+  ! element is at most 2 skin depths and 2.3 sub-layers thick. 40 pot-core points vs FEMM: kept
+  ! within 6 %, vetoed ones 6-54 % high or past two skin depths; one layer per turn was 10-23 %
+  ! low on edgewise flat wire between one and two skin depths.
+  REAL(KIND=dp), PARAMETER :: FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS = 2.0_dp
+  REAL(KIND=dp), PARAMETER :: FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS = 2.3_dp
+
 CONTAINS 
 
 !------------------------------------------------------------------------------
@@ -3267,11 +3279,21 @@ END FUNCTION isComponentName
 !>   Number of Turns        number of foils N, must be an integer
 !>   Stacking Direction     alpha (default, foils and flatwise flat wire) or
 !>                          beta (edgewise flat wire): the field across the stack
-!>   Sheet Cells            cells along the stacking direction (default N), must divide N
+!>   Sheet Cells            cells along the stacking direction (default N), must divide N;
+!>                          0 = the fewest cells at most FOIL_SHEET_CELL_SKIN_DEPTHS
+!>                          stack skin depths thick at the run frequency, 1 at DC, N
+!>                          in transient or several-frequency runs. Not sized by the
+!>                          mesh: the clipping integrates any cell exactly, and cells
+!>                          that lump turns past the skin depth lose the gap fringing
+!>                          loss (DEV-1545)
 !>   Sheet Segments         strands across the stack per cell (default 16)
 !>   Sheet Sublayers        strand layers through the thickness of one turn
 !>                          (default 1 = one uniform current layer per turn,
-!>                          0 = chosen from t/delta at the run frequency)
+!>                          0 = chosen from t/delta at the run frequency, kept on
+!>                          elements up to one skin depth and, while an element
+!>                          spans at most FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS
+!>                          sub-layers, up to FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS;
+!>                          one layer per turn on a coarser mesh)
 !>   Electrode Area         or Electrode Boundaries, as for foil winding; neither
 !>                          enters the DC resistance, which comes from the strands
 !>   Sigma 33 [im]          complex sheet conductivity (harmonic)
@@ -3450,45 +3472,22 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> How many strand layers one turn needs at this frequency, and whether the mesh
-!> can carry them. One uniform current layer per turn is exact while the turn is
-!> thin against the skin depth; past that the current redistributes through the
-!> thickness and the single layer under-predicts Rac, so the layer count follows
-!> the thickness in skin depths.
-!>
-!> Sub-layers only pay off when the FE field resolves the flux between the
-!> bands, which is what drives the current from one band to the next. The
-!> criterion is therefore the element size against the skin depth, not the band
-!> thickness against the element: on a coarser mesh the layers are vetoed and
-!> the single-layer model, with its own known error, is the better of the two.
+!> True when the simulation carries several frequencies: a 'Frequency' array, or
+!> a frequency that is a function (of time, say), in the Simulation section or
+!> in the AV solver. The automatic layout fixes the circuit dof layout and is
+!> resolved once at init, so it cannot follow such a run.
 !------------------------------------------------------------------------------
-  FUNCTION FoilSheetAutoSublayers(tfoil, sgm, elemH) RESULT(m)
+  FUNCTION FoilSheetSeveralFrequencies() RESULT(FreqVaries)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    REAL(KIND=dp) :: tfoil, sgm, elemH
-    INTEGER :: m
-    REAL(KIND=dp) :: omega, delta, ratio, mu0
+    LOGICAL :: FreqVaries
     REAL(KIND=dp), POINTER :: fptr(:,:)
-    LOGICAL :: Found, FreqVaries
+    LOGICAL :: Found
     TYPE(ValueList_t), POINTER :: Lst
     TYPE(ValueListEntry_t), POINTER :: ptr
     CHARACTER(LEN=17), PARAMETER :: FreqKey(2) = ['Frequency        ', 'Angular Frequency']
     INTEGER :: il, ik
 
-    mu0 = 4.0d-7 * PI
-
-    ! Transient has no single frequency to size the layers with, and the strand
-    ! skin ladder and the reluctivity ladder are derived for one layer per turn.
-    IF (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient') THEN
-      m = 1
-      CALL Info('Circuits_Init', &
-          'Foil sheet transient: automatic sub-layers resolve to one layer per turn', Level=3)
-      RETURN
-    END IF
-
-    ! The count fixes the circuit dof layout, so it is resolved once at init.
-    ! A SIF that scans several frequencies, as a 'Frequency' array or as a
-    ! frequency that is a function (of time, say), keeps the first one's choice.
     FreqVaries = .FALSE.
     DO il = 1, 2
       IF (il == 1) THEN
@@ -3509,7 +3508,113 @@ END FUNCTION isComponentName
       fptr => ListGetConstRealArray(CurrentModel % Simulation, 'Frequency', Found)
       IF (Found) FreqVaries = SIZE(fptr) > 1
     END IF
-    IF (FreqVaries) CALL Warn('Circuits_Init', &
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetSeveralFrequencies
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> How many turn cells the stack needs: 'Sheet Cells = 0'. The turns of a cell
+!> share one current distribution across the width, which holds while the cell
+!> is thin against the depth over which the stack screens a field, the stack
+!> skin depth delta_h = sqrt(2/(omega mu0 sigma ff)) of the conductor smeared
+!> over the pitch. So the count is the smallest divisor of N whose cells are at
+!> most FOIL_SHEET_CELL_SKIN_DEPTHS delta_h thick, N if none is. It is not tied
+!> to the mesh (DEV-1545): the strand clipping integrates a cell of any
+!> thickness exactly, while cells sized by the element lumped every turn of a
+!> default mesh into one cell, which cannot screen the gap fringing flux. DC
+!> takes one cell. A transient or several-frequency run has no single delta_h
+!> and a conductivity that cannot be evaluated gives none, so those take one
+!> cell per turn, which is right at any frequency.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetAutoCells(CompParams, nfoils, blkT) RESULT(nCells)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: nfoils
+    REAL(KIND=dp) :: blkT
+    INTEGER :: nCells
+    REAL(KIND=dp) :: omega, sgm, ff, deltaH, mu0
+    INTEGER :: d
+    LOGICAL :: Found, Varies
+    CHARACTER(LEN=32) :: DepthStr
+
+    mu0 = 4.0d-7 * PI
+    nCells = nfoils
+    IF (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient') THEN
+      DepthStr = 'none (transient)'
+    ELSE IF (FoilSheetSeveralFrequencies()) THEN
+      DepthStr = 'none (several frequencies)'
+    ELSE
+      omega = GetAngularFrequency(Found = Found)
+      IF (.NOT. Found) omega = 0._dp
+      IF (omega <= 0._dp) THEN
+        nCells = 1
+        DepthStr = 'infinite (DC)'
+      ELSE
+        sgm = FoilSheetBlockConductivity(CompParams, Found, Varies)
+        IF (.NOT. Found .OR. sgm <= 0._dp) THEN
+          DepthStr = 'none (no conductivity)'
+        ELSE
+          ff = GetConstReal(CompParams, 'Fill Factor', Found)
+          IF (.NOT. Found .OR. ff <= 0._dp) ff = 1._dp
+          deltaH = SQRT(2._dp / (omega * mu0 * sgm * ff))
+          DO d = 1, nfoils - 1
+            IF (MOD(nfoils, d) == 0 .AND. blkT / d <= FOIL_SHEET_CELL_SKIN_DEPTHS * deltaH) THEN
+              nCells = d
+              EXIT
+            END IF
+          END DO
+          WRITE(DepthStr,'(ES10.4,A)') deltaH, ' m'
+        END IF
+      END IF
+    END IF
+
+    WRITE(Message,'(A,A,A,ES10.4,A,I0,A)') 'Foil sheet automatic cells: stack skin depth ', &
+        TRIM(DepthStr), ', cell thickness ', blkT / nCells, ' m, ', nfoils / nCells, ' turns per cell'
+    CALL Info('Circuits_Init', Message, Level=3)
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetAutoCells
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> How many strand layers one turn needs at this frequency, and whether the mesh
+!> can carry them. One uniform current layer per turn is exact while the turn is
+!> thin against the skin depth; past that the current redistributes through the
+!> thickness and the single layer under-predicts Rac, so the layer count follows
+!> the thickness in skin depths.
+!>
+!> Sub-layers only pay off when the FE field resolves the flux between the
+!> bands, which is what drives the current from one band to the next. So they
+!> stay on elements up to one skin depth, and up to
+!> FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS skin depths while an element spans
+!> at most FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS sub-layers of t/m (DEV-1545, one
+!> rule for foil and flat wire): on a coarser mesh the layers are vetoed and
+!> the single-layer model, with its own known error, is the better of the two.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetAutoSublayers(tfoil, sgm, elemH) RESULT(m)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: tfoil, sgm, elemH
+    INTEGER :: m
+    REAL(KIND=dp) :: omega, delta, ratio, mu0, tsub
+    LOGICAL :: Found
+    CHARACTER(LEN=48) :: Limit
+
+    mu0 = 4.0d-7 * PI
+
+    ! Transient has no single frequency to size the layers with, and the strand
+    ! skin ladder and the reluctivity ladder are derived for one layer per turn.
+    IF (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient') THEN
+      m = 1
+      CALL Info('Circuits_Init', &
+          'Foil sheet transient: automatic sub-layers resolve to one layer per turn', Level=3)
+      RETURN
+    END IF
+
+    ! The count fixes the circuit dof layout, so it is resolved once at init.
+    ! A SIF that scans several frequencies, as a 'Frequency' array or as a
+    ! frequency that is a function (of time, say), keeps the first one's choice.
+    IF (FoilSheetSeveralFrequencies()) CALL Warn('Circuits_Init', &
         'Foil sheet: "Sheet Sublayers = 0" is resolved once at init, but this '// &
         'simulation carries several frequencies; give "Sheet Sublayers" explicitly.')
     omega = GetAngularFrequency(Found = Found)
@@ -3533,11 +3638,21 @@ END FUNCTION isComponentName
     CALL Info('Circuits_Init', Message, Level=3)
 
     IF (m > 1 .AND. elemH > delta) THEN
-      WRITE(Message,'(A,F8.3,A)') 'Foil sheet: the coil mesh is too coarse for sub-layers, ' // &
-          'element / skin depth = ', elemH / delta, &
-          '; using one layer per turn and its own skin factor'
-      CALL Info('Circuits_Init', Message, Level=3)
-      m = 1
+      tsub = tfoil / m
+      Limit = ' '
+      IF (elemH > FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS * delta) THEN
+        Limit = 'over the skin depth limit'
+      ELSE IF (elemH > FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS * tsub) THEN
+        Limit = 'over one skin depth and the sub-layer limit'
+      END IF
+      IF (Limit /= ' ') THEN
+        WRITE(Message,'(A,F8.3,A,F8.3,A)') 'Foil sheet: the coil mesh is too coarse for sub-layers ' // &
+            '(element '//TRIM(Limit)//'), element / skin depth = ', elemH / delta, &
+            ', element / sub-layer thickness = ', elemH / tsub, &
+            '; using one layer per turn and its own skin factor'
+        CALL Info('Circuits_Init', Message, Level=3)
+        m = 1
+      END IF
     END IF
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetAutoSublayers
@@ -3804,7 +3919,7 @@ END FUNCTION isComponentName
     INTEGER :: CompInd, ExtMaster
     INTEGER :: nfoils, nLayers
     REAL(KIND=dp) :: tfoil, sgm, elemH, tsub
-    LOGICAL :: Found, FoundS, Varies
+    LOGICAL :: Found, FoundS, Varies, AutoCells, AutoSegments, AutoSublayers
     CHARACTER(LEN=MAX_NAME_LEN) :: str
 
     IF (CoordinateSystemDimension() /= 3) &
@@ -3832,7 +3947,8 @@ END FUNCTION isComponentName
     END SELECT
     CALL ListAddLogical(CompParams, 'Foil Sheet Stack Along Alpha', Comp % StackAlongAlpha)
 
-    ! 0 asks the kernel to pick the layout from the block geometry and the mesh.
+    ! 0 asks the kernel to pick the layout: the cells from the stack skin depth,
+    ! the segments from the mesh.
     Comp % nCells = GetInteger(CompParams, 'Sheet Cells', Found)
     IF (.NOT. Found) Comp % nCells = nfoils
     Comp % nSegments = GetInteger(CompParams, 'Sheet Segments', Found)
@@ -3847,6 +3963,9 @@ END FUNCTION isComponentName
     ! the turn thickness, so it is resolved once the geometry is known.
     Comp % nSublayers = GetInteger(CompParams, 'Sheet Sublayers', Found)
     IF (.NOT. Found) Comp % nSublayers = 1
+    AutoCells = Comp % nCells <= 0
+    AutoSegments = Comp % nSegments <= 0
+    AutoSublayers = Comp % nSublayers <= 0
 
     ! The block geometry is also what a missing 'Foil Thickness' is derived
     ! from, so measure it whenever anything is left to the kernel. This has to
@@ -3876,15 +3995,26 @@ END FUNCTION isComponentName
       ELSE
         tfoil = GetConstReal(CompParams, 'Foil Thickness', Found)
         sgm = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
-        IF (.NOT. (Found .AND. FoundS)) CALL Fatal('Circuits_Init', &
-            'Foil sheet: "Sheet Sublayers = 0" needs the thickness and "Sheet Conductivity"!')
-        elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
-        IF (.NOT. Found) elemH = 0._dp
-        Comp % nSublayers = FoilSheetAutoSublayers(tfoil, sgm, elemH)
+        IF (Found .AND. FoundS) THEN
+          elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
+          IF (.NOT. Found) elemH = 0._dp
+          Comp % nSublayers = FoilSheetAutoSublayers(tfoil, sgm, elemH)
+        ELSE
+          ! No t/delta without both. One layer per turn needs neither when
+          ! 'Sigma 33' is given explicitly, and without it the run stops later
+          ! on the missing sheet material, so automatic mode does not stop here.
+          Comp % nSublayers = 1
+          CALL Info('Circuits_Init', 'Foil sheet: "Sheet Sublayers = 0" without the turn '// &
+              'thickness or an evaluable "Sheet Conductivity", one layer per turn', Level=3)
+        END IF
       END IF
     END IF
     IF (Comp % nSublayers < 1) &
         CALL Fatal('Circuits_Init','Foil sheet: Sheet Sublayers must be positive!')
+    IF (AutoCells .OR. AutoSegments .OR. AutoSublayers) THEN
+      CALL FoilSheetFitPieceBuffer(Comp, CompParams, nfoils, AutoCells, AutoSegments, AutoSublayers)
+      Comp % foilsPerCell = nfoils / Comp % nCells
+    END IF
     IF (Comp % nSublayers > 1 .AND. Comp % foilsPerCell > 1) &
         CALL Fatal('Circuits_Init','Foil sheet: cells lump several turns, sub-layers off; '// &
             'raise "Sheet Cells" to one cell per turn or set "Sheet Sublayers = 1"!')
@@ -3976,14 +4106,16 @@ END FUNCTION isComponentName
 !> Beta are laid out and on which of the two is the stacking direction, so fix
 !> the sign once per component from int grad(W) . (gStack x gAcross) dV.
 !------------------------------------------------------------------------------
-!> Choose the strand layout from the block geometry and the mesh, for
-!> 'Sheet Cells' or 'Sheet Segments' given as 0, and derive a missing
-!> 'Foil Thickness'. The SIF writer knows the coil but not the element size,
-!> while the kernel can measure both: the stacking and across fields run from 0
-!> to 1 over the block, so the block extents are the inverses of the mean
-!> magnitudes of their gradients, and the mean element size is the cube root of
-!> the mean element volume. A strand narrower than about one and a half elements
-!> cannot be resolved, which sets the cap.
+!> Choose the strand layout for 'Sheet Cells' or 'Sheet Segments' given as 0,
+!> and derive a missing 'Foil Thickness'. The SIF writer knows the coil but not
+!> the element size, while the kernel can measure both: the stacking and across
+!> fields run from 0 to 1 over the block, so the block extents are the inverses
+!> of the mean magnitudes of their gradients, and the mean element size is the
+!> cube root of the mean element volume. The cells follow the stack skin depth
+!> at the run frequency, not the mesh (FoilSheetAutoCells, DEV-1545): the strand
+!> clipping integrates a cell of any thickness exactly, and cells sized by the
+!> element lumped the turns of a default mesh into one cell and lost the gap
+!> fringing loss.
 !------------------------------------------------------------------------------
   SUBROUTINE FoilSheetAutoLayout(Comp, CompParams, nfoils)
 !------------------------------------------------------------------------------
@@ -3999,7 +4131,7 @@ END FUNCTION isComponentName
     REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sStack(:), sAcross(:)
     REAL(KIND=dp) :: detJ, ga(3), gb(3), wgp, vol, sga, sgb, sh, ve, blkT, blkH, elemH
     REAL(KIND=dp) :: ff, tfoil
-    INTEGER :: e, n, gp, nmax, nel, nCellAuto, nSegAuto
+    INTEGER :: e, n, gp, nmax, nel, nSegAuto
     LOGICAL :: stat, Found
 
     nmax = CurrentModel % Mesh % MaxElementNodes
@@ -4042,16 +4174,6 @@ END FUNCTION isComponentName
     blkH = vol / sgb
     elemH = sh / nel
 
-    ! The cap is on the TURN cells only. Sub-layers subdivide a turn further on
-    ! purpose, so they are never traded away against the mesh here.
-    IF (Comp % nCells <= 0) THEN
-      nCellAuto = MIN(nfoils, MAX(1, FLOOR(blkT / (1.5_dp * elemH))))
-      DO WHILE (nCellAuto > 1 .AND. MOD(nfoils, nCellAuto) /= 0)
-        nCellAuto = nCellAuto - 1
-      END DO
-      Comp % nCells = nCellAuto
-    END IF
-
     ! V_e^(1/3) is about half a tetrahedron's edge length, so one strand per
     ! V_e^(1/3) is about half an element edge. Strands narrower than an element
     ! are legitimate: FoilSheetPieces clips them exactly, so each still carries
@@ -4084,6 +4206,7 @@ END FUNCTION isComponentName
     WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES11.4)') 'Foil sheet block: stack extent ', blkT, &
         ', across extent ', blkH, ', mean element size ', elemH
     CALL Info('Circuits_Init', Message, Level=3)
+    IF (Comp % nCells <= 0) Comp % nCells = FoilSheetAutoCells(CompParams, nfoils, blkT)
     WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Foil sheet automatic layout: Sheet Cells = ', &
         Comp % nCells, ', Sheet Segments = ', Comp % nSegments, ' (', nel, ' block elements)'
     CALL Info('Circuits_Init', Message, Level=3)
@@ -4091,6 +4214,101 @@ END FUNCTION isComponentName
     DEALLOCATE(Basis, dBasisdx, sStack, sAcross)
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetAutoLayout
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Keep an automatic layout inside the strand piece buffer. The cells no longer
+!> follow the element size, so a coarse element can straddle many strands, and
+!> FoilSheetPieces is fatal past MaxFoilSheetPieces pieces of one element. The
+!> pieces of a linear tet are bounded by the strands its nodal stack and across
+!> coordinates span, times the sub-layers, plus with sub-layers the two
+!> insulation margins per cell that the post processing adds. While the largest
+!> bound is over the buffer, give up what costs the least accuracy first:
+!> automatic sub-layers, then half of the automatic segments (not below 4), then
+!> the automatic cells to the next smaller divisor of N. Explicit keywords are
+!> never altered; the Fatal stays for those.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetFitPieceBuffer(Comp, CompParams, nfoils, AutoCells, AutoSegments, &
+      AutoSublayers)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: nfoils
+    LOGICAL :: AutoCells, AutoSegments, AutoSublayers
+
+    TYPE(Element_t), POINTER :: Element
+    REAL(KIND=dp), ALLOCATABLE :: sStack(:), sAcross(:), sRange(:,:)
+    INTEGER :: e, n, nmax, ntet, nel, bound, bound0, c0, s0, l0
+
+    nmax = CurrentModel % Mesh % MaxElementNodes
+    ALLOCATE(sStack(nmax), sAcross(nmax), sRange(4, MAX(1, GetNOFActive())))
+    ntet = 0
+    nel = 0
+    DO e = 1, GetNOFActive()
+      Element => GetActiveElement(e)
+      IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+      nel = nel + 1
+      n = GetElementNOFNodes(Element)
+      IF (n /= 4 .OR. Element % TYPE % ElementCode /= 504) CYCLE
+      CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, n, sStack, sAcross)
+      ntet = ntet + 1
+      sRange(:,ntet) = [MINVAL(sStack(1:4)), MAXVAL(sStack(1:4)), &
+          MINVAL(sAcross(1:4)), MAXVAL(sAcross(1:4))]
+    END DO
+    nel = ParallelReduction(nel)
+
+    c0 = Comp % nCells; s0 = Comp % nSegments; l0 = Comp % nSublayers
+    bound0 = MaxPieces()
+    bound = bound0
+    DO WHILE (bound > MaxFoilSheetPieces)
+      IF (AutoSublayers .AND. Comp % nSublayers > 1) THEN
+        Comp % nSublayers = 1
+      ELSE IF (AutoSegments .AND. Comp % nSegments > 4) THEN
+        Comp % nSegments = MAX(4, Comp % nSegments / 2)
+      ELSE IF (AutoCells .AND. Comp % nCells > 1 .AND. Comp % nSublayers == 1) THEN
+        Comp % nCells = Comp % nCells - 1
+        DO WHILE (MOD(nfoils, Comp % nCells) /= 0)
+          Comp % nCells = Comp % nCells - 1
+        END DO
+      ELSE
+        EXIT
+      END IF
+      bound = MaxPieces()
+    END DO
+    DEALLOCATE(sStack, sAcross, sRange)
+
+    IF (Comp % nCells == c0 .AND. Comp % nSegments == s0 .AND. Comp % nSublayers == l0) RETURN
+    WRITE(Message,'(A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0)') &
+        'Foil sheet automatic layout lowered from ', c0, ' x ', l0, ' x ', s0, ' to ', &
+        Comp % nCells, ' x ', Comp % nSublayers, ' x ', Comp % nSegments, &
+        ' (cells x sub-layers x segments): an element straddled up to ', bound0, &
+        ' strand pieces, the buffer holds ', MaxFoilSheetPieces
+    CALL Warn('Circuits_Init', Message)
+    WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Foil sheet automatic layout: Sheet Cells = ', &
+        Comp % nCells, ', Sheet Segments = ', Comp % nSegments, ' (', nel, ' block elements)'
+    CALL Info('Circuits_Init', Message, Level=3)
+
+  CONTAINS
+
+    FUNCTION MaxPieces() RESULT(np)
+      INTEGER :: np, i, k1, k2, j1, j2
+
+      np = 0
+      DO i = 1, ntet
+        CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, sRange(1,i), sRange(3,i), k1, j1)
+        CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, sRange(2,i), sRange(4,i), k2, j2)
+        IF (Comp % nSublayers > 1) THEN
+          np = MAX(np, (k2-k1+1) * (Comp % nSublayers * (j2-j1+1) + 2))
+        ELSE
+          np = MAX(np, (k2-k1+1) * (j2-j1+1))
+        END IF
+      END DO
+      np = ParallelReduction(np, 2)
+    END FUNCTION MaxPieces
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetFitPieceBuffer
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
