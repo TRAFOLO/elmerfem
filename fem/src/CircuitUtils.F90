@@ -966,8 +966,43 @@ CONTAINS
 
   
 !------------------------------------------------------------------------------
+!> Values of a direction field ('Alpha' or 'Beta') at the nodes of an element.
+!> Direction Method = distance leaves an elemental copy ('Alpha Direction') that
+!> holds each body's own value at the nodes touching windings share, and that is
+!> read. The copy of the Laplace method comes from a solve per body and differs
+!> from the nodal field in the last digits, so there the nodal field is read, as
+!> before.
+!------------------------------------------------------------------------------
+  SUBROUTINE GetDirectionLocalField(x, FieldName, Element)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: x(:)
+    CHARACTER(LEN=*) :: FieldName
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Variable_t), POINTER :: Var
+    LOGICAL :: Found
+
+    Var => VariableGet(CurrentModel % Mesh % Variables, FieldName)
+    IF (ASSOCIATED(Var)) THEN
+      IF (ASSOCIATED(Var % Solver)) THEN
+        IF (ListGetString(Var % Solver % Values, 'Direction Method', Found) == 'distance') THEN
+          CALL GetLocalSolution(x, FieldName//' Direction', UElement=Element, Found=Found)
+          IF (Found) RETURN
+        END IF
+      END IF
+    END IF
+    CALL GetLocalSolution(x, FieldName, UElement=Element)
+!------------------------------------------------------------------------------
+  END SUBROUTINE GetDirectionLocalField
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Nodal values of the stacking coordinate and the across coordinate of a
-!> flat wire element, taken from the Alpha and Beta direction fields.
+!> flat wire or foil sheet element, taken from the Alpha and Beta direction
+!> fields (GetDirectionLocalField) and mapped onto 0..1 over the element's
+!> component. Windings that touch are numbered as a chain, winding k spanning
+!> k-1..k, so the component's own ends, published by SetSheetFieldRanges, are
+!> subtracted here; for a winding spanning 0..1 the map is the identity.
 !------------------------------------------------------------------------------
   SUBROUTINE GetFlatWireLocalFields(StackAlongAlpha, Element, n, sStack, sAcross)
 !------------------------------------------------------------------------------
@@ -977,9 +1012,19 @@ CONTAINS
     INTEGER :: n
     REAL(KIND=dp) :: sStack(:), sAcross(:)
     REAL(KIND=dp) :: alpha(n), beta(n)
+    TYPE(ValueList_t), POINTER :: CompParams
+    REAL(KIND=dp), POINTER :: Rng(:)
+    LOGICAL :: Found
 
-    CALL GetLocalSolution(alpha, 'Alpha', UElement=Element)
-    CALL GetLocalSolution(beta, 'Beta', UElement=Element)
+    CALL GetDirectionLocalField(alpha, 'Alpha', Element)
+    CALL GetDirectionLocalField(beta, 'Beta', Element)
+    CompParams => GetComponentParams(Element)
+    IF (ASSOCIATED(CompParams)) THEN
+      Rng => ListGetConstRealArray1(CompParams, 'Foil Sheet Alpha Range', Found)
+      IF (Found) alpha = (alpha - Rng(1)) / (Rng(2) - Rng(1))
+      Rng => ListGetConstRealArray1(CompParams, 'Foil Sheet Beta Range', Found)
+      IF (Found) beta = (beta - Rng(1)) / (Rng(2) - Rng(1))
+    END IF
     IF (StackAlongAlpha) THEN
       sStack(1:n) = alpha
       sAcross(1:n) = beta
@@ -2322,6 +2367,14 @@ MODULE CircuitsMod
   REAL(KIND=dp), PARAMETER :: FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS = 2.0_dp
   REAL(KIND=dp), PARAMETER :: FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS = 2.3_dp
 
+  ! Ends of a sheet winding's direction field (SetSheetFieldRanges) this close to
+  ! an integer are that integer, the face value of the chain numbering: a Laplace
+  ! field overshoots its Dirichlet values on meshes without a discrete maximum
+  ! principle, and the winding still ends at those values.
+  REAL(KIND=dp), PARAMETER :: SHEET_FIELD_END_SNAP = 0.05_dp
+  ! A narrower span is a direction field that is missing or constant over the winding.
+  REAL(KIND=dp), PARAMETER :: SHEET_FIELD_MIN_SPAN = 1.0e-6_dp
+
 CONTAINS 
 
 !------------------------------------------------------------------------------
@@ -2750,6 +2803,12 @@ END FUNCTION isComponentName
           END BLOCK
         END IF
       END IF
+
+      ! The ends of a sheet winding's direction fields, before anything reads them.
+      SELECT CASE (Comp % CoilType)
+      CASE ('flat wire', 'foil sheet')
+        CALL SetSheetFieldRanges(Comp, CompParams)
+      END SELECT
 
       ! Must precede the coil type init, which already reads the
       ! direction field (ComputeFoilSheetSign).
@@ -4668,6 +4727,66 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Ends of the Alpha and Beta values over a sheet winding (flat wire or foil
+!> sheet), read as GetFlatWireLocalFields reads them and published as
+!> 'Foil Sheet Alpha Range' and 'Foil Sheet Beta Range' for it, which maps the
+!> winding onto 0..1 with them. Touching
+!> windings are numbered as a chain, winding k spanning k-1..k of Alpha (or of
+!> Beta) so that the face they share has one value; a single winding spans 0..1
+!> and keeps its values. Every partition must call this for every such component.
+!------------------------------------------------------------------------------
+  SUBROUTINE SetSheetFieldRanges(Comp, CompParams)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    TYPE(Element_t), POINTER :: Element
+    REAL(KIND=dp), ALLOCATABLE :: Vloc(:)
+    REAL(KIND=dp) :: Raw(2), Ends(2,1)
+    INTEGER :: e, n, f, k
+    CHARACTER(LEN=5), PARAMETER :: FieldName(2) = ['Alpha', 'Beta ']
+!------------------------------------------------------------------------------
+
+    ALLOCATE(Vloc(CurrentModel % Mesh % MaxElementNodes))
+    DO f = 1, 2
+      Raw = [HUGE(1._dp), -HUGE(1._dp)]
+      DO e = 1, GetNOFActive()
+        Element => GetActiveElement(e)
+        IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+        n = GetElementNOFNodes(Element)
+        CALL GetDirectionLocalField(Vloc, TRIM(FieldName(f)), Element)
+        Raw(1) = MIN(Raw(1), MINVAL(Vloc(1:n)))
+        Raw(2) = MAX(Raw(2), MAXVAL(Vloc(1:n)))
+      END DO
+      Raw(1) = ParallelReduction(Raw(1), 1)
+      Raw(2) = ParallelReduction(Raw(2), 2)
+
+      ! The zero added keeps a snapped -0 out of the map.
+      Ends(:,1) = Raw
+      DO k = 1, 2
+        IF (ABS(Ends(k,1) - ANINT(Ends(k,1))) <= SHEET_FIELD_END_SNAP) &
+            Ends(k,1) = ANINT(Ends(k,1)) + 0._dp
+      END DO
+
+      WRITE(Message,'(A,ES14.7,A,ES14.7,A,ES14.7,A,ES14.7,A)') 'Component '// &
+          I2S(Comp % ComponentId)//' '//TRIM(FieldName(f))//' spans ', Ends(1,1), &
+          ' .. ', Ends(2,1), ' (nodal ', Raw(1), ' .. ', Raw(2), ')'
+      CALL Info('Circuits_Init', Message, Level=5)
+      IF (.NOT. (Ends(2,1) - Ends(1,1) >= SHEET_FIELD_MIN_SPAN)) THEN
+        CALL Fatal('Circuits_Init', 'Component '//I2S(Comp % ComponentId)// &
+            ': the direction field "'//TRIM(FieldName(f))//'" is missing or constant '// &
+            'over the winding. '//TRIM(Message))
+      END IF
+      CALL ListAddConstRealArray(CompParams, 'Foil Sheet '//TRIM(FieldName(f))//' Range', &
+          2, 1, Ends)
+    END DO
+    DEALLOCATE(Vloc)
+!------------------------------------------------------------------------------
+  END SUBROUTINE SetSheetFieldRanges
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 ! Mean circulation of a closed coil's direction field over its current loops.
 ! With t = grad(Alpha) x grad(Beta) the volume integral of u.t is the
 ! double integral of the loop circulation of u over (Alpha, Beta), both of which
@@ -4706,8 +4825,8 @@ END FUNCTION isComponentName
       n = GetElementNOFNodes(Element)
       CALL GetElementNodes(Nodes, Element)
       CALL GetCoilWBase(Element, n, CompParams, Wloc)
-      CALL GetScalarLocalSolution(Aloc, 'Alpha', UElement=Element)
-      CALL GetScalarLocalSolution(Bloc, 'Beta', UElement=Element)
+      ! Mapped onto 0..1, so that a winding of a touching chain gives its mean too.
+      CALL GetFlatWireLocalFields(.TRUE., Element, n, Aloc, Bloc)
       IP = GaussPoints(Element)
       DO gp = 1, IP % n
         stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
