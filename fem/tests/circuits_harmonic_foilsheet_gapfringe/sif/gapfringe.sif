@@ -1,0 +1,245 @@
+! Foil winding beside a gapped core post at 10 kHz with the automatic foil
+! sheet layout on a coarse coil mesh (DEV-1545). FEMM reference, every foil
+! drawn: Fr = 6.662 at 10 kHz, 1.512 at 500 Hz, R_dc = 1.9090 mOhm.
+! Geometry: round post r 39.09 mm (mu_r 2500, gaps 4+8+8+8+4 mm), 15 Al foils 0.5 mm on a 1 mm pitch at r 49.09-64.09 mm, 180 mm high, 31.04 MS/m (75 C), outer limb at r 99.09 mm.
+! 10 deg wedge of the axisymmetric model, 5 A rms. Coil elements about 8.5 mm,
+! air graded down to 1.75 mm in the gaps.
+!
+! "Sheet Cells = 0" follows the stack skin depth: cells at most 0.55 delta_h =
+! 0.70 mm thick, so each of the 15 turns gets a cell of its own and screens
+! the gap fringing flux (15 cells x 40 segments, eddy current power 8.7844E-03
+! W, Fr 6.630, -0.5 %). The mesh-sized rule of before chose 1 cell on this
+! mesh: 5.1313E-03 W, Fr 3.873, -42 %.
+!
+! Pins r_component(1) and the eddy current power of the wedge, the same numbers
+! with 1 and 4 partitions.
+Check Keywords "Warn"
+INCLUDE sif/gapfringe-circuits.definitions
+INCLUDE wedge/mesh.names
+Header
+  Mesh DB "." "wedge"
+End
+Constants
+  Permittivity of Vacuum = 8.8542e-12
+End
+Simulation
+  Max Output Level = 3
+  Coordinate System = Cartesian 3D
+  Coordinate Scaling = 0.001
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+  Frequency = Real 10000
+End
+Solver 1  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Alpha
+  Variable = Alpha
+  Direction Method = String "distance"
+End
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Beta
+  Variable = Beta
+End
+Solver 3  !---- CoordinateTransform, RotMSolver
+  Exec Solver = Before All
+  Equation = Transformation matrix
+  Procedure = "CoordinateTransform" "RotMSolver"
+  Variable = -nooutput Dummy
+  Optimize Bandwidth = False
+  Polar Decomposition Determinant Tolerance = Real 1.0e-9
+  Polar Decomposition Max Iterations = Integer 100
+  Exported Variable 1 = -nooutput RotM E[RotM E:9]
+  Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+  Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+  Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+  Discontinuous Galerkin = True
+End
+Solver 4  !---- WPotentialSolver, Wsolve
+  Exec Solver = Before All
+  Procedure = "WPotentialSolver" "Wsolve"
+  Equation = "Wire direction"
+  Variable = W
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Max Iterations = 50000
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Preconditioning = None
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+End
+Solver 5  !---- CircuitsAndDynamics, CircuitsAndDynamicsHarmonic
+  Exec Solver = Always
+  Equation = Circuits
+  Variable = X
+  No Matrix = Logical True
+  Procedure = "CircuitsAndDynamics" "CircuitsAndDynamicsHarmonic"
+End
+Solver 6  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
+  Exec Solver = Always
+  Equation = "MGDynamics"
+  Variable = "A[A re:1 A im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Export Lagrange Multiplier = Logical True
+  Linear System Symmetric = Logical True
+  Linear System Complex = Logical True
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BicgstabL
+  BicgStabL Polynomial Degree = 4
+  Linear System Preconditioning = Circuit
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Abort Not Converged = False
+  Linear System Max Iterations = 5000
+  Linear System Residual Output = 1000
+  Steady State Convergence Tolerance = 1e-09
+End
+Solver 7  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
+  Exec Solver = Always
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "A"
+  Linear System Symmetric = True
+  Calculate Current Density = Logical True
+  Calculate Homogenization Loss = Logical True
+  Calculate Nodal Fields = Logical False
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 1000
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 8  !---- CircuitsAndDynamics, CircuitsOutput
+  Exec Solver = Always
+  Equation = Circuits Output
+  Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 9  !---- SaveData, SaveScalars: the published DC resistance
+  Exec Solver = Always
+  Equation = "sv rdc"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = wedge/dat/rdc.dat
+  Show Norm Name = String "res: r_component(1)"
+End
+Solver 10  !---- SaveData, SaveScalars: the 10 kHz loss of the wedge
+  Exec Solver = Always
+  Equation = "sv loss"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = wedge/dat/loss.dat
+  Show Norm Name = String "res: eddy current power"
+End
+Equation 1
+  Active Solvers(2) = 6 7
+End
+Equation 2
+  Active Solvers(10) = 1 2 3 4 5 6 7 8 9 10
+End
+Material 1  !---- core: linear, non-conducting
+  Name = core
+  Relative Permeability = 2500
+  Electric Conductivity = 0
+End
+Material 2  !---- air
+  Name = air
+  Relative Permeability = 1
+  Electric Conductivity = 0
+End
+Material 3  !---- the winding block, aluminium at 75 C
+  Name = aluminium
+  Relative Permeability = 1
+  Electric Conductivity = 31041580.89748868
+End
+Body 1
+  Name = core
+  Target Bodies(1) = $ core
+  Equation = 1
+  Material = 1
+End
+Body 2
+  Name = air
+  Target Bodies(1) = $ air
+  Equation = 1
+  Material = 2
+End
+Body 3
+  Name = coil
+  Target Bodies(1) = $ coil
+  Equation = 2
+  Material = 3
+  Body Force = 1
+  Alpha reference (3) = Real 1 0 0
+  Beta reference (3) = Real 0 1 0
+End
+Component 1  !---- coil, the automatic layout as TRAFOLO writes it
+  Name = String coil
+  Master Bodies(1) = Integer 3
+  Coil Type = String foil sheet
+  Number of Turns = Real 15
+  Foil Thickness = Real 0.5e-3
+  Fill Factor = Real 0.5
+  Sheet Conductivity = Real 31041580.89748868
+  Sheet Cells = Integer 0
+  Sheet Segments = Integer 0
+  Sheet Sublayers = Integer 0
+  Electrode Boundaries(2) = Integer 2 3
+  Circuit Equation Voltage Factor = Real 0.027777777777777776 !10 deg wedge
+  Homogenization Model = Logical True
+End
+Body Force 1  !---- Circuit: 5 A rms
+  Name = "Circuit"
+  S1 Re = Real 7.0710678118654755
+  S1 Im = Real 0
+End
+Boundary Condition 1  !---- wedge side planes and outer boundary: flux parallel
+  Target Boundaries(2) = $ sym outer
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 2  !---- electrode (cut face phi = 0)
+  Target Boundaries(1) = $ coil_phi0
+  W = Real 1
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 3  !---- electrode (cut face phi = 10 deg)
+  Target Boundaries(1) = $ coil_phi1
+  W = Real 0
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 4  !---- inner face of the stack
+  Target Boundaries(1) = $ coil_inner
+  Alpha = Real 0
+End
+Boundary Condition 5  !---- outer face of the stack
+  Target Boundaries(1) = $ coil_outer
+  Alpha = Real 1
+End
+Boundary Condition 6  !---- bottom of the foils
+  Target Boundaries(1) = $ coil_bottom
+  Beta = Real 0
+End
+Boundary Condition 7  !---- top of the foils
+  Target Boundaries(1) = $ coil_top
+  Beta = Real 1
+End
+Solver 9 :: Reference Norm = Real 1.907856112629E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-8
+Solver 10 :: Reference Norm = Real 8.784436100518E-03
+Solver 10 :: Reference Norm Tolerance = Real 1E-6

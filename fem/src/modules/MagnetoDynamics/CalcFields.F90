@@ -1714,7 +1714,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            IF (FsK > 0) THEN
              FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
              FsK = FoilSheetLayerCell(FsSublayers, FsK)
-             wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
+             wvec = FoilSheetQuadDirection(FsQ, j, alpha, beta, dBasisdx, n, FsSign)
              ! J = -SigmaRef y_kj t (the circuit sign convention of the flat wire
              ! and foil winding kernels), so E = J/sigma_s.
              IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
@@ -1861,7 +1861,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            IF (FsK > 0) THEN
              FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
              FsK = FoilSheetLayerCell(FsSublayers, FsK)
-             wvec = FoilSheetDirection(alpha, beta, dBasisdx, n, FsSign)
+             wvec = FoilSheetQuadDirection(FsQ, j, alpha, beta, dBasisdx, n, FsSign)
              IF (REAL(CMat_ip(3,3)) /= 0._dp) &
                  E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / FsDofScale &
                      / REAL(CMat_ip(3,3)) * wvec

@@ -55,15 +55,72 @@ MODULE CircuitUtils
     REAL(KIND=dp), PARAMETER :: ConstantStepTolerance = 1.0e-6_dp
 
     !> Element quadrature of the foil sheet strand integrals, shared by the
-    !> harmonic and the transient kernel and by the strand checks.
+    !> harmonic and the transient kernel and by the strand checks. A linear tet
+    !> keeps its pieces as barycentric centroids and volume fractions; a linear
+    !> wedge (Wedge) as local coordinates (pRef), physical volumes (pAbs), the
+    !> virtual tetrahedron they lie in (pSub, centroid in pBary) and its strand
+    !> direction (pT), with the nodes (WTv), nodal gradients (WGrad) and signed
+    !> volumes (WVol) of the three virtual tetrahedra and the global edge signs
+    !> (WFlip), see FoilSheetWedgePieces. The wedge arrays are only defined for
+    !> wedges.
     TYPE FoilSheetQuad_t
-      LOGICAL :: Exact = .TRUE.
+      LOGICAL :: Exact = .TRUE., Wedge = .FALSE.
       INTEGER :: nItem = 0
       INTEGER :: pCell(MaxFoilSheetPieces) = 0, pSeg(MaxFoilSheetPieces) = 0
       REAL(KIND=dp) :: pVol(MaxFoilSheetPieces) = 0._dp
       REAL(KIND=dp) :: pBary(4,MaxFoilSheetPieces) = 0._dp
+      REAL(KIND=dp) :: pRef(3,MaxFoilSheetPieces), pAbs(MaxFoilSheetPieces), &
+          pT(3,MaxFoilSheetPieces)
+      INTEGER :: pSub(MaxFoilSheetPieces), WTv(4,3), WFlip(9)
+      REAL(KIND=dp) :: WGrad(3,4,3), WVol(3)
       TYPE(GaussIntegrationPoints_t) :: IP
     END TYPE FoilSheetQuad_t
+
+    ! Line integrals of the nine reference edge functions of a linear wedge
+    ! (GetEdgeBasis, edge i oriented as in its edge map) along the straight
+    ! reference segment from vertex a to vertex b, times two: WedgePairInt2(i,a,b).
+    ! Along a wedge edge only its own function counts (+-1), along a diagonal of a
+    ! quadrilateral face each edge of that face gives +-1/2. The covariant map
+    ! makes them the same on every wedge (FoilSheetWedgeCoupling). A constant, so
+    ! that threaded assembly needs no first-use initialisation and no lock.
+    INTEGER, PARAMETER, PRIVATE :: WedgePairInt2(9,6,6) = RESHAPE([ &
+         0,  0,  0,  0,  0,  0,  0,  0,  0, &  ! a = 1, b = 1
+        -2,  0,  0,  0,  0,  0,  0,  0,  0, &  ! a = 2, b = 1
+         0,  0,  2,  0,  0,  0,  0,  0,  0, &  ! a = 3, b = 1
+         0,  0,  0,  0,  0,  0, -2,  0,  0, &  ! a = 4, b = 1
+        -1,  0,  0, -1,  0,  0, -1, -1,  0, &  ! a = 5, b = 1
+         0,  0,  1,  0,  0,  1, -1,  0, -1, &  ! a = 6, b = 1
+         2,  0,  0,  0,  0,  0,  0,  0,  0, &  ! a = 1, b = 2
+         0,  0,  0,  0,  0,  0,  0,  0,  0, &  ! a = 2, b = 2
+         0, -2,  0,  0,  0,  0,  0,  0,  0, &  ! a = 3, b = 2
+         1,  0,  0,  1,  0,  0, -1, -1,  0, &  ! a = 4, b = 2
+         0,  0,  0,  0,  0,  0,  0, -2,  0, &  ! a = 5, b = 2
+         0, -1,  0,  0, -1,  0,  0, -1, -1, &  ! a = 6, b = 2
+         0,  0, -2,  0,  0,  0,  0,  0,  0, &  ! a = 1, b = 3
+         0,  2,  0,  0,  0,  0,  0,  0,  0, &  ! a = 2, b = 3
+         0,  0,  0,  0,  0,  0,  0,  0,  0, &  ! a = 3, b = 3
+         0,  0, -1,  0,  0, -1, -1,  0, -1, &  ! a = 4, b = 3
+         0,  1,  0,  0,  1,  0,  0, -1, -1, &  ! a = 5, b = 3
+         0,  0,  0,  0,  0,  0,  0,  0, -2, &  ! a = 6, b = 3
+         0,  0,  0,  0,  0,  0,  2,  0,  0, &  ! a = 1, b = 4
+        -1,  0,  0, -1,  0,  0,  1,  1,  0, &  ! a = 2, b = 4
+         0,  0,  1,  0,  0,  1,  1,  0,  1, &  ! a = 3, b = 4
+         0,  0,  0,  0,  0,  0,  0,  0,  0, &  ! a = 4, b = 4
+         0,  0,  0, -2,  0,  0,  0,  0,  0, &  ! a = 5, b = 4
+         0,  0,  0,  0,  0,  2,  0,  0,  0, &  ! a = 6, b = 4
+         1,  0,  0,  1,  0,  0,  1,  1,  0, &  ! a = 1, b = 5
+         0,  0,  0,  0,  0,  0,  0,  2,  0, &  ! a = 2, b = 5
+         0, -1,  0,  0, -1,  0,  0,  1,  1, &  ! a = 3, b = 5
+         0,  0,  0,  2,  0,  0,  0,  0,  0, &  ! a = 4, b = 5
+         0,  0,  0,  0,  0,  0,  0,  0,  0, &  ! a = 5, b = 5
+         0,  0,  0,  0, -2,  0,  0,  0,  0, &  ! a = 6, b = 5
+         0,  0, -1,  0,  0, -1,  1,  0,  1, &  ! a = 1, b = 6
+         0,  1,  0,  0,  1,  0,  0,  1,  1, &  ! a = 2, b = 6
+         0,  0,  0,  0,  0,  0,  0,  0,  2, &  ! a = 3, b = 6
+         0,  0,  0,  0,  0, -2,  0,  0,  0, &  ! a = 4, b = 6
+         0,  0,  0,  0,  2,  0,  0,  0,  0, &  ! a = 5, b = 6
+         0,  0,  0,  0,  0,  0,  0,  0,  0 &  ! a = 6, b = 6
+        ], [9,6,6])
 
 CONTAINS
 
@@ -1695,6 +1752,253 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> The three tetrahedra a linear wedge is cut into for its strand geometry. Each
+!> quadrilateral face is split along the diagonal from its vertex with the
+!> smallest global node number (Dompierre et al. 1999), so that two wedges that
+!> share a face, also across partitions, cut it the same way and the virtual
+!> tetrahedra are conforming with each other and with the tetrahedra around
+!> them. Tv(:,s) are the local node numbers of virtual tetrahedron s.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetWedgeTets(Element, Tv)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: Tv(4,3)
+
+    ! Local node order that puts the smallest global node first, keeping the
+    ! wedge's orientation: rotations of the triangles, or a swap of them.
+    INTEGER, PARAMETER :: Relabel(6,6) = RESHAPE([ &
+        1,2,3,4,5,6,  2,3,1,5,6,4,  3,1,2,6,4,5, &
+        4,6,5,1,3,2,  5,4,6,2,1,3,  6,5,4,3,2,1], [6,6])
+    TYPE(Mesh_t), POINTER :: Mesh
+    INTEGER :: g(6), v(6)
+
+    Mesh => CurrentModel % Mesh
+    g = Element % NodeIndexes(1:6)
+    IF (ASSOCIATED(Mesh % ParallelInfo % GInterface)) g = Mesh % ParallelInfo % GlobalDOFs(g)
+    v = Relabel(:, MINLOC(g, 1))
+    IF (MIN(g(v(2)), g(v(6))) < MIN(g(v(3)), g(v(5)))) THEN
+      Tv(:,1) = [v(1), v(2), v(3), v(6)]
+      Tv(:,2) = [v(1), v(2), v(6), v(5)]
+      Tv(:,3) = [v(1), v(5), v(6), v(4)]
+    ELSE
+      Tv(:,1) = [v(1), v(2), v(3), v(5)]
+      Tv(:,2) = [v(1), v(5), v(3), v(6)]
+      Tv(:,3) = [v(1), v(5), v(6), v(4)]
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetWedgeTets
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Exact strand decomposition of a linear wedge: the pieces of its three virtual
+!> tetrahedra (FoilSheetWedgeTets), each clipped by FoilSheetPieces with the
+!> wedge's nodal stack and across values at its four vertices. The stack and
+!> across fields are taken linear on every virtual tetrahedron, so the strand
+!> interfaces are planes there, the pieces tile the straight tetrahedra, and the
+!> strand direction t = grad(stack) x grad(across) is constant on each of them
+!> with a continuous normal component across their faces, which keeps the
+!> strand source solenoidal as on a tet mesh. A piece keeps its physical
+!> volume, its centroid in the wedge's local coordinates (the map is affine on a
+!> reference sub-tetrahedron) and the t of its tetrahedron.
+!>
+!> On a strongly warped wedge one virtual tetrahedron can come out inverted, its
+!> orientation opposite to the wedge's: the split folds over itself. It then
+!> counts with a negative volume, which keeps the three an exact signed tiling
+!> and the strand source solenoidal; with its absolute volume the strand
+!> integrals over-counted the fold (DEV-1545).
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetWedgePieces(nCells, nSegments, nSublayers, ff, Element, sStack, &
+      sAcross, Q, WithGaps)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nCells, nSegments, nSublayers
+    REAL(KIND=dp) :: ff, sStack(:), sAcross(:)
+    TYPE(Element_t), POINTER :: Element
+    TYPE(FoilSheetQuad_t) :: Q
+    LOGICAL :: WithGaps
+
+    TYPE(Nodes_t), SAVE :: Nodes
+    INTEGER :: Tv(4,3), s, i, k, np, n0
+    REAL(KIND=dp) :: X(3,4), Ref(3,4), e(3,3), c(3,3,3), det(3), ga(3), gb(3), tt(3), orient
+
+    CALL GetElementNodes(Nodes, Element)
+    CALL FoilSheetWedgeTets(Element, Tv)
+    Q % Wedge = .TRUE.
+    Q % WTv = Tv
+    CALL FoilSheetWedgeFlips(Element, Q % WFlip)
+    DO s = 1, 3
+      DO k = 1, 4
+        X(:,k) = [Nodes % x(Tv(k,s)), Nodes % y(Tv(k,s)), Nodes % z(Tv(k,s))]
+      END DO
+      DO k = 1, 3
+        e(:,k) = X(:,k+1) - X(:,1)
+      END DO
+      ! Gradient of the linear interpolant from its three edge differences:
+      ! the columns of c divided by det are the rows of the inverse edge matrix.
+      c(:,1,s) = FoilSheetCross(e(:,2), e(:,3))
+      c(:,2,s) = FoilSheetCross(e(:,3), e(:,1))
+      c(:,3,s) = FoilSheetCross(e(:,1), e(:,2))
+      det(s) = SUM(e(:,1) * c(:,1,s))
+    END DO
+    orient = SIGN(1._dp, SUM(det))
+    Q % WVol = orient * det / 6._dp
+
+    n0 = 0
+    DO s = 1, 3
+      IF (det(s) == 0._dp) CYCLE
+      DO k = 1, 4
+        Ref(:,k) = [Element % TYPE % NodeU(Tv(k,s)), Element % TYPE % NodeV(Tv(k,s)), &
+            Element % TYPE % NodeW(Tv(k,s))]
+      END DO
+      Q % WGrad(:,2:4,s) = c(:,:,s) / det(s)
+      Q % WGrad(:,1,s) = -(Q % WGrad(:,2,s) + Q % WGrad(:,3,s) + Q % WGrad(:,4,s))
+      ga = MATMUL(c(:,:,s), sStack(Tv(2:4,s)) - sStack(Tv(1,s))) / det(s)
+      gb = MATMUL(c(:,:,s), sAcross(Tv(2:4,s)) - sAcross(Tv(1,s))) / det(s)
+      tt = FoilSheetCross(ga, gb)
+
+      CALL FoilSheetPieces(nCells, nSegments, sStack(Tv(:,s)), sAcross(Tv(:,s)), np, &
+          Q % pCell(n0+1:), Q % pSeg(n0+1:), Q % pVol(n0+1:), Q % pBary(:,n0+1:), &
+          nSublayers, ff, WithGaps)
+      DO i = n0+1, n0+np
+        Q % pRef(:,i) = MATMUL(Ref, Q % pBary(:,i))
+        Q % pAbs(i) = Q % pVol(i) * Q % WVol(s)
+        Q % pT(:,i) = tt
+        Q % pSub(i) = s
+      END DO
+      n0 = n0 + np
+    END DO
+    Q % nItem = n0
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetWedgePieces
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetCross(a, b) RESULT(c)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: a(3), b(3), c(3)
+
+    c(1) = a(2)*b(3) - a(3)*b(2)
+    c(2) = a(3)*b(1) - a(1)*b(3)
+    c(3) = a(1)*b(2) - a(2)*b(1)
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetCross
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Global orientation of the nine edges of a wedge relative to its edge map,
+!> as GetEdgeBasis flips them: -1 where the edge runs from the larger to the
+!> smaller global node number.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetWedgeFlips(Element, Flip)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: Flip(9)
+    INTEGER, PARAMETER :: E1(9) = [1,2,3,4,5,6,1,2,3], E2(9) = [2,3,1,5,6,4,4,5,6]
+    TYPE(Mesh_t), POINTER :: Mesh
+    INTEGER :: g(6)
+
+    Mesh => CurrentModel % Mesh
+    g = Element % NodeIndexes(1:6)
+    IF (ASSOCIATED(Mesh % ParallelInfo % GInterface)) g = Mesh % ParallelInfo % GlobalDOFs(g)
+    Flip = 1
+    WHERE (g(E2) < g(E1)) Flip = -1
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetWedgeFlips
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> (t, W_j) at item t of a wedge, assembled on its virtual tetrahedron and
+!> mapped to the nine wedge edge dofs. A field of the wedge's edge space is
+!> carried to the virtual tetrahedra by its line integrals along their edges,
+!> which are the wedge's own edges or diagonals of its quadrilateral faces;
+!> the coupling of a strand is the transpose of that interpolation applied to
+!> its Whitney integrals on the virtual tetrahedra. A gradient of a wedge nodal
+!> function interpolates to the gradient of the linear interpolant of its
+!> vertex values, so the strand source is exactly solenoidal against the AV
+!> solver's nodal space even where the wedge is not affine, which the value of
+!> the wedge edge functions at the piece centroid is not. For the classic
+!> lowest order edge basis (GetEdgeBasis) only.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetWedgeCoupling(Q, t, tvec, cpl)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    INTEGER :: t
+    REAL(KIND=dp) :: tvec(3), cpl(9)
+    INTEGER :: s, p, q2
+    REAL(KIND=dp) :: lam(4), wt(3)
+
+    s = Q % pSub(t)
+    lam = Q % pBary(:,t)
+    cpl = 0._dp
+    DO p = 1, 3
+      DO q2 = p+1, 4
+        wt = lam(p) * Q % WGrad(:,q2,s) - lam(q2) * Q % WGrad(:,p,s)
+        cpl = cpl + 0.5_dp * WedgePairInt2(:, Q % WTv(p,s), Q % WTv(q2,s)) * SUM(tvec * wt)
+      END DO
+    END DO
+    cpl = cpl * Q % WFlip
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetWedgeCoupling
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> (t, W_j) at quadrature item t for the ncdofs edge dofs of the element: the
+!> value of the edge functions at the point, or on a wedge with the classic
+!> lowest order edge basis (Classic) the mapped virtual tetrahedron integrals
+!> of FoilSheetWedgeCoupling.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetQuadCoupling(Q, t, tvec, WBasis, ncdofs, Classic, cpl)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    INTEGER :: t, ncdofs
+    REAL(KIND=dp) :: tvec(3), WBasis(:,:), cpl(:)
+    LOGICAL :: Classic
+    INTEGER :: j
+
+    IF (Q % Exact .AND. Q % Wedge .AND. Classic .AND. ncdofs == 9) THEN
+      CALL FoilSheetWedgeCoupling(Q, t, tvec, cpl(1:9))
+    ELSE
+      DO j = 1, ncdofs
+        cpl(j) = SUM(WBasis(j,:) * tvec)
+      END DO
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetQuadCoupling
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Gradient of a nodal field at quadrature item t: of its interpolation, or on
+!> a wedge of the linear interpolant of its vertex values on the virtual
+!> tetrahedron, which makes a strand's flux of grad(W) its exact
+!> Delta(stack) Delta(across) as on a tet mesh.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetQuadGradient(Q, t, vals, dBasisdx, n) RESULT(g)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    INTEGER :: t, n
+    REAL(KIND=dp) :: vals(:), dBasisdx(:,:), g(3)
+    INTEGER :: s, p
+
+    IF (Q % Exact .AND. Q % Wedge) THEN
+      s = Q % pSub(t)
+      g = 0._dp
+      DO p = 1, 4
+        g = g + vals(Q % WTv(p,s)) * Q % WGrad(:,p,s)
+      END DO
+    ELSE
+      g = MATMUL(vals(1:n), dBasisdx(1:n,:))
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetQuadGradient
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
 !> Set up the strand quadrature of one element. By default the element is cut
 !> exactly along the strand interfaces and each piece is integrated at its
 !> centroid, which is exact because every strand integrand is affine on a linear
@@ -1786,7 +2090,13 @@ CONTAINS
     IF (.NOT. Found) ngp = 0
 
     Q % Exact = (ngp <= 0)
+    Q % Wedge = .FALSE.
     IF (Q % Exact) THEN
+      IF (nn == 6 .AND. Element % TYPE % ElementCode == 706) THEN
+        CALL FoilSheetWedgePieces(nCells, nSegments, nSublayers, ff, Element, sStack, &
+            sAcross, Q, Gaps)
+        RETURN
+      END IF
       IF (nn /= 4 .OR. Element % TYPE % ElementCode /= 504) THEN
         IF (LetGo) THEN
           Q % Exact = .FALSE.
@@ -1794,8 +2104,8 @@ CONTAINS
           RETURN
         END IF
         CALL Fatal('FoilSheetQuadrature', &
-            'Exact strand clipping needs linear tetrahedra; set "Sheet Integration Points" '// &
-            'to integrate this coil mesh with a Gauss rule instead!')
+            'Exact strand clipping needs linear tetrahedra or wedges; set "Sheet Integration '// &
+            'Points" to integrate this coil mesh with a Gauss rule instead!')
       END IF
       CALL FoilSheetPieces(nCells, nSegments, sStack(1:4), sAcross(1:4), &
           Q % nItem, Q % pCell, Q % pSeg, Q % pVol, Q % pBary, nSublayers, ff, Gaps)
@@ -1820,7 +2130,9 @@ CONTAINS
     INTEGER :: t
     REAL(KIND=dp) :: u, v, w
 
-    IF (Q % Exact) THEN
+    IF (Q % Exact .AND. Q % Wedge) THEN
+      u = Q % pRef(1,t); v = Q % pRef(2,t); w = Q % pRef(3,t)
+    ELSE IF (Q % Exact) THEN
       u = Q % pBary(2,t); v = Q % pBary(3,t); w = Q % pBary(4,t)
     ELSE
       u = Q % IP % U(t); v = Q % IP % V(t); w = Q % IP % W(t)
@@ -1839,13 +2151,36 @@ CONTAINS
     INTEGER :: t
     REAL(KIND=dp) :: detJ, wgt
 
-    IF (Q % Exact) THEN
+    IF (Q % Exact .AND. Q % Wedge) THEN
+      wgt = Q % pAbs(t)
+    ELSE IF (Q % Exact) THEN
       wgt = Q % pVol(t) * detJ / 6._dp
     ELSE
       wgt = Q % IP % s(t) * detJ
     END IF
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetQuadWeight
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Strand direction at quadrature item t: the one of the element (see
+!> FoilSheetDirection), or on a wedge the constant one of the virtual
+!> tetrahedron the piece lies in, which is what keeps the source solenoidal.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetQuadDirection(Q, t, sStack, sAcross, dBasisdx, n, sgn) RESULT(tv)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(FoilSheetQuad_t) :: Q
+    INTEGER :: t, n
+    REAL(KIND=dp) :: sStack(:), sAcross(:), dBasisdx(:,:), sgn, tv(3)
+
+    IF (Q % Exact .AND. Q % Wedge) THEN
+      tv = sgn * Q % pT(:,t)
+    ELSE
+      tv = FoilSheetDirection(sStack, sAcross, dBasisdx, n, sgn)
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetQuadDirection
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -1974,6 +2309,18 @@ MODULE CircuitsMod
   ! overrides it for meshes too coarse or too graded along the wire for that.
   REAL(KIND=dp), PARAMETER :: MinCutBranchMismatch = 0.01_dp, &
       MaxCutBranchMismatch = 0.03_dp, CutLayerShareMismatch = 0.5_dp
+
+  ! Thickest automatic foil sheet cell in stack skin depths (FoilSheetAutoCells).
+  ! Lumping error ~ (cell/delta_h)^2: 2.9 % at 0.55 on a 1 mm gap next to the winding, 0.5 % at 0.52
+  ! on a gapped foil reactor, where the cells of 0.4 cost up to twice the solve time.
+  REAL(KIND=dp), PARAMETER :: FOIL_SHEET_CELL_SKIN_DEPTHS = 0.55_dp
+
+  ! Automatic sub-layers on elements past one skin depth (FoilSheetAutoSublayers) stay while the
+  ! element is at most 2 skin depths and 2.3 sub-layers thick. 40 pot-core points vs FEMM: kept
+  ! within 6 %, vetoed ones 6-54 % high or past two skin depths; one layer per turn was 10-23 %
+  ! low on edgewise flat wire between one and two skin depths.
+  REAL(KIND=dp), PARAMETER :: FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS = 2.0_dp
+  REAL(KIND=dp), PARAMETER :: FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS = 2.3_dp
 
 CONTAINS 
 
@@ -3267,11 +3614,21 @@ END FUNCTION isComponentName
 !>   Number of Turns        number of foils N, must be an integer
 !>   Stacking Direction     alpha (default, foils and flatwise flat wire) or
 !>                          beta (edgewise flat wire): the field across the stack
-!>   Sheet Cells            cells along the stacking direction (default N), must divide N
+!>   Sheet Cells            cells along the stacking direction (default N), must divide N;
+!>                          0 = the fewest cells at most FOIL_SHEET_CELL_SKIN_DEPTHS
+!>                          stack skin depths thick at the run frequency, 1 at DC, N
+!>                          in transient or several-frequency runs. Not sized by the
+!>                          mesh: the clipping integrates any cell exactly, and cells
+!>                          that lump turns past the skin depth lose the gap fringing
+!>                          loss (DEV-1545)
 !>   Sheet Segments         strands across the stack per cell (default 16)
 !>   Sheet Sublayers        strand layers through the thickness of one turn
 !>                          (default 1 = one uniform current layer per turn,
-!>                          0 = chosen from t/delta at the run frequency)
+!>                          0 = chosen from t/delta at the run frequency, kept on
+!>                          elements up to one skin depth and, while an element
+!>                          spans at most FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS
+!>                          sub-layers, up to FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS;
+!>                          one layer per turn on a coarser mesh)
 !>   Electrode Area         or Electrode Boundaries, as for foil winding; neither
 !>                          enters the DC resistance, which comes from the strands
 !>   Sigma 33 [im]          complex sheet conductivity (harmonic)
@@ -3450,45 +3807,22 @@ END FUNCTION isComponentName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> How many strand layers one turn needs at this frequency, and whether the mesh
-!> can carry them. One uniform current layer per turn is exact while the turn is
-!> thin against the skin depth; past that the current redistributes through the
-!> thickness and the single layer under-predicts Rac, so the layer count follows
-!> the thickness in skin depths.
-!>
-!> Sub-layers only pay off when the FE field resolves the flux between the
-!> bands, which is what drives the current from one band to the next. The
-!> criterion is therefore the element size against the skin depth, not the band
-!> thickness against the element: on a coarser mesh the layers are vetoed and
-!> the single-layer model, with its own known error, is the better of the two.
+!> True when the simulation carries several frequencies: a 'Frequency' array, or
+!> a frequency that is a function (of time, say), in the Simulation section or
+!> in the AV solver. The automatic layout fixes the circuit dof layout and is
+!> resolved once at init, so it cannot follow such a run.
 !------------------------------------------------------------------------------
-  FUNCTION FoilSheetAutoSublayers(tfoil, sgm, elemH) RESULT(m)
+  FUNCTION FoilSheetSeveralFrequencies() RESULT(FreqVaries)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    REAL(KIND=dp) :: tfoil, sgm, elemH
-    INTEGER :: m
-    REAL(KIND=dp) :: omega, delta, ratio, mu0
+    LOGICAL :: FreqVaries
     REAL(KIND=dp), POINTER :: fptr(:,:)
-    LOGICAL :: Found, FreqVaries
+    LOGICAL :: Found
     TYPE(ValueList_t), POINTER :: Lst
     TYPE(ValueListEntry_t), POINTER :: ptr
     CHARACTER(LEN=17), PARAMETER :: FreqKey(2) = ['Frequency        ', 'Angular Frequency']
     INTEGER :: il, ik
 
-    mu0 = 4.0d-7 * PI
-
-    ! Transient has no single frequency to size the layers with, and the strand
-    ! skin ladder and the reluctivity ladder are derived for one layer per turn.
-    IF (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient') THEN
-      m = 1
-      CALL Info('Circuits_Init', &
-          'Foil sheet transient: automatic sub-layers resolve to one layer per turn', Level=3)
-      RETURN
-    END IF
-
-    ! The count fixes the circuit dof layout, so it is resolved once at init.
-    ! A SIF that scans several frequencies, as a 'Frequency' array or as a
-    ! frequency that is a function (of time, say), keeps the first one's choice.
     FreqVaries = .FALSE.
     DO il = 1, 2
       IF (il == 1) THEN
@@ -3509,7 +3843,113 @@ END FUNCTION isComponentName
       fptr => ListGetConstRealArray(CurrentModel % Simulation, 'Frequency', Found)
       IF (Found) FreqVaries = SIZE(fptr) > 1
     END IF
-    IF (FreqVaries) CALL Warn('Circuits_Init', &
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetSeveralFrequencies
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> How many turn cells the stack needs: 'Sheet Cells = 0'. The turns of a cell
+!> share one current distribution across the width, which holds while the cell
+!> is thin against the depth over which the stack screens a field, the stack
+!> skin depth delta_h = sqrt(2/(omega mu0 sigma ff)) of the conductor smeared
+!> over the pitch. So the count is the smallest divisor of N whose cells are at
+!> most FOIL_SHEET_CELL_SKIN_DEPTHS delta_h thick, N if none is. It is not tied
+!> to the mesh (DEV-1545): the strand clipping integrates a cell of any
+!> thickness exactly, while cells sized by the element lumped every turn of a
+!> default mesh into one cell, which cannot screen the gap fringing flux. DC
+!> takes one cell. A transient or several-frequency run has no single delta_h
+!> and a conductivity that cannot be evaluated gives none, so those take one
+!> cell per turn, which is right at any frequency.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetAutoCells(CompParams, nfoils, blkT) RESULT(nCells)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: nfoils
+    REAL(KIND=dp) :: blkT
+    INTEGER :: nCells
+    REAL(KIND=dp) :: omega, sgm, ff, deltaH, mu0
+    INTEGER :: d
+    LOGICAL :: Found, Varies
+    CHARACTER(LEN=32) :: DepthStr
+
+    mu0 = 4.0d-7 * PI
+    nCells = nfoils
+    IF (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient') THEN
+      DepthStr = 'none (transient)'
+    ELSE IF (FoilSheetSeveralFrequencies()) THEN
+      DepthStr = 'none (several frequencies)'
+    ELSE
+      omega = GetAngularFrequency(Found = Found)
+      IF (.NOT. Found) omega = 0._dp
+      IF (omega <= 0._dp) THEN
+        nCells = 1
+        DepthStr = 'infinite (DC)'
+      ELSE
+        sgm = FoilSheetBlockConductivity(CompParams, Found, Varies)
+        IF (.NOT. Found .OR. sgm <= 0._dp) THEN
+          DepthStr = 'none (no conductivity)'
+        ELSE
+          ff = GetConstReal(CompParams, 'Fill Factor', Found)
+          IF (.NOT. Found .OR. ff <= 0._dp) ff = 1._dp
+          deltaH = SQRT(2._dp / (omega * mu0 * sgm * ff))
+          DO d = 1, nfoils - 1
+            IF (MOD(nfoils, d) == 0 .AND. blkT / d <= FOIL_SHEET_CELL_SKIN_DEPTHS * deltaH) THEN
+              nCells = d
+              EXIT
+            END IF
+          END DO
+          WRITE(DepthStr,'(ES10.4,A)') deltaH, ' m'
+        END IF
+      END IF
+    END IF
+
+    WRITE(Message,'(A,A,A,ES10.4,A,I0,A)') 'Foil sheet automatic cells: stack skin depth ', &
+        TRIM(DepthStr), ', cell thickness ', blkT / nCells, ' m, ', nfoils / nCells, ' turns per cell'
+    CALL Info('Circuits_Init', Message, Level=3)
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetAutoCells
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> How many strand layers one turn needs at this frequency, and whether the mesh
+!> can carry them. One uniform current layer per turn is exact while the turn is
+!> thin against the skin depth; past that the current redistributes through the
+!> thickness and the single layer under-predicts Rac, so the layer count follows
+!> the thickness in skin depths.
+!>
+!> Sub-layers only pay off when the FE field resolves the flux between the
+!> bands, which is what drives the current from one band to the next. So they
+!> stay on elements up to one skin depth, and up to
+!> FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS skin depths while an element spans
+!> at most FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS sub-layers of t/m (DEV-1545, one
+!> rule for foil and flat wire): on a coarser mesh the layers are vetoed and
+!> the single-layer model, with its own known error, is the better of the two.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetAutoSublayers(tfoil, sgm, elemH) RESULT(m)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: tfoil, sgm, elemH
+    INTEGER :: m
+    REAL(KIND=dp) :: omega, delta, ratio, mu0, tsub
+    LOGICAL :: Found
+    CHARACTER(LEN=48) :: Limit
+
+    mu0 = 4.0d-7 * PI
+
+    ! Transient has no single frequency to size the layers with, and the strand
+    ! skin ladder and the reluctivity ladder are derived for one layer per turn.
+    IF (TRIM(ListGetString(CurrentModel % Simulation,'Simulation Type',Found)) == 'transient') THEN
+      m = 1
+      CALL Info('Circuits_Init', &
+          'Foil sheet transient: automatic sub-layers resolve to one layer per turn', Level=3)
+      RETURN
+    END IF
+
+    ! The count fixes the circuit dof layout, so it is resolved once at init.
+    ! A SIF that scans several frequencies, as a 'Frequency' array or as a
+    ! frequency that is a function (of time, say), keeps the first one's choice.
+    IF (FoilSheetSeveralFrequencies()) CALL Warn('Circuits_Init', &
         'Foil sheet: "Sheet Sublayers = 0" is resolved once at init, but this '// &
         'simulation carries several frequencies; give "Sheet Sublayers" explicitly.')
     omega = GetAngularFrequency(Found = Found)
@@ -3533,11 +3973,21 @@ END FUNCTION isComponentName
     CALL Info('Circuits_Init', Message, Level=3)
 
     IF (m > 1 .AND. elemH > delta) THEN
-      WRITE(Message,'(A,F8.3,A)') 'Foil sheet: the coil mesh is too coarse for sub-layers, ' // &
-          'element / skin depth = ', elemH / delta, &
-          '; using one layer per turn and its own skin factor'
-      CALL Info('Circuits_Init', Message, Level=3)
-      m = 1
+      tsub = tfoil / m
+      Limit = ' '
+      IF (elemH > FOIL_SHEET_SUBLAYER_ELEMENT_SKIN_DEPTHS * delta) THEN
+        Limit = 'over the skin depth limit'
+      ELSE IF (elemH > FOIL_SHEET_SUBLAYER_ELEMENT_LAYERS * tsub) THEN
+        Limit = 'over one skin depth and the sub-layer limit'
+      END IF
+      IF (Limit /= ' ') THEN
+        WRITE(Message,'(A,F8.3,A,F8.3,A)') 'Foil sheet: the coil mesh is too coarse for sub-layers ' // &
+            '(element '//TRIM(Limit)//'), element / skin depth = ', elemH / delta, &
+            ', element / sub-layer thickness = ', elemH / tsub, &
+            '; using one layer per turn and its own skin factor'
+        CALL Info('Circuits_Init', Message, Level=3)
+        m = 1
+      END IF
     END IF
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetAutoSublayers
@@ -3804,7 +4254,7 @@ END FUNCTION isComponentName
     INTEGER :: CompInd, ExtMaster
     INTEGER :: nfoils, nLayers
     REAL(KIND=dp) :: tfoil, sgm, elemH, tsub
-    LOGICAL :: Found, FoundS, Varies
+    LOGICAL :: Found, FoundS, Varies, AutoCells, AutoSegments, AutoSublayers
     CHARACTER(LEN=MAX_NAME_LEN) :: str
 
     IF (CoordinateSystemDimension() /= 3) &
@@ -3832,7 +4282,8 @@ END FUNCTION isComponentName
     END SELECT
     CALL ListAddLogical(CompParams, 'Foil Sheet Stack Along Alpha', Comp % StackAlongAlpha)
 
-    ! 0 asks the kernel to pick the layout from the block geometry and the mesh.
+    ! 0 asks the kernel to pick the layout: the cells from the stack skin depth,
+    ! the segments from the mesh.
     Comp % nCells = GetInteger(CompParams, 'Sheet Cells', Found)
     IF (.NOT. Found) Comp % nCells = nfoils
     Comp % nSegments = GetInteger(CompParams, 'Sheet Segments', Found)
@@ -3847,6 +4298,9 @@ END FUNCTION isComponentName
     ! the turn thickness, so it is resolved once the geometry is known.
     Comp % nSublayers = GetInteger(CompParams, 'Sheet Sublayers', Found)
     IF (.NOT. Found) Comp % nSublayers = 1
+    AutoCells = Comp % nCells <= 0
+    AutoSegments = Comp % nSegments <= 0
+    AutoSublayers = Comp % nSublayers <= 0
 
     ! The block geometry is also what a missing 'Foil Thickness' is derived
     ! from, so measure it whenever anything is left to the kernel. This has to
@@ -3876,15 +4330,26 @@ END FUNCTION isComponentName
       ELSE
         tfoil = GetConstReal(CompParams, 'Foil Thickness', Found)
         sgm = FoilSheetBlockConductivity(CompParams, FoundS, Varies)
-        IF (.NOT. (Found .AND. FoundS)) CALL Fatal('Circuits_Init', &
-            'Foil sheet: "Sheet Sublayers = 0" needs the thickness and "Sheet Conductivity"!')
-        elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
-        IF (.NOT. Found) elemH = 0._dp
-        Comp % nSublayers = FoilSheetAutoSublayers(tfoil, sgm, elemH)
+        IF (Found .AND. FoundS) THEN
+          elemH = GetConstReal(CompParams, 'Foil Sheet Element Size', Found)
+          IF (.NOT. Found) elemH = 0._dp
+          Comp % nSublayers = FoilSheetAutoSublayers(tfoil, sgm, elemH)
+        ELSE
+          ! No t/delta without both. One layer per turn needs neither when
+          ! 'Sigma 33' is given explicitly, and without it the run stops later
+          ! on the missing sheet material, so automatic mode does not stop here.
+          Comp % nSublayers = 1
+          CALL Info('Circuits_Init', 'Foil sheet: "Sheet Sublayers = 0" without the turn '// &
+              'thickness or an evaluable "Sheet Conductivity", one layer per turn', Level=3)
+        END IF
       END IF
     END IF
     IF (Comp % nSublayers < 1) &
         CALL Fatal('Circuits_Init','Foil sheet: Sheet Sublayers must be positive!')
+    IF (AutoCells .OR. AutoSegments .OR. AutoSublayers) THEN
+      CALL FoilSheetFitPieceBuffer(Comp, CompParams, nfoils, AutoCells, AutoSegments, AutoSublayers)
+      Comp % foilsPerCell = nfoils / Comp % nCells
+    END IF
     IF (Comp % nSublayers > 1 .AND. Comp % foilsPerCell > 1) &
         CALL Fatal('Circuits_Init','Foil sheet: cells lump several turns, sub-layers off; '// &
             'raise "Sheet Cells" to one cell per turn or set "Sheet Sublayers = 1"!')
@@ -3976,14 +4441,16 @@ END FUNCTION isComponentName
 !> Beta are laid out and on which of the two is the stacking direction, so fix
 !> the sign once per component from int grad(W) . (gStack x gAcross) dV.
 !------------------------------------------------------------------------------
-!> Choose the strand layout from the block geometry and the mesh, for
-!> 'Sheet Cells' or 'Sheet Segments' given as 0, and derive a missing
-!> 'Foil Thickness'. The SIF writer knows the coil but not the element size,
-!> while the kernel can measure both: the stacking and across fields run from 0
-!> to 1 over the block, so the block extents are the inverses of the mean
-!> magnitudes of their gradients, and the mean element size is the cube root of
-!> the mean element volume. A strand narrower than about one and a half elements
-!> cannot be resolved, which sets the cap.
+!> Choose the strand layout for 'Sheet Cells' or 'Sheet Segments' given as 0,
+!> and derive a missing 'Foil Thickness'. The SIF writer knows the coil but not
+!> the element size, while the kernel can measure both: the stacking and across
+!> fields run from 0 to 1 over the block, so the block extents are the inverses
+!> of the mean magnitudes of their gradients, and the mean element size is the
+!> cube root of the mean element volume. The cells follow the stack skin depth
+!> at the run frequency, not the mesh (FoilSheetAutoCells, DEV-1545): the strand
+!> clipping integrates a cell of any thickness exactly, and cells sized by the
+!> element lumped the turns of a default mesh into one cell and lost the gap
+!> fringing loss.
 !------------------------------------------------------------------------------
   SUBROUTINE FoilSheetAutoLayout(Comp, CompParams, nfoils)
 !------------------------------------------------------------------------------
@@ -3999,7 +4466,7 @@ END FUNCTION isComponentName
     REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), sStack(:), sAcross(:)
     REAL(KIND=dp) :: detJ, ga(3), gb(3), wgp, vol, sga, sgb, sh, ve, blkT, blkH, elemH
     REAL(KIND=dp) :: ff, tfoil
-    INTEGER :: e, n, gp, nmax, nel, nCellAuto, nSegAuto
+    INTEGER :: e, n, gp, nmax, nel, nSegAuto
     LOGICAL :: stat, Found
 
     nmax = CurrentModel % Mesh % MaxElementNodes
@@ -4042,16 +4509,6 @@ END FUNCTION isComponentName
     blkH = vol / sgb
     elemH = sh / nel
 
-    ! The cap is on the TURN cells only. Sub-layers subdivide a turn further on
-    ! purpose, so they are never traded away against the mesh here.
-    IF (Comp % nCells <= 0) THEN
-      nCellAuto = MIN(nfoils, MAX(1, FLOOR(blkT / (1.5_dp * elemH))))
-      DO WHILE (nCellAuto > 1 .AND. MOD(nfoils, nCellAuto) /= 0)
-        nCellAuto = nCellAuto - 1
-      END DO
-      Comp % nCells = nCellAuto
-    END IF
-
     ! V_e^(1/3) is about half a tetrahedron's edge length, so one strand per
     ! V_e^(1/3) is about half an element edge. Strands narrower than an element
     ! are legitimate: FoilSheetPieces clips them exactly, so each still carries
@@ -4084,6 +4541,7 @@ END FUNCTION isComponentName
     WRITE(Message,'(A,ES11.4,A,ES11.4,A,ES11.4)') 'Foil sheet block: stack extent ', blkT, &
         ', across extent ', blkH, ', mean element size ', elemH
     CALL Info('Circuits_Init', Message, Level=3)
+    IF (Comp % nCells <= 0) Comp % nCells = FoilSheetAutoCells(CompParams, nfoils, blkT)
     WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Foil sheet automatic layout: Sheet Cells = ', &
         Comp % nCells, ', Sheet Segments = ', Comp % nSegments, ' (', nel, ' block elements)'
     CALL Info('Circuits_Init', Message, Level=3)
@@ -4091,6 +4549,122 @@ END FUNCTION isComponentName
     DEALLOCATE(Basis, dBasisdx, sStack, sAcross)
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetAutoLayout
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Keep an automatic layout inside the strand piece buffer. The cells no longer
+!> follow the element size, so a coarse element can straddle many strands, and
+!> FoilSheetPieces is fatal past MaxFoilSheetPieces pieces of one element. The
+!> pieces of a linear tet are bounded by the strands its nodal stack and across
+!> coordinates span, times the sub-layers, plus with sub-layers the two
+!> insulation margins per cell that the post processing adds; those of a wedge
+!> by the sum over its three virtual tetrahedra (FoilSheetWedgeTets), whose
+!> pieces share one buffer. While the largest
+!> bound is over the buffer, give up what costs the least accuracy first:
+!> automatic sub-layers, then half of the automatic segments (not below 4), then
+!> the automatic cells to the next smaller divisor of N. Explicit keywords are
+!> never altered; the Fatal stays for those.
+!------------------------------------------------------------------------------
+  SUBROUTINE FoilSheetFitPieceBuffer(Comp, CompParams, nfoils, AutoCells, AutoSegments, &
+      AutoSublayers)
+!------------------------------------------------------------------------------
+    USE CircuitUtils
+    IMPLICIT NONE
+    TYPE(Component_t), POINTER :: Comp
+    TYPE(ValueList_t), POINTER :: CompParams
+    INTEGER :: nfoils
+    LOGICAL :: AutoCells, AutoSegments, AutoSublayers
+
+    TYPE(Element_t), POINTER :: Element
+    REAL(KIND=dp), ALLOCATABLE :: sStack(:), sAcross(:), sRange(:,:)
+    INTEGER, ALLOCATABLE :: Owner(:)
+    INTEGER :: e, n, nmax, ntet, nel, bound, bound0, c0, s0, l0, Tv(4,3), s
+
+    nmax = CurrentModel % Mesh % MaxElementNodes
+    ALLOCATE(sStack(nmax), sAcross(nmax), sRange(4, MAX(1, 3*GetNOFActive())), &
+        Owner(MAX(1, 3*GetNOFActive())))
+    ntet = 0
+    nel = 0
+    DO e = 1, GetNOFActive()
+      Element => GetActiveElement(e)
+      IF (.NOT. ASSOCIATED(GetComponentParams(Element), CompParams)) CYCLE
+      nel = nel + 1
+      n = GetElementNOFNodes(Element)
+      IF (n == 6 .AND. Element % TYPE % ElementCode == 706) THEN
+        CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, n, sStack, sAcross)
+        CALL FoilSheetWedgeTets(Element, Tv)
+        DO s = 1, 3
+          ntet = ntet + 1
+          Owner(ntet) = e
+          sRange(:,ntet) = [MINVAL(sStack(Tv(:,s))), MAXVAL(sStack(Tv(:,s))), &
+              MINVAL(sAcross(Tv(:,s))), MAXVAL(sAcross(Tv(:,s)))]
+        END DO
+        CYCLE
+      END IF
+      IF (n /= 4 .OR. Element % TYPE % ElementCode /= 504) CYCLE
+      CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, n, sStack, sAcross)
+      ntet = ntet + 1
+      Owner(ntet) = e
+      sRange(:,ntet) = [MINVAL(sStack(1:4)), MAXVAL(sStack(1:4)), &
+          MINVAL(sAcross(1:4)), MAXVAL(sAcross(1:4))]
+    END DO
+    nel = ParallelReduction(nel)
+
+    c0 = Comp % nCells; s0 = Comp % nSegments; l0 = Comp % nSublayers
+    bound0 = MaxPieces()
+    bound = bound0
+    DO WHILE (bound > MaxFoilSheetPieces)
+      IF (AutoSublayers .AND. Comp % nSublayers > 1) THEN
+        Comp % nSublayers = 1
+      ELSE IF (AutoSegments .AND. Comp % nSegments > 4) THEN
+        Comp % nSegments = MAX(4, Comp % nSegments / 2)
+      ELSE IF (AutoCells .AND. Comp % nCells > 1 .AND. Comp % nSublayers == 1) THEN
+        Comp % nCells = Comp % nCells - 1
+        DO WHILE (MOD(nfoils, Comp % nCells) /= 0)
+          Comp % nCells = Comp % nCells - 1
+        END DO
+      ELSE
+        EXIT
+      END IF
+      bound = MaxPieces()
+    END DO
+    DEALLOCATE(sStack, sAcross, sRange, Owner)
+
+    IF (Comp % nCells == c0 .AND. Comp % nSegments == s0 .AND. Comp % nSublayers == l0) RETURN
+    WRITE(Message,'(A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0,A,I0)') &
+        'Foil sheet automatic layout lowered from ', c0, ' x ', l0, ' x ', s0, ' to ', &
+        Comp % nCells, ' x ', Comp % nSublayers, ' x ', Comp % nSegments, &
+        ' (cells x sub-layers x segments): an element straddled up to ', bound0, &
+        ' strand pieces, the buffer holds ', MaxFoilSheetPieces
+    CALL Warn('Circuits_Init', Message)
+    WRITE(Message,'(A,I0,A,I0,A,I0,A)') 'Foil sheet automatic layout: Sheet Cells = ', &
+        Comp % nCells, ', Sheet Segments = ', Comp % nSegments, ' (', nel, ' block elements)'
+    CALL Info('Circuits_Init', Message, Level=3)
+
+  CONTAINS
+
+    FUNCTION MaxPieces() RESULT(np)
+      INTEGER :: np, i, k1, k2, j1, j2, nelem
+
+      np = 0
+      nelem = 0
+      DO i = 1, ntet
+        CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, sRange(1,i), sRange(3,i), k1, j1)
+        CALL FoilSheetStrand(Comp % nCells, Comp % nSegments, sRange(2,i), sRange(4,i), k2, j2)
+        IF (i > 1) THEN
+          IF (Owner(i) /= Owner(i-1)) nelem = 0
+        END IF
+        IF (Comp % nSublayers > 1) THEN
+          nelem = nelem + (k2-k1+1) * (Comp % nSublayers * (j2-j1+1) + 2)
+        ELSE
+          nelem = nelem + (k2-k1+1) * (j2-j1+1)
+        END IF
+        np = MAX(np, nelem)
+      END DO
+      np = ParallelReduction(np, 2)
+    END FUNCTION MaxPieces
+!------------------------------------------------------------------------------
+  END SUBROUTINE FoilSheetFitPieceBuffer
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -4642,7 +5216,12 @@ END FUNCTION isComponentName
     INTEGER :: pCell(MaxFoilSheetPieces), pSeg(MaxFoilSheetPieces)
     REAL(KIND=dp) :: pVol(MaxFoilSheetPieces), pBary(4,MaxFoilSheetPieces)
     REAL(KIND=dp) :: volerr, dmax, amax, cval, contr, Vpar
-    REAL(KIND=dp) :: scov, tcov
+    REAL(KIND=dp) :: scov, tcov, ve, volerrW, dmaxC, h, dd, cpl9(9), gv(6), wsplit, wvol
+    TYPE(FoilSheetQuad_t) :: WQ
+    INTEGER :: nWedge, nCurved, nFolded, j, EdgeBasisDegree
+    INTEGER, PARAMETER :: E1(9) = [1,2,3,4,5,6,1,2,3], E2(9) = [2,3,1,5,6,4,4,5,6]
+    LOGICAL :: Classic, PiolaVersion
+    LOGICAL, ALLOCATABLE :: curved(:)
     TYPE(Mesh_t), POINTER :: Mesh
     LOGICAL :: stat
 
@@ -4650,12 +5229,24 @@ END FUNCTION isComponentName
     nmax = Mesh % MaxElementNodes
     nno = Mesh % NumberOfNodes
     ALLOCATE(Basis(nmax), dBasisdx(nmax,3), sStack(nmax), sAcross(nmax), Wloc(nmax))
-    ALLOCATE(dNode(nno), aNode(nno), inBlk(nno), skipn(nno))
-    dNode = 0._dp; aNode = 0._dp; inBlk = .FALSE.; skipn = .FALSE.
+    ALLOCATE(dNode(nno), aNode(nno), inBlk(nno), skipn(nno), curved(nno))
+    dNode = 0._dp; aNode = 0._dp; inBlk = .FALSE.; skipn = .FALSE.; curved = .FALSE.
     flux = 0._dp
     volerr = 0._dp
+    volerrW = 0._dp
     scov = 0._dp
     tcov = 0._dp
+    wsplit = 0._dp
+    wvol = 0._dp
+    nWedge = 0
+    nCurved = 0
+    nFolded = 0
+    Classic = .TRUE.
+    IF (ASSOCIATED(CurrentModel % ASolver)) THEN
+      CALL EdgeElementStyle(CurrentModel % ASolver % Values, PiolaVersion, &
+          BasisDegree = EdgeBasisDegree)
+      Classic = .NOT. PiolaVersion .AND. EdgeBasisDegree <= 1
+    END IF
 
     ! A node is interior to the coil block when every element that carries its
     ! basis function is a block element, it is not on a mesh boundary, and it is
@@ -4689,12 +5280,14 @@ END FUNCTION isComponentName
       CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, n, sStack, sAcross)
       CALL GetCoilWBase(Element, n, CompParams, Wloc)
       IP = GaussPoints(Element)
+      ve = 0._dp
       DO gp = 1, IP % n
         stat = ElementInfo(Element, Nodes, IP % U(gp), IP % V(gp), IP % W(gp), &
             detJ, Basis, dBasisdx)
         gw = MATMUL(Wloc(1:n), dBasisdx(1:n,:))
         tv = FoilSheetDirection(sStack, sAcross, dBasisdx, n, 1._dp)
         flux = flux + IP % s(gp) * detJ * SUM(gw*tv)
+        ve = ve + IP % s(gp) * detJ
       END DO
 
       ! Clipping checks (a) and (c): the pieces must fill the element exactly,
@@ -4702,6 +5295,63 @@ END FUNCTION isComponentName
       ! divergence at every interior node, for an arbitrary set of strand
       ! currents. The currents are a fixed function of the strand index so that
       ! every partition uses the same ones.
+      IF (n == 6 .AND. Element % TYPE % ElementCode == 706) THEN
+        ! The virtual tetrahedra tile the straight-sided wedge, which is the
+        ! wedge itself only where its quadrilateral faces are planar; and the
+        ! source is exactly solenoidal against the wedge basis only where the
+        ! wedge is affine (top triangle a translate of the bottom one). A warped
+        ! face shared by two wedges moves volume from one to the other, so the
+        ! block totals agree up to its boundary faces and tangled wedges.
+        nWedge = nWedge + 1
+        h = MAX(MAXVAL(ABS(Nodes % x(1:6) - Nodes % x(1))), &
+            MAXVAL(ABS(Nodes % y(1:6) - Nodes % y(1))), MAXVAL(ABS(Nodes % z(1:6) - Nodes % z(1))))
+        dd = ABS(Nodes % x(5) - Nodes % x(2) - Nodes % x(4) + Nodes % x(1)) + &
+             ABS(Nodes % y(5) - Nodes % y(2) - Nodes % y(4) + Nodes % y(1)) + &
+             ABS(Nodes % z(5) - Nodes % z(2) - Nodes % z(4) + Nodes % z(1)) + &
+             ABS(Nodes % x(6) - Nodes % x(3) - Nodes % x(4) + Nodes % x(1)) + &
+             ABS(Nodes % y(6) - Nodes % y(3) - Nodes % y(4) + Nodes % y(1)) + &
+             ABS(Nodes % z(6) - Nodes % z(3) - Nodes % z(4) + Nodes % z(1))
+        IF (dd > 1.0e-10_dp * h) THEN
+          nCurved = nCurved + 1
+          curved(Element % NodeIndexes(1:6)) = .TRUE.
+        END IF
+        CALL FoilSheetWedgePieces(Comp % nCells, Comp % nSegments, Comp % nSublayers, &
+            Comp % FillFactor, Element, sStack, sAcross, WQ, .FALSE.)
+        IF (Comp % nSublayers == 1) volerr = MAX(volerr, &
+            ABS(SUM(WQ % pAbs(1:WQ % nItem)) / SUM(WQ % WVol) - 1._dp))
+        volerrW = MAX(volerrW, ABS(SUM(WQ % WVol) / ve - 1._dp))
+        wsplit = wsplit + SUM(WQ % WVol)
+        wvol = wvol + ve
+        IF (ANY(WQ % WVol < 0._dp)) nFolded = nFolded + 1
+        scov = scov + 6._dp * SUM(WQ % pAbs(1:WQ % nItem))
+        tcov = tcov + 6._dp * ve
+        DO i = 1, WQ % nItem
+          ind = (WQ % pCell(i)-1) * Comp % nSegments + WQ % pSeg(i)
+          cval = SIN(1.234_dp*ind) + 0.5_dp*COS(2.345_dp*ind)
+          ! The source the kernels assemble, against the gradient of every
+          ! wedge nodal function: through the edge dofs for the mapped
+          ! coupling, at the piece point otherwise.
+          IF (Classic) THEN
+            CALL FoilSheetWedgeCoupling(WQ, i, WQ % pT(:,i), cpl9)
+            gv = 0._dp
+            DO j = 1, 9
+              gv(E2(j)) = gv(E2(j)) + cpl9(j) * WQ % WFlip(j)
+              gv(E1(j)) = gv(E1(j)) - cpl9(j) * WQ % WFlip(j)
+            END DO
+          ELSE
+            stat = ElementInfo(Element, Nodes, WQ % pRef(1,i), WQ % pRef(2,i), WQ % pRef(3,i), &
+                detJ, Basis, dBasisdx)
+            gv = MATMUL(dBasisdx(1:6,:), WQ % pT(:,i))
+          END IF
+          DO v = 1, 6
+            gnode = Element % NodeIndexes(v)
+            contr = cval * gv(v) * WQ % pAbs(i)
+            dNode(gnode) = dNode(gnode) + contr
+            aNode(gnode) = aNode(gnode) + ABS(contr)
+          END DO
+        END DO
+        CYCLE
+      END IF
       IF (n /= 4 .OR. Element % TYPE % ElementCode /= 504) CYCLE
       CALL FoilSheetPieces(Comp % nCells, Comp % nSegments, sStack(1:4), sAcross(1:4), &
           nPiece, pCell, pSeg, pVol, pBary, Comp % nSublayers, Comp % FillFactor)
@@ -4725,15 +5375,26 @@ END FUNCTION isComponentName
       END DO
     END DO
 
-    dmax = 0._dp; amax = 0._dp
+    dmax = 0._dp; amax = 0._dp; dmaxC = 0._dp
     DO i = 1, nno
       IF (.NOT. inBlk(i) .OR. skipn(i)) CYCLE
-      dmax = MAX(dmax, ABS(dNode(i)))
+      IF (curved(i)) THEN
+        dmaxC = MAX(dmaxC, ABS(dNode(i)))
+      ELSE
+        dmax = MAX(dmax, ABS(dNode(i)))
+      END IF
       amax = MAX(amax, aNode(i))
     END DO
     dmax = ParallelReduction(dmax, 2)
+    dmaxC = ParallelReduction(dmaxC, 2)
     amax = ParallelReduction(amax, 2)
     volerr = ParallelReduction(volerr, 2)
+    volerrW = ParallelReduction(volerrW, 2)
+    nWedge = ParallelReduction(nWedge)
+    nCurved = ParallelReduction(nCurved)
+    nFolded = ParallelReduction(nFolded)
+    wsplit = ParallelReduction(wsplit)
+    wvol = ParallelReduction(wvol)
 
     flux = ParallelReduction(flux)
     sgn = 1._dp
@@ -4753,11 +5414,24 @@ END FUNCTION isComponentName
     END IF
     CALL Info('Circuits_Init', Message, Level=5)
     WRITE(Message,'(A,ES10.3,A,ES10.3,A,ES10.3)') &
-        'Foil sheet source divergence at interior nodes: max ', dmax, &
-        ' of scale ', amax, ', relative ', dmax / MAX(amax, TINY(amax))
+        'Foil sheet source divergence at interior nodes: max ', MAX(dmax, dmaxC), &
+        ' of scale ', amax, ', relative ', MAX(dmax, dmaxC) / MAX(amax, TINY(amax))
     CALL Info('Circuits_Init', Message, Level=5)
+    ! The pieces live in the classic reference elements, not in the Piola ones.
+    IF (.NOT. Classic) CALL Warn('Circuits_Init', 'Foil sheet strand integrals assume the '// &
+        'classic lowest order edge basis; with "Use Piola Transform" or "Quadratic '// &
+        'Approximation" they are wrong')
+    IF (nWedge > 0) THEN
+      WRITE(Message,'(A,I0,A,I0,A,I0,A,ES10.3,A,ES10.3,A,ES10.3,A,ES10.3)') 'Foil sheet wedges: ', &
+          nWedge, ' (', nCurved, ' not affine, ', nFolded, ' with a folded split), '// &
+          'split volume / wedge volume - 1: max |per wedge| ', volerrW, ', over the block ', &
+          wsplit / MAX(wvol, TINY(wvol)) - 1._dp, &
+          ', source divergence relative: affine part ', dmax / MAX(amax, TINY(amax)), &
+          ', at nodes of non-affine wedges ', dmaxC / MAX(amax, TINY(amax))
+      CALL Info('Circuits_Init', Message, Level=5)
+    END IF
 
-    DEALLOCATE(Basis, dBasisdx, sStack, sAcross, Wloc, dNode, aNode, inBlk, skipn)
+    DEALLOCATE(Basis, dBasisdx, sStack, sAcross, Wloc, dNode, aNode, inBlk, skipn, curved)
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeFoilSheetSign
 !------------------------------------------------------------------------------

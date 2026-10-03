@@ -332,6 +332,16 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
      Element => GetActiveElement(t)
      n = GetElementNOFNodes()
 
+     ! The assembly loop leaves RotM sized for the element it saw last ('N' in
+     ! its ALLOCATE is this 'n'), and GetElementRotM writes 9*n values: on a
+     ! coil of wedges and tets that ran off a smaller array and corrupted the
+     ! heap (DEV-1545).
+     IF (SIZE(RotM,3) < n) THEN
+       DEALLOCATE(RotM)
+       ALLOCATE(RotM(3,3,n), STAT=istat)
+       IF ( istat /= 0 ) CALL Fatal( 'Wsolve', 'Memory allocation error.' )
+     END IF
+
      CoilBody = .FALSE.
      CompParams => GetComponentParams( Element )
      CoilType = ''
