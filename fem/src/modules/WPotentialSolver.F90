@@ -203,6 +203,11 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
                                 RotM(:,:,:), Tcoef(:,:,:)
   CHARACTER(LEN=MAX_NAME_LEN):: CoilType, WCoilType
   LOGICAL :: CoilBody
+  LOGICAL :: Grouped
+  INTEGER :: Group, GroupRun, nRuns
+  INTEGER, ALLOCATABLE :: BodyGroup(:), GroupList(:)
+  REAL(KIND=dp), ALLOCATABLE :: InGroup(:), WGroups(:)
+  LOGICAL, ALLOCATABLE :: GroupDone(:)
 
 
   SAVE STIFF, LOAD, FORCE, Tcoef, RotM, AllocationsDone
@@ -225,12 +230,29 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
      AllocationsDone = .TRUE.
   END IF
 
+  ! Windings of different components that touch share the nodes of the face
+  ! between them, and one W over both would let the electrode values of each
+  ! leak into the other. W is then solved one component at a time in the loop
+  ! below, and a last run (group 0) gives the bodies of no component where the
+  ! solver is active the W composed of those. Otherwise the loop runs once over
+  ! everything as it always did.
+  CALL FindTouchingGroups()
+  nRuns = 1
+  Group = -1
+  IF (Grouped) nRuns = SIZE(GroupList)
+
+  DO GroupRun = 1, nRuns
+   IF (Grouped) Group = GroupList(GroupRun)
+
    !System assembly:
    !----------------
    Active = GetNOFActive()
    CALL DefaultInitialize()
    DO t=1,Active
       Element => GetActiveElement(t)
+      IF (Grouped) THEN
+        IF (BodyGroup(Element % BodyId) /= Group) CYCLE
+      END IF
       n  = GetElementNOFNodes()
       nd = GetElementNOFDOFs()
       nb = GetElementNOFBDOFs()
@@ -319,17 +341,28 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
    END DO
 
    CALL DefaultFinishAssembly()
-   CALL DefaultDirichletBCs()
+   IF (.NOT. Grouped) THEN
+     CALL DefaultDirichletBCs()
+   ELSE IF (Group > 0) THEN
+     CALL SetGroupDirichletBCs()
+   END IF
 
    ! And finally, solve:
    !--------------------
-   Norm = DefaultSolve()
+   IF (Grouped .AND. Group == 0) THEN
+     Solver % Variable % Values = WGroups
+   ELSE
+     Norm = DefaultSolve()
+   END IF
 
   ! CALL SaveWPotSolution(Model % numberofbodies, Tcoef)
 
   Wnorms = GetWNormsForBodies(Model % numberofbodies)
   DO t=1,Active
      Element => GetActiveElement(t)
+     IF (Grouped) THEN
+       IF (BodyGroup(Element % BodyId) /= Group) CYCLE
+     END IF
      n = GetElementNOFNodes()
 
      ! The assembly loop leaves RotM sized for the element it saw last ('N' in
@@ -380,7 +413,186 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
       CALL SaveElementWSolution(Element, n, Wnorms(Element%BodyId), RotM, Tcoef, NoRotM)
 
   END DO
+
+  ! The nodal W keeps each node's value from the first group it is in; the
+  ! circuit structure reads it for the support of an element only.
+  IF (Grouped .AND. Group > 0) THEN
+    WHERE (InGroup > 0._dp .AND. .NOT. GroupDone)
+      WGroups = Solver % Variable % Values
+      GroupDone = .TRUE.
+    END WHERE
+  END IF
+  END DO ! GroupRun
+
+  IF (Grouped) THEN
+    Solver % Variable % Values = WGroups
+    DEALLOCATE(BodyGroup, GroupList, InGroup, WGroups, GroupDone)
+  END IF
 CONTAINS
+
+!------------------------------------------------------------------------------
+!> The groups W is solved in: the bodies of one component together. Bodies of
+!> no component are group 0. Grouped is set when two components share a node,
+!> and GroupList then holds every component with an element in some partition,
+!> followed by 0 if the solver is active in bodies of no component.
+!------------------------------------------------------------------------------
+  SUBROUTINE FindTouchingGroups()
+!------------------------------------------------------------------------------
+    INTEGER :: b, g, k, nbody, ngroup, nshared, nfree
+    INTEGER, POINTER :: Perm(:)
+    INTEGER, ALLOCATABLE :: Present(:)
+    REAL(KIND=dp), ALLOCATABLE :: Gmin(:), Gmax(:)
+!------------------------------------------------------------------------------
+    Grouped = .FALSE.
+    nbody = Model % NumberOfBodies
+    ngroup = Model % NumberOfComponents
+    ALLOCATE(BodyGroup(nbody), Present(MAX(ngroup,1)))
+    DO b=1,nbody
+      k = ListGetInteger(Model % Bodies(b) % Values, 'Component', Found)
+      BodyGroup(b) = 0
+      IF (Found .AND. k > 0) BodyGroup(b) = k
+    END DO
+
+    Perm => Solver % Variable % Perm
+    ALLOCATE(Gmin(SIZE(Solver % Variable % Values)), Gmax(SIZE(Solver % Variable % Values)))
+    Gmin = HUGE(1._dp)
+    Gmax = -HUGE(1._dp)
+    Present = 0
+    nfree = 0
+    DO t=1,GetNOFActive()
+      Element => GetActiveElement(t)
+      g = BodyGroup(Element % BodyId)
+      IF (g == 0) THEN
+        nfree = nfree + 1
+        CYCLE
+      END IF
+      Present(g) = 1
+      DO i=1,GetElementNOFNodes()
+        j = Perm(Element % NodeIndexes(i))
+        IF (j == 0) CYCLE
+        Gmin(j) = MIN(Gmin(j), REAL(g,dp))
+        Gmax(j) = MAX(Gmax(j), REAL(g,dp))
+      END DO
+    END DO
+    IF (ParEnv % PEs > 1) THEN
+      CALL ParallelSumNodalVector(Mesh, Gmin, Perm, Op=1)
+      CALL ParallelSumNodalVector(Mesh, Gmax, Perm, Op=2)
+    END IF
+    nshared = ParallelReduction(COUNT(Gmax > Gmin))
+    DEALLOCATE(Gmin, Gmax)
+
+    IF (nshared == 0) THEN
+      DEALLOCATE(BodyGroup, Present)
+      RETURN
+    END IF
+    Grouped = .TRUE.
+    DO g=1,ngroup
+      Present(g) = ParallelReduction(Present(g), 2)
+    END DO
+    IF (ParallelReduction(nfree) > 0) THEN
+      GroupList = [PACK([(g, g=1,ngroup)], Present(1:ngroup) > 0), 0]
+    ELSE
+      GroupList = PACK([(g, g=1,ngroup)], Present(1:ngroup) > 0)
+    END IF
+    DEALLOCATE(Present)
+
+    ALLOCATE(InGroup(SIZE(Solver % Variable % Values)), WGroups(SIZE(Solver % Variable % Values)), &
+        GroupDone(SIZE(Solver % Variable % Values)))
+    WGroups = 0._dp
+    GroupDone = .FALSE.
+    WRITE(Message,'(A,I0,A,I0,A)') 'Coils touch at ',nshared,' nodes: W solved for ', &
+        COUNT(GroupList > 0),' components one at a time'
+    CALL Info('Wsolve', Message, Level=5)
+!------------------------------------------------------------------------------
+  END SUBROUTINE FindTouchingGroups
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Dirichlet conditions of the current group: the W values of the boundary
+!> faces that have a parent in it, and zero on every node outside it, which
+!> then has no equation of its own. A node the group shares with another one
+!> stays free unless it is on a boundary face of the group itself.
+!------------------------------------------------------------------------------
+  SUBROUTINE SetGroupDirichletBCs()
+!------------------------------------------------------------------------------
+    TYPE(Matrix_t), POINTER :: A
+    TYPE(Element_t), POINTER :: Parent
+    TYPE(ValueList_t), POINTER :: BCList
+    INTEGER, POINTER :: Perm(:)
+    INTEGER :: m, side, ncon
+    LOGICAL :: Own
+    REAL(KIND=dp) :: Vals(Mesh % MaxElementNodes)
+    CHARACTER(LEN=MAX_NAME_LEN) :: vname
+!------------------------------------------------------------------------------
+    A => Solver % Matrix
+    Perm => Solver % Variable % Perm
+    vname = Solver % Variable % Name
+    IF (ALLOCATED(A % ConstrainedDOF)) A % ConstrainedDOF = .FALSE.
+    IF (ALLOCATED(A % DValues)) A % DValues = 0._dp
+
+    InGroup = 0._dp
+    DO t=1,GetNOFActive()
+      Element => GetActiveElement(t)
+      IF (BodyGroup(Element % BodyId) /= Group) CYCLE
+      DO i=1,GetElementNOFNodes()
+        j = Perm(Element % NodeIndexes(i))
+        IF (j > 0) InGroup(j) = 1._dp
+      END DO
+    END DO
+    IF (ParEnv % PEs > 1) CALL ParallelSumNodalVector(Mesh, InGroup, Perm, Op=2)
+    DO j=1,A % NumberOfRows
+      IF (InGroup(j) <= 0._dp) CALL UpdateDirichletDof(A, j, 0._dp)
+    END DO
+
+    ncon = 0
+    DO t=1,Mesh % NumberOfBoundaryElements
+      Element => GetBoundaryElement(t)
+      IF (.NOT. ASSOCIATED(Element % BoundaryInfo)) CYCLE
+      BCList => GetBC()
+      IF (.NOT. ASSOCIATED(BCList)) CYCLE
+      IF (.NOT. ListCheckPresent(BCList, vname)) CYCLE
+      Own = .FALSE.
+      DO side=1,2
+        IF (side == 1) THEN
+          Parent => Element % BoundaryInfo % Left
+        ELSE
+          Parent => Element % BoundaryInfo % Right
+        END IF
+        IF (.NOT. ASSOCIATED(Parent)) CYCLE
+        IF (Parent % BodyId < 1 .OR. Parent % BodyId > SIZE(BodyGroup)) CYCLE
+        IF (BodyGroup(Parent % BodyId) == Group) Own = .TRUE.
+      END DO
+      IF (.NOT. Own) CYCLE
+
+      m = GetElementNOFNodes()
+      Vals(1:m) = GetReal(BCList, vname, Found)
+      DO i=1,m
+        j = Perm(Element % NodeIndexes(i))
+        IF (j == 0) CYCLE
+        CALL UpdateDirichletDof(A, j, Vals(i))
+        ncon = ncon + 1
+      END DO
+    END DO
+
+    ! A group without electrodes (a closed coil, whose direction is not W) has
+    ! no W to solve for: keep it at zero rather than solve a singular system.
+    IF (ParallelReduction(ncon) == 0) THEN
+      DO j=1,A % NumberOfRows
+        CALL UpdateDirichletDof(A, j, 0._dp)
+      END DO
+    END IF
+
+    CALL EnforceDirichletConditions(Solver, A, A % RHS)
+
+    ! Start from the boundary values. Unless the matrix is flagged symmetric the
+    ! elimination keeps the columns of the constrained dofs, and CG then solves
+    ! the symmetric reduced system only while those dofs hold their values; the
+    ! previous group left its own solution on many of them and CG stalled.
+    Solver % Variable % Values = 0._dp
+    WHERE (A % ConstrainedDOF) Solver % Variable % Values = A % DValues
+!------------------------------------------------------------------------------
+  END SUBROUTINE SetGroupDirichletBCs
+!------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
   SUBROUTINE LocalMatrix(  STIFF, FORCE, LOAD, Element, CoilBody, CoilType, Tcoef, RotM, n, nd, NoRotM )

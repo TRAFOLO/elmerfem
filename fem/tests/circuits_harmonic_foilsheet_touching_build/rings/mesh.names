@@ -1,0 +1,19 @@
+! ----- names for bodies -----
+$ lower = 1
+$ upper = 2
+$ air = 3
+! ----- names for boundaries -----
+$ shared = 1
+$ box = 2
+$ sym = 3
+$ lower_vin = 11
+$ lower_vout = 12
+$ lower_bottom = 13
+$ lower_xpos = 15
+$ lower_xneg = 16
+$ upper_vin = 21
+$ upper_vout = 22
+$ upper_bottom = 23
+$ upper_top = 24
+$ upper_xpos = 25
+$ upper_xneg = 26
