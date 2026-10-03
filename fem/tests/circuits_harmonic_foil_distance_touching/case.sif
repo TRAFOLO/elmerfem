@@ -1,0 +1,116 @@
+! Two nested square rings that touch (rings_touch.grd): Direction Method =
+! distance on windings that share a face and its nodes (DEV-1541). The inner
+! ring spans the half sizes 10..20 mm, the outer one 20..30 mm, both 10 mm high,
+! and they share the face at half size 20.
+!
+! Alpha is numbered as a chain over the touching faces: 1 on the inner face of
+! the inner ring, 0 on the shared face, -1 on the outer face of the outer ring,
+! so the inner ring spans 0..1 and the outer one -1..0, and the shared face has
+! one value that ends the pair of both. Beta runs 0..1 from bottom to top in
+! both rings, also by distance. Every node of the shared face gets the same
+! value from either ring, which the solver checks.
+!
+! The reference norms are the Elmer L2 norm sqrt(sum(v^2)/n) over the n = 1848
+! nodes of the two rings, computed independently in numpy from the exact
+! distances to each ring's own faces: Alpha 0.6334629186, Beta 0.6454972244
+! (= z/10 everywhere). The parallel path of the shared nodes runs in
+! circuits_harmonic_foilsheet_touching_np4.
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "rings_touch"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+End
+
+Solver 1  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Alpha
+  Variable = Alpha
+  Direction Method = String "distance"
+End
+
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Beta
+  Variable = Beta
+  Direction Method = String "distance"
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+Material 1
+  Name = "copper"
+  Electric Conductivity = 58e6
+End
+
+Material 2
+  Name = "air"
+  Electric Conductivity = 0
+End
+
+Body 1  !---- inner ring
+  Name = "coil inner"
+  Target Bodies(1) = 1
+  Equation = 1
+  Material = 1
+End
+
+Body 2  !---- outer ring
+  Name = "coil outer"
+  Target Bodies(1) = 2
+  Equation = 1
+  Material = 1
+End
+
+Body 3  !---- air in the hole and around the rings
+  Name = "air"
+  Target Bodies(2) = 4 5
+  Material = 2
+End
+
+Boundary Condition 1
+  Name = "shared face"
+  Target Boundaries(1) = 1
+  Alpha = Real 0
+End
+
+Boundary Condition 2
+  Name = "inner ring inner face"
+  Target Boundaries(1) = 2
+  Alpha = Real 1
+End
+
+Boundary Condition 3
+  Name = "outer ring outer face"
+  Target Boundaries(1) = 3
+  Alpha = Real -1
+End
+
+Boundary Condition 4
+  Name = "bottom of both rings"
+  Target Boundaries(2) = 5 6
+  Beta = Real 0
+End
+
+Boundary Condition 5
+  Name = "top of both rings"
+  Target Boundaries(2) = 9 10
+  Beta = Real 1
+End
+
+Solver 1 :: Reference Norm = Real 0.6334629186
+Solver 1 :: Reference Norm Tolerance = Real 1E-8
+Solver 2 :: Reference Norm = Real 0.6454972244
+Solver 2 :: Reference Norm Tolerance = Real 1E-8
+$fprintf( stderr, "TEST CASE 1\n");
+RUN

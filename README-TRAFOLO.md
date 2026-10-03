@@ -63,6 +63,20 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   tetrahedra for the strand geometry and its strand source is mapped to the wedge edges, so it stays
   exactly divergence free (DEV-1545; it stopped with a Fatal before). Tests:
   `circuits_harmonic_foilsheet*`, `circuits_transient_foilsheet*`.
+- Touching foil sheet and flat wire windings (DEV-1541). `Direction Method = distance` takes the
+  pair of boundary values of each body from its own faces, so windings that share a face are
+  numbered as a chain (winding k spans k-1..k, any integer shift) and the shared face carries one
+  value. A node shared by several bodies gets the value of each: the elemental copy of the field
+  (`Alpha Direction`, `Beta Direction`) holds each body's own value, the nodal field that of the
+  first body, so windings of a different height or radial build may touch; on a face with a
+  boundary value of both bodies the values must agree (Fatal otherwise). The `foil sheet` and
+  `flat wire` kernels read that copy (for distance fields only; Laplace fields are read as before)
+  and map each component onto its own 0..1 of `Alpha` and `Beta` (published as
+  `Foil Sheet Alpha Range` / `Foil Sheet Beta Range`). When coils of different components share
+  nodes, `Wsolve` solves W one component at a time, each solve starting from its own boundary
+  values, so the electrode values of one winding do not leak into the other and plain CG
+  converges. Tests: `circuits_harmonic_foil_distance_touching`,
+  `circuits_harmonic_foilsheet_touching*`.
 - `WPotentialSolver` (`Wsolve`) grows its rotation matrix buffer to the element it saves; on a
   mesh mixing element types (tetrahedra and wedges in a coil) it wrote past the buffer left by the
   last assembled element and corrupted the heap (DEV-1545).
