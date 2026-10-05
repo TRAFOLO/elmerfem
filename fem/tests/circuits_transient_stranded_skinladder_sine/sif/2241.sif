@@ -1,0 +1,318 @@
+! DEV-1548: a sine current through a stranded coil whose Sigma 33 skin ladder
+! has a memory. The heat of the winding, period averaged, must converge to the
+! harmonic value Kf Re Z(j omega) I_rms^2 as the step shrinks, to first order
+! (implicit Euler), with Z(s) = 1/y(s) = z_inf + beta/(1 + s tau) the ladder's
+! impedance. The ladder is the one of the Hybrid Foil-Litz template; at 2 MHz
+! Re Z = 1.43 R0. The conductivity of the step alone, G_skin(dt), gave 6.3x,
+! 10.5x and 16.4x of that value at 12, 24 and 48 points per period. The heat
+! only depends on the prescribed current and the ladder, so each run is also
+! pinned to the discrete value of the implicit Euler ladder. The proximity
+! ladder has no memory here (alpha = 0) and the core no conductivity.
+Check Keywords "Warn"
+INCLUDE sif/2241-circuits.definitions
+INCLUDE 2241/mesh.names
+! Points per period of this run and its expected values
+INCLUDE sif/case.params
+$ f0 = 2.0e6
+! Kf Re Z(j omega) I_rms^2 at 2 MHz, I_rms^2 = 1/2 A^2: Kf = 5.2529053551e6 1/m
+! is the integral of N_j^2 |w|^2 over the winding as MagnetoDynamicsCalcFields
+! takes it (unit w, half model), from the same coil with alpha = 0 before
+! DEV-1548; Re Z(j omega) = z_inf + beta/(1 + (omega tau)^2) = 1.2099666e-7 ohm m.
+$ Plim = 3.1779200686E-01
+Header 1
+   Mesh DB "." "2241"
+End
+Constants 1
+   Permittivity of Vacuum = 8.8542e-12
+End
+Initial Condition 1
+   A {e} = Real 0
+End
+Simulation 1
+   Max Output Level = 3
+   Coordinate System = Cartesian 3D
+   Coordinate Mapping(3) = 1 2 3
+   Coordinate Scaling = 0.001
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+   ! Two periods; the second is averaged.
+   Timestep intervals = $Nsteps
+   Timestep Sizes = $dt
+   ! Coupled iterations per step: a second pass must redo the step, not take another.
+   Steady State Max Iterations = $SSIter
+   Steady State Min Iterations = $SSIter
+   Output Intervals = 1
+End
+Solver 1
+   Exec Solver = Before all
+   Procedure = "DirectionSolver" "DirectionSolver"
+   Linear System Solver = Iterative
+   Linear System Iterative Method = BiCGStab
+   Linear System Max Iterations = 5000
+   Linear System Convergence Tolerance = 1.0e-10
+   Linear System Abort Not Converged = True
+   Linear System Residual Output = 1000
+   Equation = Direction Alpha
+   Variable =  Alpha
+End
+Solver 2
+   Exec Solver = Before all
+   Procedure = "DirectionSolver" "DirectionSolver"
+   Linear System Solver = Iterative
+   Linear System Iterative Method = BiCGStab
+   Linear System Max Iterations = 5000
+   Linear System Convergence Tolerance = 1.0e-10
+   Linear System Abort Not Converged = True
+   Linear System Residual Output = 1000
+   Equation = Direction Beta
+   Variable =  Beta
+End
+Solver 3
+   Exec Solver = Before All
+   Equation = Transformation matrix
+   Procedure = "CoordinateTransform" "RotMSolver"
+   Variable = -nooutput Dummy
+   Optimize Bandwidth = False
+   Polar Decomposition Determinant Tolerance = Real 1.0e-9
+   Polar Decomposition Max Iterations = Integer 100
+   Exported Variable 1 = -nooutput RotM E[RotM E:9]
+   Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+   Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+   Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+   Discontinuous Galerkin = True
+End
+Solver 4 !-- WpotentialSolver - Wsolve
+   Exec Solver = Before All
+   Procedure = "WPotentialSolver" "Wsolve"
+   Equation = "Wire direction"
+   Variable = W
+   Linear System Solver = Iterative
+   Linear System Iterative Method = CG
+   Linear System Max Iterations = 10000
+   Linear System Convergence Tolerance = 1.0e-10
+   Linear System Abort Not Converged = True
+   Linear System Residual Output = 1000
+End
+Solver 5 !-- CircuitsAndDynamics - CircuitsAndDynamicsHarmonic
+   Exec Solver = Always
+   Equation = Circuits
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+End
+Solver 6  !---- MagnetoDynamics, WhitneyAVSolver
+   Exec Solver = Always
+   Equation = "MGDynamics"
+   Variable = "A"
+   Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+   NonLinear System Relaxation Factor=1
+   Export Lagrange Multiplier = Logical True
+   Exported Variable 1 = -elem Xi Alpha
+   Exported Variable 2 = -elem Xi Beta
+   Exported Variable 3 = -elem Proximity Loss
+   ! GCR, not BiCGStab(l), which breaks down (0/0) in the second step of these
+   ! short steps.
+   Linear System Solver = Iterative
+   Linear System Iterative Method = GCR
+   Linear System GCR Restart = 200
+   Linear System preconditioning = none
+   Linear System Convergence Tolerance = 1.e-11
+   Linear System Max Iterations = 3000
+   Linear System Residual Output = 1000
+   Steady State Convergence Tolerance = 1e-08
+End
+Solver 7
+   Exec Solver = Always
+   Equation = "MGDynamicsCalc"
+   Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+   Linear System Symmetric = True
+   Potential Variable = String "A"
+   Calculate Current Density = Logical True
+   Calculate Joule Heating = Logical True
+   Calculate Nodal Fields = Logical False
+   Loss Estimation = Logical True
+   Steady State Convergence Tolerance = 0
+   Linear System Solver = "Iterative"
+   Linear System Preconditioning = None
+   Linear System Residual Output = 1000
+   Linear System Max Iterations = 5000
+   Linear System Iterative Method = CG
+   Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 8
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 9
+   ! Once per step: ProcessFields advances its averaging clock by dt per call.
+   Exec Solver = After Timestep
+   Equation = "post process data"
+   Procedure = "ProcessFields" "ProcessFields"
+   Update Exported Variables = Logical True
+   ! ProcessFields reads the start time only with the core loss on; the
+   ! materials give no core loss coefficients.
+   Calculate Harmonic Loss = Logical True
+   Averaging Start Time = Real $Tper
+End
+Solver 10
+   ! The winding heat averaged over the second period (LoadWm3Avg holds the
+   ! Joule heating of MagnetoDynamicsCalcFields, here all in the winding),
+   ! against the discrete value of the ladder.
+   Exec Solver = After timestep
+   Equation = "sv avg"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/avg.dat
+   Variable 1 = String "LoadWm3Avg"
+   Operator 1 = String "int"
+   Show Norm Index = Integer 1
+End
+Solver 11
+   ! The same against the harmonic value, within 0.25/N: the relative error
+   ! printed for N = 12, 24, 48 shows the first order convergence.
+   Exec Solver = After timestep
+   Equation = "sv limit"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/limit.dat
+   Variable 1 = String "LoadWm3Avg"
+   Operator 1 = String "int"
+   Show Norm Index = Integer 1
+End
+Solver 12
+   ! The circuit's heat of the last step, K [R0 I^2 + A (I - chi)^2].
+   Exec Solver = After timestep
+   Equation = "sv heat"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/heat.dat
+   Show Norm Name = String "res: p_skin_component(1)"
+End
+Equation 1
+   Active Solvers(3) = 6 7 9
+End
+Equation 2
+   Active Solvers(8) = 1 2 3 4 5 6 7 9
+End
+Material 1
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+   Relative Permittivity = 1e100
+   Density = 1
+End
+Material 2
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+   Relative Permittivity = 1
+   Density = 1
+End
+Material 3
+   Name = metal
+   Relative Permeability = 1
+   Relative Permittivity = 1e100
+   Electric Conductivity = 1e7
+   Density = 1
+End
+Body 1
+   Name = core
+   Target Bodies(1) = $ core
+   Equation = 1
+   Material = 1
+   Initial Condition = 1
+End
+Body 2
+   Name = air
+   Target Bodies(1) = $ air
+   Equation = 1
+   Material = 2
+   Initial Condition = 1
+End
+Body 3
+   Name = airgap_1_limb_2
+   Target Bodies(1) = $ airgap_1_limb_2
+   Equation = 1
+   Material = 2
+   Initial Condition = 1
+End
+Body 4
+   Name = wp1
+   Target Bodies(1) = $ wp1
+   Equation = 2
+   Material = 3
+   Initial Condition = 1
+   Body Force = 1
+   Alpha reference (3) = Real 1 0 0
+   Beta reference (3) = Real 0 1 0
+End
+Component 1
+   Name = String wp1
+   Body = Integer 4
+   Coil Type = String stranded
+   Homogenization Model = Logical True
+   Transient Homogenization = Logical True
+   Homogenization Ladder Order = Integer 1
+   Nu 11 y0 = Real 7.95774715e5
+   Nu 11 alpha = Real 0.0
+   Nu 11 Sigma(1,1) = Real 1.0e-3
+   Nu 22 y0 = Real 7.95774715e5
+   Nu 22 alpha = Real 0.0
+   Nu 22 Sigma(1,1) = Real 1.0e-3
+   ! The Sigma 33 ladder of the Hybrid Foil-Litz template.
+   Sigma 33 y0 = Real 2.0838e5
+   Sigma 33 alpha = Real 1.1611e7
+   Sigma 33 Sigma(1,1) = Real 3.981e-7
+   Number of Turns = Real 144
+   Electrode Area = Real 0.000185614878383
+   Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
+End
+Body Force 1
+   Name = "Circuit"
+   ! i_component(1) = -S = sin(omega t + pi/4) A
+   S = Variable time
+     Real MATC "-sin(2*pi*f0*tx+pi/4)"
+End
+Boundary Condition 1
+   Name = BCn Flux Parallel
+   Target Boundaries(2) = $ coreface_xy xy0
+   A {e} = Real 0
+End
+Boundary Condition 2
+   Name = Alpha0
+   Target Boundaries = $ wp1_alpha0
+   Body 4: Alpha = Real 0
+End
+Boundary Condition 3
+   Name = Alpha1
+   Target Boundaries = $ wp1_alpha1
+   Body 4: Alpha = Real 1
+End
+Boundary Condition 4
+   Name = ground
+   Target Boundaries = $ wp1_gamma1
+   W = Real 0
+   A {e} = Real 0
+End
+Boundary Condition 5
+   Name = current in foil winding
+   Target Boundaries = $ wp1_gamma0
+   W = Real 1
+   A {e} = Real 0
+End
+Boundary Condition 6
+   Name = Beta1
+   Target Boundaries = $ wp1_beta1
+   Body 4: Beta = Real 1
+End
+Boundary Condition 7
+   Name = Beta0
+   Target Boundaries = $ wp1_beta0
+   Body 4: Beta = Real 0
+End
+
+Solver 10 :: Reference Norm = Real $Pavg
+Solver 10 :: Reference Norm Tolerance = Real 1E-06
+Solver 11 :: Reference Norm = Real $Plim
+Solver 11 :: Reference Norm Tolerance = Real $Tlim
+Solver 12 :: Reference Norm = Real $Plast
+Solver 12 :: Reference Norm Tolerance = Real 1E-06
+$fprintf( stderr, "TEST CASE 1\n");
+RUN

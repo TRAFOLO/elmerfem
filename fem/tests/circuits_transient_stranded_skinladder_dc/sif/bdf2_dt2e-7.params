@@ -1,0 +1,5 @@
+! BDF2, 0.2 us steps: G_skin(dt) = 0.35 G0, the old code gave 2.9x K/G0
+$ Order = 2
+$ dt = 2.0e-7
+! K/y(1.5/dt), the diagonal of the BDF2 steps
+$ Rdiag = 3.4465599642E+00

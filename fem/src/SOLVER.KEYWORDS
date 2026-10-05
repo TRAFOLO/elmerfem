@@ -1660,6 +1660,10 @@ Component:Real:      'Nu 22 Sigma'
 Component:Real:      'Sigma 33 y0'
 Component:Real:      'Sigma 33 alpha'
 Component:Real:      'Sigma 33 Sigma'
+! The stranded coil skin ladder state of the step, chi = Gain I + History,
+! written by the circuits solver for MagnetoDynamicsCalcFields.
+Component:Real:      'Stranded Skin State Gain'
+Component:Real:      'Stranded Skin State History'
 ! Foster form of the same ladders: y0 + sum_k r_k/(1 + s T_k). Accepted
 ! alongside the alpha/Sigma triplet, which stays valid for order 1.
 Component:Real:      'Nu 33 y0'

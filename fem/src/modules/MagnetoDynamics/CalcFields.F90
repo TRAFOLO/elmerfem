@@ -634,6 +634,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
+   ! Stranded coil skin ladder: stage resistivity, state factors, stage heat.
+   REAL(KIND=dp) :: SkinA, SkinGain, SkinHist, SkinHeat
    REAL(KIND=dp) :: R_ip, mu_r
    REAL(KIND=dp), SAVE :: mu0 = 1.2566370614359173e-6_dp
 
@@ -1216,6 +1218,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      CALL GetPermittivity(Material,PR,n)
 
      CoilBody = .FALSE.
+     SkinA = 0._dp
      CompParams => GetComponentParams( Element )
      CoilType = ''
      RotM = 0._dp
@@ -1319,21 +1322,27 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END BLOCK
          ELSE IF (HomogenizationModel .AND. Transient) THEN
            IF (GetLogical(CompParams, 'Transient Homogenization', Found) .AND. Found) THEN
-             ! Slice 3 (conduction part): the winding Joule density must use the
-             ! ladder's effective conductivity G_skin = y0 + alpha/(1 + sigma/dt)
-             ! - the same BDF-1 Schur form CircuitsAndDynamics uses for the
-             ! lumped resistance - instead of the raw material conductivity.
-             ! Otherwise the local loss field underestimates the conduction
-             ! loss by sigma_material/sigma_eff while the circuit is right.
+             ! The heat of the circuit's skin ladder (TransientHomogCircuitState
+             ! in CircuitsAndDynamics), spread over the winding like the DC loss:
+             ! |J|^2/G0 from the ladder's DC conductivity G0 = y0 + alpha, plus
+             ! N_j^2 |w|^2 A (I - chi)^2 of the ladder stage, A = 1/y0 - 1/G0.
+             ! The circuits solver publishes chi^n = Gain I^n + History.
              BLOCK
-               REAL(KIND=dp) :: s_y0, s_alpha, s_SigmaMat(1,1), g_skin
+               REAL(KIND=dp) :: s_y0, s_alpha, s_SigmaMat(1,1), g0
                CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
                                                      s_y0, s_alpha, s_SigmaMat)
-               g_skin = s_y0 + s_alpha / (1.0_dp + s_SigmaMat(1,1) / dt)
+               g0 = s_y0 + s_alpha
                Tcoef = 0._dp
-               Tcoef(1,1,1:n) = g_skin
-               Tcoef(2,2,1:n) = g_skin
-               Tcoef(3,3,1:n) = g_skin
+               Tcoef(1,1,1:n) = g0
+               Tcoef(2,2,1:n) = g0
+               Tcoef(3,3,1:n) = g0
+               SkinA = 1._dp / s_y0 - 1._dp / g0
+               IF (SkinA /= 0._dp) THEN
+                 SkinGain = GetConstReal(CompParams, 'Stranded Skin State Gain', Found)
+                 IF (Found) SkinHist = GetConstReal(CompParams, 'Stranded Skin State History', Found)
+                 IF (.NOT. Found) CALL Fatal(Caller, 'Stranded coil skin ladder state not found: '// &
+                     'the "CircuitsAndDynamics" solver must run before this one in every time step.')
+               END IF
              END BLOCK
            END IF
          END IF
@@ -1840,6 +1849,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                ItoJCoeffFound = .TRUE.
              END IF
            END SELECT
+           IF (SkinA /= 0._dp) THEN
+             SkinHeat = LagrangeVar % Values(IvarId) - &
+                 (SkinGain * LagrangeVar % Values(IvarId) + SkinHist)
+             SkinHeat = SkinA * N_j**2 * SUM(wvec**2) * SkinHeat**2
+           END IF
 
          CASE ('massive')
            localV(1) = localV(1) + LagrangeVar % Values(VvarId) * CircEqVoltageFactor
@@ -2277,6 +2291,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              Coeff = SUM( MATMUL( REAL(CMat_ip(1:3,1:3)), TRANSPOSE(E(1:1,1:3)) ) * &
                  TRANSPOSE(E(1:1,1:3)) ) * Basis(p) * s
            END IF
+           ! The stranded skin ladder stage beyond the DC conductivity.
+           IF (SkinA /= 0._dp) Coeff = Coeff + SkinHeat * Basis(p) * s
            !
            !
            ! No need for a "HasVelocity" check: the effect of v x B is already inbuilt into 
