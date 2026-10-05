@@ -634,8 +634,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
-   ! Stranded coil skin ladder: stage resistivity, state factors, stage heat.
-   REAL(KIND=dp) :: SkinA, SkinGain, SkinHist, SkinHeat
+   ! Stranded coil skin ladder: stage coefficient L tau, state factors, stage heat.
+   REAL(KIND=dp) :: SkinLt, SkinGain, SkinHist, SkinHeat
    REAL(KIND=dp) :: R_ip, mu_r
    REAL(KIND=dp), SAVE :: mu0 = 1.2566370614359173e-6_dp
 
@@ -1218,7 +1218,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      CALL GetPermittivity(Material,PR,n)
 
      CoilBody = .FALSE.
-     SkinA = 0._dp
+     SkinLt = 0._dp
      CompParams => GetComponentParams( Element )
      CoilType = ''
      RotM = 0._dp
@@ -1325,8 +1325,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              ! The heat of the circuit's skin ladder (TransientHomogCircuitState
              ! in CircuitsAndDynamics), spread over the winding like the DC loss:
              ! |J|^2/G0 from the ladder's DC conductivity G0 = y0 + alpha, plus
-             ! N_j^2 |w|^2 A (I - chi)^2 of the ladder stage, A = 1/y0 - 1/G0.
-             ! The circuits solver publishes chi^n = Gain I^n + History.
+             ! N_j^2 |w|^2 L tau q^2 of the ladder stage, L = sigma alpha/G0^2,
+             ! tau = sigma y0/G0, which vanishes at y0 = 0 and at alpha = 0.
+             ! The circuits solver publishes q^n = Gain I^n + History.
              BLOCK
                REAL(KIND=dp) :: s_y0, s_alpha, s_SigmaMat(1,1), g0
                CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
@@ -1336,8 +1337,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                Tcoef(1,1,1:n) = g0
                Tcoef(2,2,1:n) = g0
                Tcoef(3,3,1:n) = g0
-               SkinA = 1._dp / s_y0 - 1._dp / g0
-               IF (SkinA /= 0._dp) THEN
+               SkinLt = (s_SigmaMat(1,1) * s_alpha / (g0 * g0)) * (s_SigmaMat(1,1) * s_y0 / g0)
+               IF (SkinLt /= 0._dp) THEN
                  SkinGain = GetConstReal(CompParams, 'Stranded Skin State Gain', Found)
                  IF (Found) SkinHist = GetConstReal(CompParams, 'Stranded Skin State History', Found)
                  IF (.NOT. Found) CALL Fatal(Caller, 'Stranded coil skin ladder state not found: '// &
@@ -1849,10 +1850,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                ItoJCoeffFound = .TRUE.
              END IF
            END SELECT
-           IF (SkinA /= 0._dp) THEN
-             SkinHeat = LagrangeVar % Values(IvarId) - &
-                 (SkinGain * LagrangeVar % Values(IvarId) + SkinHist)
-             SkinHeat = SkinA * N_j**2 * SUM(wvec**2) * SkinHeat**2
+           IF (SkinLt /= 0._dp) THEN
+             SkinHeat = SkinGain * LagrangeVar % Values(IvarId) + SkinHist
+             SkinHeat = SkinLt * N_j**2 * SUM(wvec**2) * SkinHeat**2
            END IF
 
          CASE ('massive')
@@ -2292,7 +2292,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                  TRANSPOSE(E(1:1,1:3)) ) * Basis(p) * s
            END IF
            ! The stranded skin ladder stage beyond the DC conductivity.
-           IF (SkinA /= 0._dp) Coeff = Coeff + SkinHeat * Basis(p) * s
+           IF (SkinLt /= 0._dp) Coeff = Coeff + SkinHeat * Basis(p) * s
            !
            !
            ! No need for a "HasVelocity" check: the effect of v x B is already inbuilt into 

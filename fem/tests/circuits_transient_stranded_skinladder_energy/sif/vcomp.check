@@ -1,0 +1,2 @@
+! The coil voltage is not checked here: at 1-2 ns steps its field part is the
+! noise of the ungauged A-V solve over the step, up to volts.

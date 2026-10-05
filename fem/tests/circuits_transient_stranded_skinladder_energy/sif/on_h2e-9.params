@@ -1,0 +1,23 @@
+! switch-on: 1 A from the first step, implicit Euler, 2e-09 s steps, heat averaged over the on-time
+$ y0 = 208380
+$ alpha = 11611000
+$ sigma = 3.981e-07
+$ Order = 1
+$ Nsteps = 20
+$ function dtfun(t) { _dtfun = 2e-09 }
+$ f0 = 2000000
+$ function isrc(t) { _isrc = 1 }
+$ Tavg = 0
+! Discrete values of the ladder (DEV-1549 predictions): heat average, ladder voltage,
+! coil voltage, circuit heat, field heat and diagonal of the last step
+$ Pavg = 2.3460140176e+00
+$ Vskin = 1.2470686904e+00
+$ Vcomp = 1.2470686904e+00
+$ Plast = 9.1247625397e-01
+$ PJlast = 4.4552374290e-01
+$ Rdiag = 4.0381520843e+01
+! Analytic references and their tolerances (SaveScalars norms are absolute values)
+$ Pref = 2.6170183120e+00
+$ PrefTol = 1.300e-01
+$ Vref = 1.2470686904e+00
+$ VrefTol = 1.000e-06

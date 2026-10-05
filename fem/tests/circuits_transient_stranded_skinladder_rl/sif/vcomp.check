@@ -1,0 +1,4 @@
+! The flux linkage of the ungauged A-V solve is repeatable to about 4e-5 of the
+! field voltage at a fixed step and to 4e-4 after a step change.
+Solver 14 :: Reference Norm = Real $Vcomp
+Solver 14 :: Reference Norm Tolerance = Real $VcompTol
