@@ -17,7 +17,19 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Harmonic Loss * Coefficient` keywords: CalcFields reads them with `ListGetFun(..., Freq)`, which
   evaluates any dependency at the frequency.
 - `StatElecSolveVec` — thin-layer Robin coefficient fix (missing `Eps0`).
-- Transient winding homogenization (CalcFields effective conductivity).
+- Transient winding homogenization. The skin ladder of a stranded coil (`Sigma 33 y0`, `Sigma 33
+  alpha`, `Sigma 33 Sigma(1,1)`, n = 1) runs in impedance form with one current-driven state per
+  component (`CircuitsAndDynamics`, DEV-1548): the diagonal keeps the ladder's conductivity at the
+  step, `G_skin`, and the history of the state goes to the right hand side, with the BDF weights of
+  the field solver. A DC current now sees K/G0 at any step, and the transient loss converges to the
+  harmonic one as the step shrinks; before, the history was left out and the litz loss grew with
+  the number of steps (Hybrid Foil-Litz: +25 % at 24, +50 % at 48 points per period). `CalcFields`
+  spreads the ladder heat K [R0 I^2 + A (I - chi)^2] over the winding like the DC loss, instead of
+  |J|^2/G_skin. New circuit scalars `r_dc_skin_component(k)` (K/G0) and `p_skin_component(k)` (that
+  heat); `r_component` stays the diagonal K/G_skin. Needs `CircuitsOutput` in every time step; a
+  `Sigma 33 y0` that is not positive stops with a Fatal; the state is not in restart files (the
+  policy of the foil sheet ladder). Tests: `circuits_transient_stranded_skinladder_dc`,
+  `circuits_transient_stranded_skinladder_sine`.
 - Windows SIF path handling fix in the Lua layer.
 - `CircuitsAndDynamics` — nonlinear (solution-dependent) lumped circuit elements in
   transient runs: the exported `crt i`/`crt v` variables are refreshed from the latest

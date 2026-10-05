@@ -1,0 +1,5 @@
+! Implicit Euler (the scheme TRAFOLO uses), 0.2 us steps
+$ Order = 1
+$ dt = 2.0e-7
+! K/G_skin(dt) with G_skin = y0 + alpha/(1 + sigma/dt), as before DEV-1548
+$ Rdiag = 2.6297831037E+00
