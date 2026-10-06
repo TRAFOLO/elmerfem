@@ -1,0 +1,42 @@
+! DEV-1549: A negative "Sigma 33 y0" stops with a Fatal; y0 = 0 is the RL limit.
+Check Keywords "Warn"
+INCLUDE sif/2241-circuits.definitions
+INCLUDE 2241/mesh.names
+Header 1
+   Mesh DB "." "2241"
+End
+Simulation 1
+   Max Output Level = 3
+   Coordinate System = Cartesian 3D
+   Coordinate Mapping(3) = 1 2 3
+   Coordinate Scaling = 0.001
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+   Timestep intervals = 2
+   Timestep Sizes = 2.0e-7
+   Steady State Max Iterations = 1
+   Output Intervals = 1
+End
+Component 1
+   Name = String wp1
+   Body = Integer 4
+   Coil Type = String stranded
+   Homogenization Model = Logical True
+   Transient Homogenization = Logical True
+   Homogenization Ladder Order = Integer 1
+   Nu 11 y0 = Real 7.95774715e5
+   Nu 11 alpha = Real 0.0
+   Nu 11 Sigma(1,1) = Real 1.0e-3
+   Nu 22 y0 = Real 7.95774715e5
+   Nu 22 alpha = Real 0.0
+   Nu 22 Sigma(1,1) = Real 1.0e-3
+   Sigma 33 y0 = Real -1.0e3
+   Sigma 33 alpha = Real 1.1611e7
+   Sigma 33 Sigma(1,1) = Real 3.981e-7
+   Number of Turns = Real 144
+   Electrode Area = Real 0.000185614878383
+   Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
+End
+INCLUDE sif/model.inc
+RUN

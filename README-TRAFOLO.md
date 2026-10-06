@@ -18,18 +18,24 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   evaluates any dependency at the frequency.
 - `StatElecSolveVec` — thin-layer Robin coefficient fix (missing `Eps0`).
 - Transient winding homogenization. The skin ladder of a stranded coil (`Sigma 33 y0`, `Sigma 33
-  alpha`, `Sigma 33 Sigma(1,1)`, n = 1) runs in impedance form with one current-driven state per
-  component (`CircuitsAndDynamics`, DEV-1548): the diagonal keeps the ladder's conductivity at the
+  alpha`, `Sigma 33 Sigma(1,1)`, n = 1) runs in impedance form, R0 + L s/(1 + s tau) with R0 =
+  1/G0, L = sigma alpha/G0^2, tau = sigma y0/G0, with one state per component
+  (`CircuitsAndDynamics`, DEV-1548, DEV-1549): the diagonal keeps the ladder's conductivity at the
   step, `G_skin`, and the history of the state goes to the right hand side, with the BDF weights of
   the field solver. A DC current now sees K/G0 at any step, and the transient loss converges to the
   harmonic one as the step shrinks; before, the history was left out and the litz loss grew with
-  the number of steps (Hybrid Foil-Litz: +25 % at 24, +50 % at 48 points per period). `CalcFields`
-  spreads the ladder heat K [R0 I^2 + A (I - chi)^2] over the winding like the DC loss, instead of
-  |J|^2/G_skin. New circuit scalars `r_dc_skin_component(k)` (K/G0) and `p_skin_component(k)` (that
-  heat); `r_component` stays the diagonal K/G_skin. Needs `CircuitsOutput` in every time step; a
-  `Sigma 33 y0` that is not positive stops with a Fatal; the state is not in restart files (the
-  policy of the foil sheet ladder). Tests: `circuits_transient_stranded_skinladder_dc`,
-  `circuits_transient_stranded_skinladder_sine`.
+  the number of steps (Hybrid Foil-Litz: +25 % at 24, +50 % at 48 points per period). `y0 = 0`,
+  where TRAFOLO's fit sits when it hits its cap, is the exact limit: a resistor K/G0 in series with
+  the inductance K sigma/G0 (DEV-1549; DEV-1548 stopped there with a Fatal). `CalcFields` spreads
+  the ladder heat K [R0 I^2 + L tau q^2] over the winding like the DC loss, instead of
+  |J|^2/G_skin. New circuit scalars `r_dc_skin_component(k)` (K/G0), `p_skin_component(k)` (that
+  heat) and `v_skin_component(k)` (the ladder voltage: the coil voltage without its flux linkage);
+  `r_component` stays the diagonal K/G_skin. Needs `CircuitsOutput` in every time step. Stops with
+  a Fatal on a negative `Sigma 33 y0` or `Sigma 33 alpha`, on an explicit `Resistance` with `Sigma
+  33 alpha` /= 0, and on a restart that continues a transient or does not set `Restart Time = 0`
+  (the state is not in restart files). The stranded coil's flux coupling takes the variable-step
+  BDF weights (`TransientLadderBDF`) instead of a fixed 1.5/-2/0.5. Tests:
+  `circuits_transient_stranded_skinladder_dc`, `_sine`, `_rl`, `_energy`, `_fatal`.
 - Windows SIF path handling fix in the Lua layer.
 - `CircuitsAndDynamics` — nonlinear (solution-dependent) lumped circuit elements in
   transient runs: the exported `crt i`/`crt v` variables are refreshed from the latest

@@ -63,36 +63,41 @@ MODULE TransientHomogCircuitState
   !     y(s) = y0 + alpha/(1 + s sigma),   G0 = y(0) = y0 + alpha.
   ! The coil carries one current I, so its resistive voltage is K I/y(s), K the
   ! integral of N_j^2 |w|^2 with the depth and voltage factor of the circuit
-  ! row. The impedance is again of first order,
-  !     1/y(s) = z_inf + beta/(1 + s tau),
-  !     z_inf = 1/y0,  beta = 1/G0 - 1/y0,  tau = sigma y0/G0,
-  ! and one current-driven state per component carries the memory:
-  !     tau dchi/dt + chi = I,   v_R = K (z_inf I + beta chi).
-  ! With the BDF weights bdfw of the step (TransientLadderBDF), c = bdfw(1)/dt
-  ! and hx = -tau (bdfw(2) chi^{n-1} + bdfw(3) chi^{n-2})/dt, the state is
-  ! chi^n = (I^n + hx)/(1 + c tau), so that
-  !     v_R = K [ I^n/y(c) + beta hx/(1 + c tau) ]:
+  ! row. The impedance is again of first order, with coefficients that stay
+  ! finite down to y0 = 0,
+  !     1/y(s) = R0 + L s/(1 + s tau),
+  !     R0 = 1/G0,  L = sigma alpha/G0^2,  tau = sigma y0/G0,
+  ! a resistor R0 in series with an inductor L that a resistor A = L/tau =
+  ! 1/y0 - 1/G0 shunts. One state per component carries the memory,
+  !     tau dq/dt + q = dI/dt,   v_R = K (R0 I + L q),
+  ! q = dchi/dt for the inductor current chi = I - tau q. With the BDF weights
+  ! bdfw of the step (TransientLadderBDF), c = bdfw(1)/dt and
+  ! hx = (bdfw(2) chi^{n-1} + bdfw(3) chi^{n-2})/dt, the state is
+  ! q^n = (c I^n + hx)/(1 + c tau), so that
+  !     v_R = K [ I^n/y(c) + L hx/(1 + c tau) ]:
   ! the diagonal is the conductivity at s = c, Gskin = y(c), and the history
   ! goes to the right hand side. A constant current gives K I/G0 at any step.
   ! The heat is
-  !     P = K [ R0 I^2 + A (I - chi)^2 ],   R0 = 1/G0,  A = z_inf - R0,
-  ! the rest of I v_R being the energy K A tau chi^2/2 stored in the ladder.
-  ! alpha = 0 gives beta = A = 0: a resistor K/y0 without memory.
+  !     P = K [ R0 I^2 + L tau q^2 ],
+  ! the rest of I v_R being the energy K L chi^2/2 stored in the inductor.
+  ! y0 = 0 is the limit tau = 0, chi = I: the resistor K/G0 in series with the
+  ! inductance K sigma/G0, heat K R0 I^2. alpha = 0 gives L = 0: a resistor
+  ! K/y0 without memory.
   !----------------------------------------------------------------------------
   TYPE StrandedSkin_t
     LOGICAL :: Active = .FALSE.
     ! The SIF triplet and the impedance form derived from it.
     REAL(KIND=dp) :: y0 = 0._dp, alpha = 0._dp, sigma = 0._dp
-    REAL(KIND=dp) :: G0 = 0._dp, Zinf = 0._dp, Beta = 0._dp, Tau = 0._dp
+    REAL(KIND=dp) :: G0 = 0._dp, R0 = 0._dp, L = 0._dp, Tau = 0._dp
     ! Factors of the step: the diagonal conductance Gskin = y(c), the state
-    ! chi^n = Minv I^n + ChiHist, and the history voltage per unit K,
-    ! VHist = Beta ChiHist. Until a step is prepared, the DC values.
-    REAL(KIND=dp) :: Gskin = 0._dp, Minv = 1._dp, ChiHist = 0._dp, VHist = 0._dp
-    ! chi is the latest iterate of the step, chio and chioo the states of the
-    ! two previous steps, which PrepareStrandedSkinStep commits once per step.
-    ! AdvanceStrandedSkin starts from them, so a second call within a timestep
-    ! redoes the step instead of taking another one.
-    REAL(KIND=dp) :: chi = 0._dp, chio = 0._dp, chioo = 0._dp
+    ! q^n = Gain I^n + QHist, and the history voltage per unit K,
+    ! VHist = L QHist. Until a step is prepared, the DC values.
+    REAL(KIND=dp) :: Gskin = 0._dp, Gain = 0._dp, QHist = 0._dp, VHist = 0._dp
+    ! q and chi are the latest iterate of the step, chio and chioo the inductor
+    ! currents of the two previous steps, which PrepareStrandedSkinStep commits
+    ! once per step. AdvanceStrandedSkin starts from them, so a second call
+    ! within a timestep redoes the step instead of taking another one.
+    REAL(KIND=dp) :: q = 0._dp, chi = 0._dp, chio = 0._dp, chioo = 0._dp
     ! K of the last assembly, reduced over the partitions.
     REAL(KIND=dp) :: K = 0._dp
     ! Step count (sskin_step) at the last AdvanceStrandedSkin.
@@ -549,7 +554,7 @@ CONTAINS
     TYPE(ValueList_t), POINTER :: CompParams
     LOGICAL :: found
     CHARACTER(LEN=MAX_NAME_LEN) :: ctype, cname, uname
-    REAL(KIND=dp) :: SigmaMat(1, 1), rt
+    REAL(KIND=dp) :: SigmaMat(1, 1), rt, ralpha
     CHARACTER(*), PARAMETER :: Caller = 'InitStrandedSkinLadder'
 
     IF (sskin_allocated) RETURN
@@ -567,14 +572,6 @@ CONTAINS
       IF (TRIM(ctype) /= 'stranded') CYCLE
       IF (.NOT. (GetLogical(CompParams, 'Homogenization Model', found) .AND. found)) CYCLE
       IF (.NOT. (GetLogical(CompParams, 'Transient Homogenization', found) .AND. found)) CYCLE
-      ! A given 'Resistance' replaces the integrated one, and the ladder with it.
-      IF (ListCheckPresent(CompParams, 'Resistance')) CYCLE
-
-      ! Hard-fail on missing keywords (matches the proximity-side behavior
-      ! in WhitneyAVSolver - silent DC fallbacks mask Python emitter bugs).
-      CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
-          SSkin(i) % y0, SSkin(i) % alpha, SigmaMat)
-      SSkin(i) % sigma = SigmaMat(1, 1)
 
       uname = ListGetString(CompParams, 'Name', found)
       IF (found) THEN
@@ -582,10 +579,38 @@ CONTAINS
       ELSE
         cname = 'Component '//I2S(i)
       END IF
-      IF (SSkin(i) % y0 <= 0._dp) THEN
+
+      ! A given 'Resistance' replaces the integrated one, and the ladder with
+      ! it. It has no memory, so it can only stand in for a ladder without one.
+      IF (ListCheckPresent(CompParams, 'Resistance')) THEN
+        ralpha = GetConstReal(CompParams, 'Sigma 33 alpha', found)
+        IF (found .AND. ralpha /= 0._dp) THEN
+          WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': an explicit "Resistance" replaces the '// &
+              'skin ladder, whose memory it cannot carry ("Sigma 33 alpha" = ', ralpha, &
+              '). Remove "Resistance", or set "Sigma 33 alpha = 0".'
+          CALL Fatal(Caller, Message)
+        END IF
+        CYCLE
+      END IF
+
+      ! Hard-fail on missing keywords (matches the proximity-side behavior
+      ! in WhitneyAVSolver - silent DC fallbacks mask Python emitter bugs).
+      CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
+          SSkin(i) % y0, SSkin(i) % alpha, SigmaMat)
+      SSkin(i) % sigma = SigmaMat(1, 1)
+
+      IF (SSkin(i) % y0 < 0._dp) THEN
         WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': "Sigma 33 y0" = ', SSkin(i) % y0, &
-            ' is not positive. The transient skin ladder of a stranded coil needs y0 > 0: '// &
-            'its resistivity at high frequency is 1/y0.'
+            ' is negative. It is the conductivity of the ladder at high frequency; y0 = 0 '// &
+            'is allowed.'
+        CALL Fatal(Caller, Message)
+      END IF
+      ! A negative alpha makes L and the shunt A negative: the ladder would not
+      ! be passive, and its stage heat turns negative when the current drops.
+      IF (SSkin(i) % alpha < 0._dp) THEN
+        WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': "Sigma 33 alpha" = ', SSkin(i) % alpha, &
+            ' is negative: the conductivity would rise with frequency and the ladder heat '// &
+            'could turn negative. Refit the ladder with alpha >= 0.'
         CALL Fatal(Caller, Message)
       END IF
       IF (SSkin(i) % y0 + SSkin(i) % alpha <= 0._dp) THEN
@@ -598,35 +623,33 @@ CONTAINS
             ' is negative.'
         CALL Fatal(Caller, Message)
       END IF
-      IF (SSkin(i) % alpha < 0._dp) &
-          CALL Warn(Caller, TRIM(cname)//': "Sigma 33 alpha" < 0, the conductivity rises with '// &
-          'frequency. The ladder stage heat A (I - chi)^2 is then negative at times; its period '// &
-          'average stays right.')
 
       SSkin(i) % G0    = SSkin(i) % y0 + SSkin(i) % alpha
-      SSkin(i) % Zinf  = 1._dp / SSkin(i) % y0
-      SSkin(i) % Beta  = 1._dp / SSkin(i) % G0 - 1._dp / SSkin(i) % y0
+      SSkin(i) % R0    = 1._dp / SSkin(i) % G0
+      SSkin(i) % L     = SSkin(i) % sigma * SSkin(i) % alpha / (SSkin(i) % G0 * SSkin(i) % G0)
       SSkin(i) % Tau   = SSkin(i) % sigma * SSkin(i) % y0 / SSkin(i) % G0
       SSkin(i) % Gskin = SSkin(i) % G0
       SSkin(i) % Active = .TRUE.
 
       WRITE(Message,'(A,4(A,ES12.5))') TRIM(cname)//' stranded skin ladder:', &
-          ' G0 = ', SSkin(i) % G0, ', z_inf = ', SSkin(i) % Zinf, ', beta = ', SSkin(i) % Beta, &
+          ' G0 = ', SSkin(i) % G0, ', R0 = ', SSkin(i) % R0, ', L = ', SSkin(i) % L, &
           ', tau = ', SSkin(i) % Tau
       CALL Info(Caller, Message, Level=5)
     END DO
 
     ! Policy of the foil sheet ladder (InitFoilSkinLadder): the state is not in
     ! restart files, so a restart may start a new transient ('Restart Time = 0')
-    ! but not continue one.
-    IF (ANY(SSkin % Active .AND. SSkin % Beta /= 0._dp) .AND. &
+    ! but not continue one. Unlike there, a restart that does not say which is
+    ! stopped too: TRAFOLO always writes 'Restart Time = 0' with its restarts.
+    IF (ANY(SSkin % Active .AND. SSkin % L /= 0._dp) .AND. &
         ListCheckPresent(CurrentModel % Simulation, 'Restart File')) THEN
       IF (ListGetString(CurrentModel % Simulation, 'Simulation Type', found) == 'transient') THEN
         rt = ListGetConstReal(CurrentModel % Simulation, 'Restart Time', found)
         IF (.NOT. found) THEN
-          CALL Warn(Caller, 'Transient stranded coil skin ladder restarted without "Restart Time": '// &
-              'its state starts from zero. Continuing an energized transient this way gives an '// &
-              'artificial step in voltage and loss; "Restart Time = 0" silences this.')
+          CALL Fatal(Caller, 'Transient stranded coil skin ladder restarted without "Restart Time": '// &
+              'its state is not stored in restart files, so it would start from zero and give an '// &
+              'artificial step in voltage and loss if the transient continues. Set "Restart Time = 0" '// &
+              'to start a new transient from the restored fields.')
         ELSE IF (rt /= 0._dp) THEN
           CALL Fatal(Caller, 'Transient stranded coil skin ladder cannot continue a restarted '// &
               'transient: its state is not stored in restart files. Set "Restart Time = 0" to '// &
@@ -635,7 +658,7 @@ CONTAINS
       END IF
     END IF
 
-    IF (ANY(SSkin % Active .AND. SSkin % Beta /= 0._dp) .AND. &
+    IF (ANY(SSkin % Active .AND. SSkin % L /= 0._dp) .AND. &
         ListGetLogical(CurrentModel % Simulation, 'Adaptive Timestepping', found)) &
         CALL Warn(Caller, 'Transient stranded coil skin ladder with adaptive time stepping: a '// &
             'retried step keeps the ladder factors of the rejected time step size.')
@@ -646,13 +669,13 @@ CONTAINS
   ! factors of this step for the BDF weights bdfw (TransientLadderBDF). Must run
   ! once per step, before its assembly. The state factors are also published on
   ! the component for MagnetoDynamicsCalcFields, which runs before
-  ! CircuitsOutput and needs chi^n for the heat.
+  ! CircuitsOutput and needs q^n for the heat.
   !----------------------------------------------------------------------------
   SUBROUTINE PrepareStrandedSkinStep(dt, bdfw)
     IMPLICIT NONE
     REAL(KIND=dp), INTENT(IN) :: dt, bdfw(3)
     INTEGER :: i
-    REAL(KIND=dp) :: sd, hx
+    REAL(KIND=dp) :: sd, ct, hx
     TYPE(ValueList_t), POINTER :: CompParams
 
     IF (.NOT. sskin_allocated) RETURN
@@ -662,7 +685,7 @@ CONTAINS
     ! CircuitsOutput calls. Without it the history would silently stay stale.
     IF (sskin_step > 0) THEN
       DO i = 1, SIZE(SSkin)
-        IF (.NOT. SSkin(i) % Active .OR. SSkin(i) % Beta == 0._dp) CYCLE
+        IF (.NOT. SSkin(i) % Active .OR. SSkin(i) % L == 0._dp) CYCLE
         IF (SSkin(i) % AdvancedStep == sskin_step) CYCLE
         IF (.NOT. ListCheckPresent(CurrentModel % Components(i) % Values, &
             'Circuit Current Variable Id')) CYCLE
@@ -682,14 +705,15 @@ CONTAINS
       ! bit for bit as before, which TRAFOLO rescales r_component with.
       sd = (SSkin(i) % sigma * bdfw(1)) / dt
       SSkin(i) % Gskin = SSkin(i) % y0 + SSkin(i) % alpha * (1._dp / (1._dp + sd))
-      SSkin(i) % Minv = 1._dp / (1._dp + (SSkin(i) % Tau * bdfw(1)) / dt)
-      hx = -SSkin(i) % Tau * (bdfw(2) * SSkin(i) % chio + bdfw(3) * SSkin(i) % chioo) / dt
-      SSkin(i) % ChiHist = SSkin(i) % Minv * hx
-      SSkin(i) % VHist = SSkin(i) % Beta * SSkin(i) % ChiHist
+      ct = (SSkin(i) % Tau * bdfw(1)) / dt
+      SSkin(i) % Gain = (bdfw(1) / dt) / (1._dp + ct)
+      hx = (bdfw(2) * SSkin(i) % chio + bdfw(3) * SSkin(i) % chioo) / dt
+      SSkin(i) % QHist = hx / (1._dp + ct)
+      SSkin(i) % VHist = SSkin(i) % L * SSkin(i) % QHist
 
       CompParams => CurrentModel % Components(i) % Values
-      CALL ListAddConstReal(CompParams, 'Stranded Skin State Gain', SSkin(i) % Minv)
-      CALL ListAddConstReal(CompParams, 'Stranded Skin State History', SSkin(i) % ChiHist)
+      CALL ListAddConstReal(CompParams, 'Stranded Skin State Gain', SSkin(i) % Gain)
+      CALL ListAddConstReal(CompParams, 'Stranded Skin State History', SSkin(i) % QHist)
 
       WRITE(Message,'(A,I0,3(A,ES12.5))') 'Stranded skin ladder comp ', i, &
           ': G_skin = ', SSkin(i) % Gskin, ', chi = ', SSkin(i) % chio, &
@@ -713,7 +737,8 @@ CONTAINS
   END FUNCTION StrandedSkinActive
 
   !----------------------------------------------------------------------------
-  ! End of a timestep: chi^n = Minv I^n + ChiHist from the committed states.
+  ! End of a timestep: q^n = Gain I^n + QHist from the committed states, and
+  ! the inductor current chi^n = I^n - tau q^n.
   !----------------------------------------------------------------------------
   SUBROUTINE AdvanceStrandedSkin(i, inew)
     IMPLICIT NONE
@@ -721,23 +746,37 @@ CONTAINS
     REAL(KIND=dp), INTENT(IN) :: inew
 
     IF (.NOT. StrandedSkinActive(i)) RETURN
-    SSkin(i) % chi = SSkin(i) % Minv * inew + SSkin(i) % ChiHist
+    SSkin(i) % q = SSkin(i) % Gain * inew + SSkin(i) % QHist
+    SSkin(i) % chi = inew - SSkin(i) % Tau * SSkin(i) % q
     SSkin(i) % AdvancedStep = sskin_step
   END SUBROUTINE AdvanceStrandedSkin
 
   !----------------------------------------------------------------------------
-  ! Conduction heat of the step, P = K [ R0 I^2 + A (I - chi)^2 ], for the
-  ! current I that chi was advanced with.
+  ! Conduction heat of the step, P = K [ R0 I^2 + L tau q^2 ], for the current
+  ! I that q was advanced with.
   !----------------------------------------------------------------------------
   FUNCTION StrandedSkinHeat(i, inow) RESULT(P)
     IMPLICIT NONE
     INTEGER, INTENT(IN) :: i
     REAL(KIND=dp), INTENT(IN) :: inow
-    REAL(KIND=dp) :: P, R0
+    REAL(KIND=dp) :: P
 
-    R0 = 1._dp / SSkin(i) % G0
-    P = SSkin(i) % K * (R0 * inow**2 + (SSkin(i) % Zinf - R0) * (inow - SSkin(i) % chi)**2)
+    P = SSkin(i) % K * (SSkin(i) % R0 * inow**2 + &
+        SSkin(i) % L * SSkin(i) % Tau * SSkin(i) % q**2)
   END FUNCTION StrandedSkinHeat
+
+  !----------------------------------------------------------------------------
+  ! Voltage of the ladder for the step, v_R = K [ R0 I + L q ], for the current
+  ! I that q was advanced with: the coil voltage without its flux linkage.
+  !----------------------------------------------------------------------------
+  FUNCTION StrandedSkinVoltage(i, inow) RESULT(v)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i
+    REAL(KIND=dp), INTENT(IN) :: inow
+    REAL(KIND=dp) :: v
+
+    v = SSkin(i) % K * (SSkin(i) % R0 * inow + SSkin(i) % L * SSkin(i) % q)
+  END FUNCTION StrandedSkinVoltage
 
 END MODULE TransientHomogCircuitState
 !------------------------------------------------------------------------------
@@ -1385,7 +1424,7 @@ CONTAINS
     INTEGER, POINTER :: PS(:)
     TYPE(Matrix_t), POINTER :: CM
     TYPE(Nodes_t), SAVE :: Nodes
-    REAL(KIND=dp) :: Basis(nd), DetJ, x,POT(nd),pPOT(nd),ppPOT(nd),tscl
+    REAL(KIND=dp) :: Basis(nd), DetJ, x,POT(nd),pPOT(nd),ppPOT(nd),tscl,bdfw(3)
     REAL(KIND=dp) :: dBasisdx(nd,3), wBase(nn), w(3)
     REAL(KIND=dp) :: localC, val, circ_eq_coeff, localR, localK !, localL
     INTEGER :: j,t
@@ -1461,14 +1500,15 @@ CONTAINS
 
     CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
 
-    IF(Solver % Order<2.OR.GetTimeStep()<=2) THEN 
-      tscl=1.0_dp
-    ELSE
-      tscl=1.5_dp
+    ! (tscl a^{n+1} - pPOT)/dt is the BDF derivative of a, with the field's
+    ! weights for this step: those of a variable step too, not only 1.5/-2/0.5.
+    bdfw = TransientLadderBDF(ASolver % Order, dt)
+    tscl = bdfw(1)
+    IF (bdfw(3) /= 0._dp) THEN
       CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
-      pPot = 2*pPOT - 0.5_dp*ppPOT
+      pPot = -(bdfw(2)*pPOT + bdfw(3)*ppPOT)
     END IF
-    
+
     ncdofs=nd
     IF (dim == 3) THEN
       ! We can choose the base per component.
@@ -4611,7 +4651,8 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
 
    ! The stranded coil skin ladder: advance its state from the current of this
    ! timestep (crt is reduced over the partitions) and report the DC resistance
-   ! K/G0 and the conduction heat of the step. r_component above stays the
+   ! K/G0, the conduction heat of the step and the ladder's voltage, which is
+   ! the coil voltage without the flux linkage. r_component above stays the
    ! diagonal of the step, K/Gskin. Nothing here reads what it writes, so a
    ! second call within a timestep gives the same numbers.
    IF (Transient) THEN
@@ -4625,6 +4666,8 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
              SSkin(Comp % ComponentId) % K / SSkin(Comp % ComponentId) % G0, Level=8)
          CALL SimListAddAndOutputConstReal('p_skin_component('//i2s(Comp % ComponentId)//')', &
              StrandedSkinHeat(Comp % ComponentId, crt(Comp % ivar % ValueId)), Level=8)
+         CALL SimListAddAndOutputConstReal('v_skin_component('//i2s(Comp % ComponentId)//')', &
+             StrandedSkinVoltage(Comp % ComponentId, crt(Comp % ivar % ValueId)), Level=8)
        END DO
      END DO
    END IF

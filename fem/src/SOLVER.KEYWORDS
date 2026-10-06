@@ -1660,7 +1660,7 @@ Component:Real:      'Nu 22 Sigma'
 Component:Real:      'Sigma 33 y0'
 Component:Real:      'Sigma 33 alpha'
 Component:Real:      'Sigma 33 Sigma'
-! The stranded coil skin ladder state of the step, chi = Gain I + History,
+! The stranded coil skin ladder state of the step, q = Gain I + History,
 ! written by the circuits solver for MagnetoDynamicsCalcFields.
 Component:Real:      'Stranded Skin State Gain'
 Component:Real:      'Stranded Skin State History'

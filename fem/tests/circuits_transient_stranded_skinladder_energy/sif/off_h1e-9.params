@@ -1,0 +1,23 @@
+! switch-off: 1 A until 4e-08 s, then 0, implicit Euler, 1e-09 s steps, heat averaged after the switch-off
+$ y0 = 208380
+$ alpha = 11611000
+$ sigma = 3.981e-07
+$ Order = 1
+$ Nsteps = 80
+$ function dtfun(t) { _dtfun = 1e-09 }
+$ f0 = 2000000
+$ function isrc(t) { _isrc = (t < 4e-08 + 0.5*1e-09) }
+$ Tavg = 4e-08
+! Discrete values of the ladder (DEV-1549 predictions): heat average, ladder voltage,
+! coil voltage, circuit heat, field heat and diagonal of the last step
+$ Pavg = 2.0084413413e+00
+$ Vskin = 2.4499025152e-01
+$ Vcomp = 2.4499025152e-01
+$ Plast = 1.1833914241e-03
+$ PJlast = 5.7780021596e-04
+$ Rdiag = 4.5303956304e+01
+! Analytic references and their tolerances (SaveScalars norms are absolute values)
+$ Pref = 2.1580592769e+00
+$ PrefTol = 8.700e-02
+$ Vref = 2.4499025152e-01
+$ VrefTol = 1.000e-06
