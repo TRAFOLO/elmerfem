@@ -1,0 +1,7 @@
+! 50 Hz with "Sheet Cells = 15" given: kept past the budget.
+! expect: foil sheet: 15 cells x 1 sub-layers x 40 segments
+! expect: Sheet Cells = 15, Sheet Segments = 40 (406 block elements)
+Simulation 1 :: Frequency = Real 50
+Component 1 :: Sheet Cells = Integer 15
+Solver 9 :: Reference Norm = Real 1.353104033877E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-6

@@ -1,0 +1,8 @@
+! 50 Hz, "Sheet Segments = 20": 15 x 20 strands fit the budget, one cell per turn.
+! 15 cells given explicitly: the same 1.351318042895E-03 W.
+! expect: foil sheet: 15 cells x 1 sub-layers x 20 segments
+! expect: Sheet Cells = 15, Sheet Segments = 20 (406 block elements)
+Simulation 1 :: Frequency = Real 50
+Component 1 :: Sheet Segments = Integer 20
+Solver 9 :: Reference Norm = Real 1.351318042895E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-6

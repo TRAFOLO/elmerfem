@@ -1,0 +1,11 @@
+! 10 + 4 turns at 50 Hz, 40 segments each.
+! The same layout given explicitly (5 + 2 cells): the same power.
+! expect: foil sheet: 5 cells x 1 sub-layers x 40 segments
+! expect: foil sheet: 2 cells x 1 sub-layers x 40 segments
+Simulation 1 :: Frequency = Real 50
+Component 1 :: Number of Turns = Real 10
+Component 1 :: Foil Thickness = Real 0.0008
+Component 2 :: Number of Turns = Real 4
+Component 2 :: Foil Thickness = Real 0.002
+Solver 10 :: Reference Norm = Real 7.838232630554E-04
+Solver 10 :: Reference Norm Tolerance = Real 1E-6
