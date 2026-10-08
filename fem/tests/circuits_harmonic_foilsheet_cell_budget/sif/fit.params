@@ -1,8 +1,12 @@
 ! 10 + 2 turns at 50 Hz, 40 segments each.
 ! The same layout given explicitly: the same power; 5 + 2 cells (equal split): 6.584221492879E-04 W.
-! expect: foil sheet: 10 cells x 1 sub-layers x 40 segments
-! expect: foil sheet: 2 cells x 1 sub-layers x 40 segments
+! expect: Component 1 foil sheet: 10 cells x 1 sub-layers x 40 segments
+! expect: Component 2 foil sheet: 2 cells x 1 sub-layers x 40 segments
 Simulation 1 :: Frequency = Real 50
+Component 1 :: Sheet Cells = Integer 0
+Component 1 :: Sheet Segments = Integer 40
+Component 2 :: Sheet Cells = Integer 0
+Component 2 :: Sheet Segments = Integer 40
 Component 1 :: Number of Turns = Real 10
 Component 1 :: Foil Thickness = Real 0.0008
 Component 2 :: Number of Turns = Real 2

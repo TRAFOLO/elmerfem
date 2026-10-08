@@ -2826,7 +2826,7 @@ END FUNCTION isComponentName
       ! The ends of a sheet winding's direction fields, before anything reads them.
       SELECT CASE (Comp % CoilType)
       CASE ('flat wire', 'foil sheet')
-        CALL SetSheetFieldRanges(Comp, CompParams)
+        CALL SetSheetFieldRanges(Comp % ComponentId, CompParams)
       END SELECT
 
       ! Must precede the coil type init, which already reads the
@@ -3956,7 +3956,8 @@ END FUNCTION isComponentName
     REAL(KIND=dp) :: blkT
     INTEGER :: nCells
     REAL(KIND=dp) :: omega, sgm, ff, deltaH, mu0
-    INTEGER :: d, nSkin, nBudget, nFixed, nNeed, nTurnsAuto
+    INTEGER :: d, nSkin
+    INTEGER(KIND=8) :: nBudget, nFixed, nNeed, nTurnsAuto
     LOGICAL :: Found, Varies
     CHARACTER(LEN=32) :: DepthStr
 
@@ -3989,12 +3990,12 @@ END FUNCTION isComponentName
           END DO
           CALL FoilSheetStrandPlan(nFixed, nNeed, nTurnsAuto)
           IF (nFixed + nNeed <= FOIL_SHEET_AUTO_CELL_STRANDS) THEN
-            nBudget = nfoils * MAX(1, nSeg)
+            nBudget = INT(nfoils, 8) * MAX(1, nSeg)
           ELSE
-            nBudget = MAX(0, FOIL_SHEET_AUTO_CELL_STRANDS - nFixed) * nfoils / MAX(1, nTurnsAuto)
+            nBudget = MAX(0_8, FOIL_SHEET_AUTO_CELL_STRANDS - nFixed) * nfoils / MAX(1_8, nTurnsAuto)
           END IF
           DO d = nfoils, 1, -1
-            IF (MOD(nfoils, d) == 0 .AND. (d * MAX(1, nSeg) <= nBudget .OR. d <= nSkin)) EXIT
+            IF (MOD(nfoils, d) == 0 .AND. (INT(d, 8) * MAX(1, nSeg) <= nBudget .OR. d <= nSkin)) EXIT
           END DO
           nCells = MAX(1, d)
           WRITE(DepthStr,'(ES10.4,A)') deltaH, ' m'
@@ -4017,26 +4018,41 @@ END FUNCTION isComponentName
 !> The strands the foil sheet components of the model ask for, for the shared
 !> budget of FoilSheetAutoCells: nFixed = cells x segments of the components
 !> whose cells are given (default N), nNeed = N x segments of those with
-!> 'Sheet Cells = 0', nTurnsAuto = their turns. Automatic segments are measured
-!> as FoilSheetAutoLayout will (same ParallelReductions on every partition), so
-!> the plan is the same on each. Worked out once; the keywords do not change.
+!> 'Sheet Cells = 0', nTurnsAuto = their turns; a winding whose automatic cells
+!> fall back to one per turn (no sheet conductivity) is fixed. Passive components
+!> are left out, as everywhere else, by their keyword, not by the elements a
+!> partition owns. The field ranges of every winding are published first and the
+!> automatic segments are measured as FoilSheetAutoLayout will (same fields, same
+!> ParallelReductions on every partition), so the plan is the same on each and
+!> whichever winding is initialized first. Worked out once; the keywords do not
+!> change. The sums are 8 byte integers: turns x segments overflows 32 bits.
 !------------------------------------------------------------------------------
   SUBROUTINE FoilSheetStrandPlan(nFixed, nNeed, nTurnsAuto)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    INTEGER :: nFixed, nNeed, nTurnsAuto
-    INTEGER, SAVE :: sFixed = 0, sNeed = 0, sTurns = 0
+    INTEGER(KIND=8) :: nFixed, nNeed, nTurnsAuto
+    INTEGER(KIND=8), SAVE :: sFixed = 0, sNeed = 0, sTurns = 0
     LOGICAL, SAVE :: Planned = .FALSE.
     TYPE(ValueList_t), POINTER :: Lst
-    INTEGER :: i, n, nc, ns, nel
-    REAL(KIND=dp) :: blkT, blkH, elemH
-    LOGICAL :: Found
+    INTEGER(KIND=8) :: n, nc, ns
+    INTEGER :: i, nel
+    REAL(KIND=dp) :: blkT, blkH, elemH, turns, sgm
+    LOGICAL :: Found, Varies
 
     IF (.NOT. Planned) THEN
       DO i = 1, CurrentModel % NumberOfComponents
         Lst => CurrentModel % Components(i) % Values
-        IF (TRIM(ListGetString(Lst, 'Coil Type', Found)) /= 'foil sheet') CYCLE
-        n = NINT(GetConstReal(Lst, 'Number of Turns', Found))
+        IF (.NOT. FoilSheetInPlan(Lst)) CYCLE
+        IF (.NOT. (ListCheckPresent(Lst, 'Foil Sheet Alpha Range') .AND. &
+            ListCheckPresent(Lst, 'Foil Sheet Beta Range'))) CALL SetSheetFieldRanges(i, Lst)
+      END DO
+      DO i = 1, CurrentModel % NumberOfComponents
+        Lst => CurrentModel % Components(i) % Values
+        IF (.NOT. FoilSheetInPlan(Lst)) CYCLE
+        turns = GetConstReal(Lst, 'Number of Turns', Found)
+        IF (.NOT. Found .OR. turns < 1._dp .OR. turns > REAL(HUGE(1), dp)) CYCLE
+        n = NINT(turns, KIND=8)
+        IF (ABS(turns - n) > 1.0d-8) CYCLE
         nc = GetInteger(Lst, 'Sheet Cells', Found)
         IF (.NOT. Found) nc = n
         ns = GetInteger(Lst, 'Sheet Segments', Found)
@@ -4045,6 +4061,10 @@ END FUNCTION isComponentName
           CALL FoilSheetMeasureBlock(Lst, TRIM(ListGetString(Lst, 'Stacking Direction', Found)) /= 'beta', &
               blkT, blkH, elemH, nel)
           ns = FoilSheetAutoSegments(blkH, elemH)
+        END IF
+        IF (nc <= 0) THEN
+          sgm = FoilSheetBlockConductivity(Lst, Found, Varies)
+          IF (.NOT. Found .OR. sgm <= 0._dp) nc = n
         END IF
         IF (nc <= 0) THEN
           sNeed = sNeed + n * ns
@@ -4058,6 +4078,22 @@ END FUNCTION isComponentName
     nFixed = sFixed; nNeed = sNeed; nTurnsAuto = sTurns
 !------------------------------------------------------------------------------
   END SUBROUTINE FoilSheetStrandPlan
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> A foil sheet component that takes part in the shared cell budget: not a
+!> passive one, which has no elements and no layout. Replicated metadata only.
+!------------------------------------------------------------------------------
+  FUNCTION FoilSheetInPlan(Lst) RESULT(InPlan)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: Lst
+    LOGICAL :: InPlan, Found
+
+    InPlan = TRIM(ListGetString(Lst, 'Coil Type', Found)) == 'foil sheet' .AND. &
+        .NOT. ListGetLogical(Lst, 'Passive Component', Found)
+!------------------------------------------------------------------------------
+  END FUNCTION FoilSheetInPlan
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -4573,7 +4609,7 @@ END FUNCTION isComponentName
     CALL ListAddInteger(CompParams, 'Foil Sheet Segments', Comp % nSegments)
     CALL ListAddInteger(CompParams, 'Foil Sheet Foils Per Cell', Comp % foilsPerCell)
 
-    WRITE(Message,'(A,I0,A,I0,A,I0,A,I0,A)') 'Component '//I2S(CompInd)//' foil sheet: ', &
+    WRITE(Message,'(A,I0,A,I0,A,I0,A,I0,A)') 'Component '//I2S(Comp % ComponentId)//' foil sheet: ', &
         Comp % nCells,' cells x ',Comp % nSublayers,' sub-layers x ',Comp % nSegments, &
         ' segments (',Comp % foilsPerCell,' turns per cell)'
     CALL Info('Circuits_Init',Message,Level=6)
@@ -4876,11 +4912,11 @@ END FUNCTION isComponentName
 !> Beta) so that the face they share has one value; a single winding spans 0..1
 !> and keeps its values. Every partition must call this for every such component.
 !------------------------------------------------------------------------------
-  SUBROUTINE SetSheetFieldRanges(Comp, CompParams)
+  SUBROUTINE SetSheetFieldRanges(CompId, CompParams)
 !------------------------------------------------------------------------------
     USE CircuitUtils
     IMPLICIT NONE
-    TYPE(Component_t), POINTER :: Comp
+    INTEGER :: CompId
     TYPE(ValueList_t), POINTER :: CompParams
     TYPE(Element_t), POINTER :: Element
     REAL(KIND=dp), ALLOCATABLE :: Vloc(:)
@@ -4911,11 +4947,11 @@ END FUNCTION isComponentName
       END DO
 
       WRITE(Message,'(A,ES14.7,A,ES14.7,A,ES14.7,A,ES14.7,A)') 'Component '// &
-          I2S(Comp % ComponentId)//' '//TRIM(FieldName(f))//' spans ', Ends(1,1), &
+          I2S(CompId)//' '//TRIM(FieldName(f))//' spans ', Ends(1,1), &
           ' .. ', Ends(2,1), ' (nodal ', Raw(1), ' .. ', Raw(2), ')'
       CALL Info('Circuits_Init', Message, Level=5)
       IF (.NOT. (Ends(2,1) - Ends(1,1) >= SHEET_FIELD_MIN_SPAN)) THEN
-        CALL Fatal('Circuits_Init', 'Component '//I2S(Comp % ComponentId)// &
+        CALL Fatal('Circuits_Init', 'Component '//I2S(CompId)// &
             ': the direction field "'//TRIM(FieldName(f))//'" is missing or constant '// &
             'over the winding. '//TRIM(Message))
       END IF

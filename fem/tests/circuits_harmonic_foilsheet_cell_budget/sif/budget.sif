@@ -1,17 +1,22 @@
-! Two foil sheet windings sharing the automatic cell budget (DEV-1554): the
+! Foil sheet windings sharing the automatic cell budget (DEV-1554): the
 ! cells x segments of all foil sheet components are compared with
 ! FOIL_SHEET_AUTO_CELL_STRANDS (500). The rings of circuits_harmonic_foilsheet_touching
-! (inner and outer square ring, 10 mm stack each, copper ff 0.8), 50 Hz, all
-! counts automatic except "Sheet Segments = 40", the turn counts per case:
-!  fit       10 + 2 turns: 400 + 80 = 480 strands fit, so each winding gets one
+! (inner and outer square ring, 10 mm stack each, copper ff 0.8), 50 Hz; Sheet Cells,
+! Sheet Segments, the turn counts and the component numbering are set per case (sif/*.params):
+!  fit       10 + 2 turns, 40 segments each: 400 + 80 = 480 strands fit, so each winding gets one
 !            cell per turn, 10 and 2 (an equal split of 250 each, the first
 !            version of the budget, gave the inner one 5)
-!  overflow  10 + 4 turns: 560 strands, the budget is shared in proportion to
+!  overflow  10 + 4 turns, 40 segments each: 560 strands, the budget is shared in proportion to
 !            the turns: 357 and 142, so 5 and 2 cells (the largest divisors of
 !            10 and 4 that fit; the stack skin depth rule asks for 2 and 2)
+!  order_ab, order_ba  100 + 10 turns, automatic segments, either winding first: the plan
+!            measures every winding with the fields its own layout uses
+!  passive   overflow plus a passive foil sheet component: not part of the plan
+!  mixed_floor, mixed_share  default and explicit counts reserve their strands; the floor binds
 ! Each run pins the eddy current power of the half model to the run with the
-! same layout given explicitly; runtest.cmake checks both windings' layout
-! lines, the same with 1 and 4 partitions.
+! same layout given explicitly; runtest.cmake checks each winding's layout
+! line by component number, the same with 1 and 4 partitions, and with 4 partitions once more
+! with slabs along y, where some partitions own no element of one or both windings.
 Check Keywords "Warn"
 INCLUDE sif/touching-circuits.definitions
 INCLUDE rings/mesh.names
@@ -179,8 +184,6 @@ Component 1  !---- inner winding
   Foil Thickness = Real 0.8e-3
   Fill Factor = Real 0.8
   Sheet Conductivity = Real 58e6
-  Sheet Cells = Integer 0
-  Sheet Segments = Integer 40
   Sheet Sublayers = Integer 0
   Electrode Boundaries(2) = Integer 2 3
   Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
@@ -194,8 +197,6 @@ Component 2  !---- outer winding
   Foil Thickness = Real 0.8e-3
   Fill Factor = Real 0.8
   Sheet Conductivity = Real 58e6
-  Sheet Cells = Integer 0
-  Sheet Segments = Integer 40
   Sheet Sublayers = Integer 0
   Electrode Boundaries(2) = Integer 4 5
   Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)

@@ -6,7 +6,8 @@ IF(HAVE_UMFPACK OR HAVE_MUMPS)
 
   file(COPY ELMERSOLVER_STARTINFO DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
   SET(RINGS ${CMAKE_CURRENT_SOURCE_DIR}/../circuits_harmonic_foilsheet_touching)
-  file(COPY ${RINGS}/sif/touching-circuits.definitions sif/fit.params sif/overflow.params
+  file(COPY ${RINGS}/sif/touching-circuits.definitions sif/fit.params sif/overflow.params sif/order_ab.params
+    sif/order_ba.params sif/passive.params sif/mixed_floor.params sif/mixed_share.params
     DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/sif")
   file(COPY ${RINGS}/rings/mesh.boundary ${RINGS}/rings/mesh.header ${RINGS}/rings/mesh.nodes
     ${RINGS}/rings/mesh.elements ${RINGS}/rings/mesh.names DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/rings")

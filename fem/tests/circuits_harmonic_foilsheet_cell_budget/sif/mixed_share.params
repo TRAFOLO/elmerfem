@@ -1,0 +1,16 @@
+! An explicit winding reserves part of the budget: the inner winding of 20 turns with 5 cells x 40 segments
+! is 200 strands. The automatic outer winding (100 turns, 5 segments, 500 strands wanted) gets the 300 left:
+! the largest divisor of 100 that fits is 50 cells. Without the reservation the 500 would fit, 100 cells.
+! expect: Component 1 foil sheet: 5 cells x 1 sub-layers x 40 segments
+! expect: Component 2 foil sheet: 50 cells x 1 sub-layers x 5 segments
+Simulation 1 :: Frequency = Real 50
+Component 1 :: Number of Turns = Real 20
+Component 1 :: Foil Thickness = Real 0.0004
+Component 1 :: Sheet Cells = Integer 5
+Component 1 :: Sheet Segments = Integer 40
+Component 2 :: Number of Turns = Real 100
+Component 2 :: Foil Thickness = Real 0.00008
+Component 2 :: Sheet Cells = Integer 0
+Component 2 :: Sheet Segments = Integer 0
+Solver 10 :: Reference Norm = Real 1.07192931E-01
+Solver 10 :: Reference Norm Tolerance = Real 1E-6
