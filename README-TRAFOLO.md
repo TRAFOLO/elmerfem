@@ -128,9 +128,19 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
 ## Building
 
 The TRAFOLO product is a **Windows-only** solver bundle built with the standard Elmer CMake
-system (MSYS2 UCRT64 toolchain). The direct solver is Elmer's vendored UMFPACK 4.4. Build and
-packaging tooling is maintained internally by TRAFOLO and is **not** part of this repository;
-this repo carries source only. There is no CI here — validation is run locally.
+system (MSYS2 UCRT64 toolchain). The direct solver is Elmer's vendored UMFPACK 4.4. The scripts
+that compile and install the distributed binaries are in the repo root; see the header of
+`build_msys2.sh` for the toolchain packages and path overrides:
+
+```bash
+# MSYS2 UCRT64 shell, Microsoft MPI runtime installed
+bash build_msys2.sh                   # configure (the distributed flag set; wipes the build dir)
+ninja -C ../elmer-build-win           # build
+bash deploy_msys2.sh                  # install to ../elmer-install-win + copy runtime DLLs
+```
+
+The distributed bundle is this install tree with the solver modules the TRAFOLO app does not use
+removed. There is no CI here — validation is run locally.
 
 Corresponding source for any distributed TRAFOLO Elmer binary is this repository at the commit
 recorded in the bundle's `SOURCE.txt` (GPL compliance).
