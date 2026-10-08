@@ -1,0 +1,37 @@
+! LoadFields over @N@ harmonic result files (DEV-1157: at 64 the frequency list overran the message line and the
+! run stopped with "End of record"). The summed LoadWm3 must be @SUM@ (odd files hold 1, even files 2).
+Header
+  Mesh DB "." "cube"
+End
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian 3D
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+End
+Body 1
+  Target Bodies(1) = 1
+  Equation = 1
+End
+Equation 1
+  Active Solvers(2) = 1 2
+End
+Solver 1
+  Procedure = "LoadFields" "LoadFields"
+  Equation = load loss data
+  EM Simulation Type = String Harmonic
+  Frequencies(@N@) = Integer @LIST@
+  Update Exported Variables = Logical True
+End
+Solver 2
+  Equation = check
+  Procedure = "SaveData" "SaveScalars"
+  Filename = load.dat
+  Variable 1 = LoadWm3
+  Operator 1 = max
+  Variable 2 = BT
+  Operator 2 = min
+  Show Norm Index = 1
+End
+Solver 2 :: Reference Norm = Real @SUM@
+Solver 2 :: Reference Norm Tolerance = Real 1e-12
