@@ -16,6 +16,11 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   at the current Temperature field. The Steinmetz thermal correction can't go into the
   `Harmonic Loss * Coefficient` keywords: CalcFields reads them with `ListGetFun(..., Freq)`, which
   evaluates any dependency at the frequency.
+- `LoadFields` logs the harmonic result files as a count and first / last index; the full list
+  overran the message line at 64 frequencies ("End of record", DEV-1157). Test:
+  `loadfields_many_harmonics`. Test `circuits_transient_stranded_foster_ladder` pins the stranded
+  reluctivity Foster ladder of order 2 and 4 (equal ladders agree, BDF2, trapezoid edges, start-up,
+  two coils of different order in one model).
 - `StatElecSolveVec` — thin-layer Robin coefficient fix (missing `Eps0`).
 - Transient winding homogenization. The skin ladder of a stranded coil (`Sigma 33 y0`, `Sigma 33
   alpha`, `Sigma 33 Sigma(1,1)`, n = 1) runs in impedance form, R0 + L s/(1 + s tau) with R0 =

@@ -1,0 +1,5 @@
+INCLUDE(test_macros)
+INCLUDE_DIRECTORIES(${CMAKE_BINARY_DIR}/fem/src)
+file(COPY cube.grd sif/write.sif.in sif/load.sif.in DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+file(COPY sif/write.sif.in sif/load.sif.in DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/sif")
+ADD_ELMER_TEST(loadfields_many_harmonics LABELS quick serial)

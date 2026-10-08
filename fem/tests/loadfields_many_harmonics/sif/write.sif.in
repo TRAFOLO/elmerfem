@@ -1,0 +1,36 @@
+! Writes the result file of harmonic @K@ the way a TRAFOLO harmonic case does (h<k>.result with the -dg
+! fields LoadWkg, LoadWm3 and BT, here all equal to @K@), for LoadFields to sum (runtest.cmake copies h1 and h2).
+Header
+  Mesh DB "." "cube"
+End
+Simulation
+  Max Output Level = 3
+  Coordinate System = Cartesian 3D
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output File = h@K@.result
+  Output Variable 1 = "LoadWkg"
+  Output Variable 2 = "LoadWm3"
+  Output Variable 3 = "BT"
+End
+Body 1
+  Target Bodies(1) = 1
+  Equation = 1
+  Initial Condition = 1
+End
+Equation 1
+  Active Solvers(1) = 1
+End
+Initial Condition 1
+  LoadWkg = Real @K@
+  LoadWm3 = Real @K@
+  BT = Real @K@
+End
+Solver 1
+  Equation = hold fields
+  Procedure = "SaveData" "SaveScalars"
+  Filename = write@K@.dat
+  Exported Variable 1 = -dg LoadWkg
+  Exported Variable 2 = -dg LoadWm3
+  Exported Variable 3 = -dg BT
+End
