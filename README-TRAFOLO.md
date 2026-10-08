@@ -71,12 +71,19 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `circuits_harmonic_flatwire_dc`.
 - `Coil Type = foil sheet` — foil and flat wire windings as conducting sheets (`CircuitsAndDynamics`,
   3D, harmonic and transient), split into `Sheet Cells` turn cells along the stack and `Sheet
-  Segments` strands across the turn width. `Sheet Cells = 0` takes the fewest cells, a divisor of the
-  turn count, at most `FOIL_SHEET_CELL_SKIN_DEPTHS` (0.55) stack skin depths thick at the run
-  frequency (one at DC, one per turn in transient or several-frequency runs), not a count tied to the
-  mesh: on coarse meshes that lumped all turns into one cell and lost the gap fringing loss
-  (DEV-1545). `Sheet Sublayers = 0` keeps its sub-layers on elements up to one skin depth and,
-  while an element spans at most 2.3 sub-layers, up to two (DEV-1545). The coil body may mix
+  Segments` strands across the turn width. `Sheet Cells = 0` gives each turn a cell above 0 Hz while
+  the cells x segments of all foil sheet components fit `FOIL_SHEET_AUTO_CELL_STRANDS` (500); past
+  that the budget left by components with given cells is shared in proportion to the turns, and each
+  takes the largest divisor of its turn count that fits its share, but never fewer cells than the stack
+  skin depth rule of before (cells at most `FOIL_SHEET_CELL_SKIN_DEPTHS`, 0.55, stack skin depths
+  thick); one at DC, one per turn in transient or several-frequency runs (DEV-1554). Lumped turns
+  lose the gap fringing loss of the turn next to the gap (10-turn pot core at 50 Hz: R -1.3 %, inner
+  turn -20 %), and the budget keeps many-turn windings at the cost of before (Oil-Immersed template,
+  6 x 120 turns: one cell per turn took 25 x the time). The count is not tied to the mesh (DEV-1545).
+  `Sheet Sublayers = 0`: a winding stacked along Alpha (foil) takes three sub-layers for
+  0.5 < t/delta <= 1.5 and one otherwise, on any mesh (DEV-1554); stacked along Beta (edgewise flat
+  wire) it keeps its sub-layers on elements up to one skin depth and, while an element spans at most
+  2.3 sub-layers, up to two (DEV-1545). The coil body may mix
   linear tetrahedra and linear wedges (prism boundary layers): each wedge is cut into three
   tetrahedra for the strand geometry and its strand source is mapped to the wedge edges, so it stays
   exactly divergence free (DEV-1545; it stopped with a Fatal before). Tests:

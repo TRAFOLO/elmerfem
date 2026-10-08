@@ -1,0 +1,23 @@
+! The overflow case plus a passive foil sheet component with automatic segments and no elements: it takes
+! no part in the plan (the measurement of its empty block is fatal), same layouts and power as overflow.
+! expect: Component 1 foil sheet: 5 cells x 1 sub-layers x 40 segments
+! expect: Component 2 foil sheet: 2 cells x 1 sub-layers x 40 segments
+Simulation 1 :: Frequency = Real 50
+Component 1 :: Sheet Cells = Integer 0
+Component 1 :: Sheet Segments = Integer 40
+Component 2 :: Sheet Cells = Integer 0
+Component 2 :: Sheet Segments = Integer 40
+Component 1 :: Number of Turns = Real 10
+Component 1 :: Foil Thickness = Real 0.0008
+Component 2 :: Number of Turns = Real 4
+Component 2 :: Foil Thickness = Real 0.002
+Component 3
+  Name = String unused
+  Passive Component = Logical True
+  Coil Type = String foil sheet
+  Number of Turns = Real 1
+  Sheet Cells = Integer 0
+  Sheet Segments = Integer 0
+End
+Solver 10 :: Reference Norm = Real 7.838232630554E-04
+Solver 10 :: Reference Norm Tolerance = Real 1E-6

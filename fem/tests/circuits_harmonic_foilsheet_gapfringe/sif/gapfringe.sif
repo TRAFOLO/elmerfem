@@ -5,11 +5,13 @@
 ! 10 deg wedge of the axisymmetric model, 5 A rms. Coil elements about 8.5 mm,
 ! air graded down to 1.75 mm in the gaps.
 !
-! "Sheet Cells = 0" follows the stack skin depth: cells at most 0.55 delta_h =
-! 0.70 mm thick, so each of the 15 turns gets a cell of its own and screens
-! the gap fringing flux (15 cells x 40 segments, eddy current power 8.7844E-03
-! W, Fr 6.630, -0.5 %). The mesh-sized rule of before chose 1 cell on this
-! mesh: 5.1313E-03 W, Fr 3.873, -42 %.
+! "Sheet Cells = 0" gives one cell per turn here, so each of the 15 turns
+! screens the gap fringing flux, and "Sheet Sublayers = 0" gives a foil at
+! t/delta = 0.554 three layers per turn on any mesh (DEV-1554; 15 cells x 3 sub-layers
+! x 40 segments): eddy current power 8.8398E-03 W, Fr 6.672, +0.15 %. One layer
+! per turn, which the earlier mesh veto chose on these 8.5 mm elements, gave
+! 8.7844E-03 W, Fr 6.630, -0.5 %; the mesh-sized cell rule before that chose 1
+! cell: 5.1313E-03 W, Fr 3.873, -42 %.
 !
 ! Pins r_component(1) and the eddy current power of the wedge, the same numbers
 ! with 1 and 4 partitions.
@@ -239,7 +241,7 @@ Boundary Condition 7  !---- top of the foils
   Target Boundaries(1) = $ coil_top
   Beta = Real 1
 End
-Solver 9 :: Reference Norm = Real 1.907856112629E-03
+Solver 9 :: Reference Norm = Real 1.908083028196E-03
 Solver 9 :: Reference Norm Tolerance = Real 1E-8
-Solver 10 :: Reference Norm = Real 8.784436100518E-03
+Solver 10 :: Reference Norm = Real 8.839779553747E-03
 Solver 10 :: Reference Norm Tolerance = Real 1E-6

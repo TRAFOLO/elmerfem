@@ -1,0 +1,10 @@
+! 1200 turns of 6.25 um on the same block at 50 Hz: the budget gives the largest
+! divisor of 1200 with 40 x cells <= 500, 12 cells (12 given explicitly: the same
+! power); the stack skin depth rule of before gave 2 cells: 8.652736825017E+00 W.
+! expect: foil sheet: 12 cells x 1 sub-layers x 40 segments
+! expect: Sheet Cells = 12, Sheet Segments = 40 (406 block elements)
+Simulation 1 :: Frequency = Real 50
+Component 1 :: Number of Turns = Real 1200
+Component 1 :: Foil Thickness = Real 6.25e-6
+Solver 9 :: Reference Norm = Real 8.659527058317E+00
+Solver 9 :: Reference Norm Tolerance = Real 1E-6

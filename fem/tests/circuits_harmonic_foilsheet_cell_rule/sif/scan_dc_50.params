@@ -1,0 +1,19 @@
+! A scan of 0 Hz then 50 Hz in one run: one cell per turn (several frequencies,
+! no budget), and the 50 Hz step is the f50_cells15 run (1.353104227465E-03 here,
+! pinned to f50_cells15).
+! expect: foil sheet: 15 cells x 1 sub-layers x 40 segments
+! expect: Sheet Cells = 15, Sheet Segments = 40 (406 block elements)
+Simulation
+  Simulation Type = Scanning
+  Timestep Intervals = 2
+  Timestep Sizes = 1
+  Angular Frequency = Variable Time
+    Real
+      0 0
+      1.5 0
+      1.5001 314.159265359
+      3 314.159265359
+    End
+End
+Solver 9 :: Reference Norm = Real 1.353104033877E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-6
