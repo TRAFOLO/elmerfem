@@ -527,8 +527,13 @@ CONTAINS
     A => Solver % Matrix
     Perm => Solver % Variable % Perm
     vname = Solver % Variable % Name
-    IF (ALLOCATED(A % ConstrainedDOF)) A % ConstrainedDOF = .FALSE.
-    IF (ALLOCATED(A % DValues)) A % DValues = 0._dp
+    ! UpdateDirichletDof allocates these on the first constrained row. A partition
+    ! whose rows all belong to the group, with no electrode of it, constrains none,
+    ! and the start values below would read arrays that do not exist.
+    IF (.NOT. ALLOCATED(A % ConstrainedDOF)) ALLOCATE(A % ConstrainedDOF(A % NumberOfRows))
+    IF (.NOT. ALLOCATED(A % DValues)) ALLOCATE(A % DValues(A % NumberOfRows))
+    A % ConstrainedDOF = .FALSE.
+    A % DValues = 0._dp
 
     InGroup = 0._dp
     DO t=1,GetNOFActive()

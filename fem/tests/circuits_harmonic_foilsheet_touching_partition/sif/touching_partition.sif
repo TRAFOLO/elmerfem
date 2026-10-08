@@ -1,0 +1,226 @@
+! Touching foil sheet windings on partitions that own one winding but not the other (DEV-1557).
+! The model of circuits_harmonic_foilsheet_touching (its rings mesh, 10 kHz, 10 cells x 4 segments),
+! the two windings in either component order (sif/order_ab.params: inner first, sif/order_ba.params: outer first).
+! W is solved one component at a time when the components touch. A partition that owns the
+! elements of the first component and none of the other one has every W row in the group
+! and no electrode face of it; the Dirichlet bookkeeping of that solve was never allocated there
+! and Wsolve crashed (outer first, slabs along y). runtest.cmake runs both orders with 1 and
+! 4 partitions (METIS, then slabs along y where a partition owns one body only), and every run
+! pins r_component of the outer winding and the eddy current power of the half model to the
+! serial values of circuits_harmonic_foilsheet_touching.
+Check Keywords "Warn"
+INCLUDE sif/touching-circuits.definitions
+INCLUDE rings/mesh.names
+Header
+  Mesh DB "." "rings"
+End
+Constants
+  Permittivity of Vacuum = 8.8542e-12
+End
+Simulation
+  Max Output Level = 3
+  Coordinate System = Cartesian 3D
+  Coordinate Scaling = 0.001
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+  Frequency = Real 10000
+End
+Solver 1  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Alpha
+  Variable = Alpha
+  Direction Method = String "distance"
+End
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Beta
+  Variable = Beta
+  Direction Method = String "distance"
+End
+Solver 3  !---- CoordinateTransform, RotMSolver
+  Exec Solver = Before All
+  Equation = Transformation matrix
+  Procedure = "CoordinateTransform" "RotMSolver"
+  Variable = -nooutput Dummy
+  Optimize Bandwidth = False
+  Polar Decomposition Determinant Tolerance = Real 1.0e-9
+  Polar Decomposition Max Iterations = Integer 100
+  Exported Variable 1 = -nooutput RotM E[RotM E:9]
+  Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+  Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+  Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+  Discontinuous Galerkin = True
+End
+Solver 4  !---- WPotentialSolver, Wsolve
+  Exec Solver = Before All
+  Procedure = "WPotentialSolver" "Wsolve"
+  Equation = "Wire direction"
+  Variable = W
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Max Iterations = 250
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Preconditioning = None
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+End
+Solver 5  !---- CircuitsAndDynamics, CircuitsAndDynamicsHarmonic
+  Exec Solver = Always
+  Equation = Circuits
+  Variable = X
+  No Matrix = Logical True
+  Procedure = "CircuitsAndDynamics" "CircuitsAndDynamicsHarmonic"
+End
+Solver 6  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
+  Exec Solver = Always
+  Equation = "MGDynamics"
+  Variable = "A[A re:1 A im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Export Lagrange Multiplier = Logical True
+  Linear System Symmetric = Logical True
+  Linear System Complex = Logical True
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BicgstabL
+  BicgStabL Polynomial Degree = 4
+  Linear System Preconditioning = Circuit
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Abort Not Converged = False
+  Linear System Max Iterations = 5000
+  Linear System Residual Output = 1000
+  Steady State Convergence Tolerance = 1e-09
+End
+Solver 7  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
+  Exec Solver = Always
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "A"
+  Linear System Symmetric = True
+  Calculate Current Density = Logical True
+  Calculate Homogenization Loss = Logical True
+  Calculate Nodal Fields = Logical False
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 1000
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 8  !---- CircuitsAndDynamics, CircuitsOutput
+  Exec Solver = Always
+  Equation = Circuits Output
+  Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 9  !---- SaveData, SaveScalars: the DC resistance of the outer winding
+  Exec Solver = Always
+  Equation = "sv rdc"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = rings/dat/rdc.dat
+End
+Solver 10  !---- SaveData, SaveScalars: the 10 kHz loss of the half model
+  Exec Solver = Always
+  Equation = "sv loss"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = rings/dat/loss.dat
+  Show Norm Name = String "res: eddy current power"
+End
+Equation 1
+  Active Solvers(2) = 6 7
+End
+Equation 2
+  Active Solvers(10) = 1 2 3 4 5 6 7 8 9 10
+End
+Material 1  !---- air
+  Name = air
+  Relative Permeability = 1
+  Electric Conductivity = 0
+End
+Material 2  !---- the winding blocks, copper
+  Name = copper
+  Relative Permeability = 1
+  Electric Conductivity = 58e6
+End
+Body 1
+  Name = inner
+  Target Bodies(1) = $ inner
+  Equation = 2
+  Material = 2
+  Body Force = 1
+  Alpha Reference (3) = Real 1 0 0
+  Beta Reference (3) = Real 0 1 0
+End
+Body 2
+  Name = outer
+  Target Bodies(1) = $ outer
+  Equation = 2
+  Material = 2
+  Body Force = 1
+  Alpha Reference (3) = Real 1 0 0
+  Beta Reference (3) = Real 0 1 0
+End
+Body 3
+  Name = air
+  Target Bodies(1) = $ air
+  Equation = 1
+  Material = 1
+End
+INCLUDE sif/case.params
+Body Force 1  !---- Circuit: 1 A in each winding
+  Name = "Circuit"
+  S1 Re = Real 1
+  S1 Im = Real 0
+  S2 Re = Real 1
+  S2 Im = Real 0
+End
+Boundary Condition 1  !---- outer box and symmetry plane: flux parallel
+  Target Boundaries(2) = $ box sym
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 2  !---- inner winding electrode, x > 0
+  Target Boundaries(1) = $ inner_xpos
+  W = Real 1
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 3  !---- inner winding electrode, x < 0
+  Target Boundaries(1) = $ inner_xneg
+  W = Real 0
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 4  !---- outer winding electrode, x > 0: the opposite W
+  Target Boundaries(1) = $ outer_xpos
+  W = Real 0
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 5  !---- outer winding electrode, x < 0
+  Target Boundaries(1) = $ outer_xneg
+  W = Real 1
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 6  !---- bottoms of both windings
+  Target Boundaries(2) = $ inner_bottom outer_bottom
+  Beta = Real 0
+End
+Boundary Condition 7  !---- tops of both windings
+  Target Boundaries(2) = $ inner_top outer_top
+  Beta = Real 1
+End
+Boundary Condition 8  !---- inner face of the inner winding
+  Target Boundaries(1) = $ inner_vin
+  Alpha = Real 1
+End
+Boundary Condition 9  !---- the shared face
+  Target Boundaries(1) = $ shared
+  Alpha = Real 0
+End
+Boundary Condition 10  !---- outer face of the outer winding
+  Target Boundaries(1) = $ outer_vout
+  Alpha = Real -1
+End
