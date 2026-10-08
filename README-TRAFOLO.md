@@ -98,6 +98,13 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
 - `WPotentialSolver` (`Wsolve`) grows its rotation matrix buffer to the element it saves; on a
   mesh mixing element types (tetrahedra and wedges in a coil) it wrote past the buffer left by the
   last assembled element and corrupted the heap (DEV-1545).
+- `Wsolve` of touching windings (one W solve per component) no longer crashes on a partition whose
+  W rows all belong to the component being solved and that holds no electrode face of it, such as
+  a partition owning the first component's winding but none of the other one: the Dirichlet
+  bookkeeping of the matrix is allocated before the start values are read from it (DEV-1557; the
+  solver stopped with a segmentation fault after "Coils touch at ... nodes"). Reached with
+  ElmerGrid `-metis` partitions on 4 or more ranks. Test:
+  `circuits_harmonic_foilsheet_touching_partition`.
 - The Lagrange multiplier separated from the collection solution (`SolveWithLinearRestriction`)
   follows `Nonlinear System Relaxation Factor` (and `Nonlinear System Relaxation After`) unless
   `Lagrange Multiplier Relaxation Factor` is given, so the exported circuit voltages and currents
