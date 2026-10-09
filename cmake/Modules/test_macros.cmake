@@ -255,3 +255,47 @@ MACRO(EXECUTE_ELMER_SOLVER_MPI SIFNAME)
   ENDIF(WITH_MPI)
 ENDMACRO()
 
+
+# TRAFOLO: a test judged by how the run ends instead of by a norm, for inputs
+# that must stop with a clear message or must warn. EXIT is ZERO or NONZERO,
+# MATCH a regular expression that stdout or stderr has to contain.
+MACRO(RUN_ELMER_EXPECT)
+  CMAKE_PARSE_ARGUMENTS(_expect "" "EXIT;MATCH" "" "${ARGN}")
+  SET(ENV{ELMER_HOME} "${BINARY_DIR}/fem/src")
+  SET(ENV{ELMER_LIB} "${BINARY_DIR}/fem/src/modules")
+  IF(WIN32)
+    GET_FILENAME_COMPONENT(COMPILER_DIRECTORY ${CMAKE_Fortran_COMPILER} PATH)
+    SET(ENV{PATH} "$ENV{ELMER_HOME};$ENV{ELMER_LIB};${BINARY_DIR}/fhutiter/src;${BINARY_DIR}/matc/src;${BINARY_DIR}/mathlibs/src/arpack;${BINARY_DIR}/mathlibs/src/parpack;${COMPILER_DIRECTORY};$ENV{PATH}")
+  ELSE()
+    SET(ENV{PATH} "${BINARY_DIR}/fem/src:$ENV{PATH}")
+  ENDIF()
+  SET(ENV{OMP_NUM_THREADS} 1)
+
+  IF(WITH_MPI AND ${MPIEXEC_NTASKS} GREATER 1)
+    EXECUTE_PROCESS(COMMAND "${MPIEXEC}" ${MPIEXEC_NUMPROC_FLAG} ${MPIEXEC_NTASKS} ${MPIEXEC_PREFLAGS} ${ELMERSOLVER_BIN} ${MPIEXEC_POSTFLAGS}
+      RESULT_VARIABLE _expect_rc
+      OUTPUT_VARIABLE _expect_out
+      ERROR_VARIABLE _expect_err)
+  ELSE()
+    EXECUTE_PROCESS(COMMAND ${ELMERSOLVER_BIN}
+      RESULT_VARIABLE _expect_rc
+      OUTPUT_VARIABLE _expect_out
+      ERROR_VARIABLE _expect_err)
+  ENDIF()
+  FILE(WRITE "test-stdout_${MPIEXEC_NTASKS}.log" "${_expect_out}")
+  FILE(WRITE "test-stderr_${MPIEXEC_NTASKS}.log" "${_expect_err}")
+
+  IF(_expect_EXIT STREQUAL "ZERO" AND NOT _expect_rc EQUAL 0)
+    MESSAGE(FATAL_ERROR "Expected exit status 0, got ${_expect_rc}")
+  ELSEIF(_expect_EXIT STREQUAL "NONZERO" AND _expect_rc EQUAL 0)
+    MESSAGE(FATAL_ERROR "Expected a nonzero exit status, got 0")
+  ENDIF()
+  IF(_expect_MATCH)
+    STRING(REGEX MATCH "${_expect_MATCH}" _expect_found "${_expect_out}${_expect_err}")
+    IF(NOT _expect_found)
+      MESSAGE(FATAL_ERROR "Output does not contain: ${_expect_MATCH}")
+    ENDIF()
+  ENDIF()
+  MESSAGE(STATUS "Exit status ${_expect_rc}, output matched: ${_expect_found}")
+ENDMACRO()
+

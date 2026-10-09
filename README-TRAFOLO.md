@@ -147,6 +147,21 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   setup gave 0.11 J field energy instead of 0.6165 J with exit code 0, while `Use Tree Gauge =
   False` with `Mumps Null Pivot Detection = True` (tested with tolerance 1e-13) and `Mumps
   Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
+- Failures a caller can see (DEV-1560). A missing solver procedure and a MATC error in the SIF
+  exit with status 1 instead of 0 (`Load.c`), and the MATC message no longer prints the
+  unterminated Fortran buffer. `Fatal` aborts all MPI ranks (`MPI_Abort`) when more than one
+  rank runs, so an error raised on some ranks only cannot leave the others waiting. A solve
+  that is kept although it did not converge writes one warning in a fixed form at the default
+  output level, whatever its abort flag:
+  `WARNING:: <caller>: NOT CONVERGED: linear|nonlinear|coupled ... key=value ...`
+  (linear: `solver`, `iterations`, `tolerance`; nonlinear: `solver`, `iterations`,
+  `change`, `tolerance`; coupled: `iterations`, `max`, also in steady runs). The NaN check of
+  the solution norm also catches Inf, and its message and the abort messages of the linear and
+  nonlinear solvers name the solver's `Equation`. UMFPACK errors are `Fatal` with the solver
+  and the status instead of a bare `PRINT`/`STOP`, and a singular matrix (status 1) warns.
+  Tests (label `robustness`, macro `RUN_ELMER_EXPECT` in `test_macros.cmake`):
+  `robustness_procedure_not_found`, `robustness_matc_syntax_error`,
+  `robustness_linear_not_converged`, `robustness_fatal_on_some_ranks`.
 
 ## Building
 

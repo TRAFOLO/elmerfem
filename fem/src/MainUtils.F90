@@ -3522,6 +3522,12 @@ CONTAINS
       END DO
       
       IF( TestConvergence .AND. CoupledMaxIter > 1 ) THEN
+        IF ( .NOT. ALL(DoneThis) ) THEN
+          ! Steady runs used to end here without a word.
+          WRITE( Message,'(A,I0,A,I0)') 'NOT CONVERGED: coupled system iterations=', &
+              MIN(i,CoupledMaxIter),' max=',CoupledMaxIter
+          CALL Warn('SolveEquations',Message)
+        END IF
         IF ( TransientSimulation .AND. .NOT. ALL(DoneThis) ) THEN
           CALL Info( 'SolveEquations','Coupled system iteration: '//I2S(MIN(i,CoupledMaxIter)),Level=4)
           CoupledAbort = ListGetLogical( Model % Simulation,  &

@@ -1377,17 +1377,26 @@ END FUNCTION MaskedNorm
     ELSE
       CALL Info('IterSolve','Returned return code: '//I2S(HUTI_INFO),Level=15)
       IF( HUTI_INFO == HUTI_DIVERGENCE ) THEN
-        CALL NumericalError( 'IterSolve', 'System diverged over maximum tolerance.')
-      ELSE IF( HUTI_INFO == HUTI_MAXITER ) THEN                
+        CALL NumericalError( 'IterSolve', 'Linear system of "'//SolverDisplayName(Solver)// &
+            '" diverged over maximum tolerance.')
+      ELSE IF( HUTI_INFO == HUTI_MAXITER ) THEN
         DoFatal = ListGetLogical( Params,'Linear System Abort Not Converged',Found )
         IF(.NOT. Found ) DoFatal = .TRUE.
         IF( DoFatal ) THEN
-          CALL NumericalError('IterSolve','Too many iterations were needed.')
+          CALL NumericalError('IterSolve','Linear system of "'//SolverDisplayName(Solver)// &
+              '" did not converge in '//I2S(HUTI_MAXIT)//' iterations.')
         ELSE
-          CALL Info('IterSolve','Linear iteration did not converge to tolerance',Level=6)
+          ! Kept as a result, but visible at the default output level and in a
+          ! fixed form that a caller can search the log for. The methods do not
+          ! all fill HUTI_ITERS; here the count is the limit by definition.
+          WRITE( Message,'(A,I0,A,ES10.3)') 'NOT CONVERGED: linear solver="'// &
+              SolverDisplayName(Solver)//'" iterations=',HUTI_MAXIT,' tolerance=',HUTI_TOLERANCE
+          CALL Warn('IterSolve',Message)
         END IF
       ELSE IF( HUTI_INFO == HUTI_HALTED ) THEN
-        CALL Warn('IterSolve','Iteration halted due to problem in algorithm, trying to continue')
+        WRITE( Message,'(A,ES10.3)') 'NOT CONVERGED: linear solver="'// &
+            SolverDisplayName(Solver)//'" halted by the algorithm, tolerance=',HUTI_TOLERANCE
+        CALL Warn('IterSolve',Message)
       END IF
       IF( ASSOCIATED( Solver % Variable ) ) THEN
         Solver % Variable % LinConverged = 0
