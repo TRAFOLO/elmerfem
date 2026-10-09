@@ -1,34 +1,25 @@
 #!/bin/bash
-# Package + deploy the validated install as the app bundle.
-# REWORKED 2026-07-09. Why: the old script (a) dropped only to Trafolo_third_party_dev
-# while the live deploy target moved to Trafolo_third_party (production), (b) had no
-# retry on Compress-Archive (AV file-lock races produced truncated/no zips twice),
-# and (c) had NO prune guard - on 2026-07-03..06 an unpruned 144-module install was
-# zipped and deployed to production unnoticed. Limitation: the prune guard checks
-# module count / marker files, not full manifest equality.
+# Package the validated install as the app bundle.
+# Refuses an unpruned or unaudited install (prune guard), retries the zip
+# (AV scanners transiently lock freshly copied files). Limitation: the prune
+# guard checks module count / marker files, not full manifest equality.
 #
 # Usage:  bash package_bundle.sh            # zip + drop DATED folder into _dev
-#         PROD=1 bash package_bundle.sh     # additionally replace the PRODUCTION bundle
-#                                           # (backup-renamed; CLOSE THE TRAFOLO APP first)
-# Env overrides: ELMER_INSTALL, ELMER_SRC, CODE_DIR
+#         PROD=1 bash package_bundle.sh     # additionally replace the app's installed
+#                                           # bundle (backup-renamed; CLOSE THE APP first)
+# Env overrides: ELMER_INSTALL, ELMER_SRC, CODE_DIR, BUNDLE_NAME, FOLDER_NAME
 set -e
 SRC="${ELMER_SRC:-$(cd "$(dirname "$0")" && pwd)}"
 INSTALL="${ELMER_INSTALL:-$SRC/../elmer-install-win}"
 CODE="${CODE_DIR:-$SRC/..}"
-# Bundle folder/zip name. Must match the app literals (Choke auto_install_dependencies.py +
-# thirdpartydownloaddlg.py), the deployed folder, and the ElmerSetup.zip top-level dir on the
-# distribution server. Corrected 2026-08-25: the canonical name is
-# ElmerFEM-nogui-mpi-Windows-AMD64 — the 2026-07-09 rename to ElmerFEM-TRbuild-Windows-AMD64
-# was never adopted by the app and is retired. Verified 2026-08-26 against the actual source:
-# Choke hardcodes this exact string at thirdpartydownloaddlg.py:189
-# (`os.path.join(third_party_path, "ElmerFEM-nogui-mpi-Windows-AMD64", "bin")`).
+# Zip file name.
 NAME="${BUNDLE_NAME:-ElmerFEM-nogui-mpi-Windows-AMD64}"
-# Top-level folder INSIDE the zip. Decoupled from NAME (2026-08-25) because CI
-# stamps the zip name with the build date, but the app expects a fixed folder
-# name when it unpacks the archive. Defaults to NAME so local runs are unchanged.
+# Top-level folder INSIDE the zip. The TRAFOLO app expects exactly
+# ElmerFEM-nogui-mpi-Windows-AMD64 when it unpacks the archive, while release zips
+# carry the build date in the file name, so the two are set separately.
+# Defaults to NAME.
 FOLDER="${FOLDER_NAME:-$NAME}"
-# The app's managed third-party dirs under the CURRENT user's %LOCALAPPDATA%
-# (was hardcoded to Juris's profile).
+# The app's third-party dirs under the current user's %LOCALAPPDATA%.
 LOCAL_APPDATA="$(cygpath -u "${LOCALAPPDATA:-$USERPROFILE\\AppData\\Local}")"
 DEV_DROP="$LOCAL_APPDATA/Trafolo_third_party_dev"
 PROD_DROP="$LOCAL_APPDATA/Trafolo_third_party"
@@ -41,7 +32,7 @@ if [ "$MODCOUNT" -ne 18 ] || [ -f "$INSTALL/bin/ViewFactors.exe" ] || [ -d "$INS
   exit 1
 fi
 grep -q "UMFPACK 4.4" "$INSTALL/SOURCE.txt" || { echo "ERROR: SOURCE.txt stale (no UMFPACK) - run license_audit.sh"; exit 1; }
-[ -f "$INSTALL/redist/msmpisetup.exe" ] || { echo "ERROR: redist/msmpisetup.exe missing - Choke's thirdpartydownloaddlg.py requires it to install the MS-MPI prerequisite (see README-TRAFOLO.md); rebuild with BUNDLE_MSMPI_REDIST=ON"; exit 1; }
+[ -f "$INSTALL/redist/msmpisetup.exe" ] || { echo "ERROR: redist/msmpisetup.exe missing - the app runs it to install the MS-MPI prerequisite (see README-TRAFOLO.md); rebuild with BUNDLE_MSMPI_REDIST=ON"; exit 1; }
 
 # ---- bundle date from the solver banner (build date, not packaging date) ----
 BDATE=$(env -i PATH="$(cygpath -w "$INSTALL/bin");C:\\Windows\\System32" "$INSTALL/bin/ElmerSolver.exe" 2>&1 | grep -oE "Compiled: [0-9-]+" | grep -oE "[0-9-]+$")
@@ -77,12 +68,13 @@ if [ "${PROD:-0}" = "1" ]; then
 fi
 rm -rf "$STAGE"
 
-# ---- Choke externals staging (hash-sync defusal, G1) ----
-# Next to the zip, outside the source checkout.
+# ---- stage the TRAFOLO modules for the app's own copies ----
+# The app keeps its own copies of these DLLs and must use ones from this same
+# build (module DLLs from a different core crash at init). Next to the zip.
 EXT="$CODE/choke_externals_staging"
 rm -rf "$EXT"; mkdir -p "$EXT"
 for m in ProcessFields LoadFields htc_udf; do
   cp "$INSTALL/share/elmersolver/lib/$m.dll" "$EXT/"
   cp "$SRC/fem/src/modules/$m.F90" "$EXT/" 2>/dev/null || true
 done
-echo "Choke externals staged in $EXT (copy into Choke/externals/Elmer/ + verify hash match)"
+echo "TRAFOLO modules staged in $EXT"

@@ -1,14 +1,13 @@
 #!/bin/bash
 # ONE-COMMAND driver: source -> validated, packaged TRAFOLO Elmer bundle.
 # Runs: build -> deploy -> prune -> audit -> gates -> package, stopping on the
-# first failure. Why: the steps used to be run by hand in order; skipping one
-# (ninja install silently UN-prunes) shipped an unpruned 115MB bundle on
-# 2026-07-03. This driver + package_bundle.sh's prune guard make that
-# impossible. Limitation: Windows/MSYS2-UCRT64 only, by design.
+# first failure. Why: skipping a stage is never safe (ninja install silently
+# UN-prunes); this driver + package_bundle.sh's prune guard prevent packaging an
+# unpruned install. Limitation: Windows/MSYS2-UCRT64 only, by design.
 #
 # Usage (from any shell - re-execs itself under the UCRT64 login shell):
-#   bash build_all.sh                  # full pipeline, dev drop only
-#   PROD=1 bash build_all.sh           # + replace PRODUCTION bundle (close the app!)
+#   bash build_all.sh                  # full pipeline
+#   PROD=1 bash build_all.sh           # + replace the app's installed bundle (close the app!)
 #   FROM=gates bash build_all.sh       # resume from: build|deploy|prune|audit|gates|package
 #   STOP_AFTER=gates bash build_all.sh # stop early (e.g. validate without packaging)
 #   DRYRUN=1 bash build_all.sh         # print the stage plan, run nothing
@@ -22,8 +21,7 @@
 # See README-TRAFOLO.md "Building the distributed bundle" for the full procedure.
 set -e
 # Control flags travel as ARGV through the re-exec: env vars are not reliably
-# preserved into the MSYS2 login shell (verified 2026-07-09 - FROM=prune was
-# lost and a full rebuild started). argv survives everything.
+# preserved into the MSYS2 login shell. argv survives everything.
 FROM="${1:-${FROM:-build}}"
 STOP_AFTER="${2:-${STOP_AFTER:-package}}"
 PROD="${3:-${PROD:-0}}"
@@ -85,5 +83,3 @@ done
 
 echo ""
 echo "ALL STAGES OK in $(( ($(date +%s)-T0)/60 )) min."
-echo "Reminder: after a PROD swap, sync Choke externals + RECOMMENDED_ELMER_VERSION"
-echo "on every branch the team runs the app from (see TRAFOLO/elmer-dist-build README.md gotchas)."

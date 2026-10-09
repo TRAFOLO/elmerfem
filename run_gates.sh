@@ -1,11 +1,9 @@
 #!/bin/bash
-# Phase 5 -- validation gates 1-7 against the (pruned) install.
-# Gate 8 (zip / clean machine / in-app) runs separately after packaging.
+# Phase 5 -- validation gates 1-9 against the (pruned) install.
 #
 # Direct-solver (UMFPACK) gate design notes:
-#  * Policy 2026-07-03: MUMPS is banned (CeCILL-C, GPL-incompatible); the bundled
-#    direct solver is Elmer's vendored UMFPACK 4.4. Gates 3/4 exercise it.
-#    Before: these gates injected Direct Method = MUMPS (validated the old bundle).
+#  * MUMPS is never shipped (CeCILL-C, GPL-incompatible); the bundled direct
+#    solver is Elmer's vendored UMFPACK 4.4. Gates 3/4 exercise it.
 #  * 3D Whitney AV (IBC test) is UNGAUGED with Piola basis (tree gauge unavailable)
 #    -> a direct factorization of that singular system is ill-posed by formulation,
 #    so it is NOT a direct-solver gate. The app uses iterative solvers for 3D AV.
@@ -34,10 +32,10 @@ check_passed() { # dir label
 
 # Parallel leg of the direct-solver gates: Elmer implements parallel direct only
 # for MUMPS/CPardiso ("CheckLinearSolverOptions: Only MUMPS and CPardiso...");
-# UMFPACK is serial-only, and MUMPS is license-banned. The app emits iterative
+# UMFPACK is serial-only, and MUMPS is not shippable. The app emits iterative
 # solvers everywhere, so the honest parallel gate is the ITERATIVE 4-rank run:
 # it must complete and its PHYSICAL solver norm must match the serial reference
-# (the circuit-coupled master norm is a serial-only artifact, see history).
+# (the circuit-coupled master norm is a serial-only artifact).
 # The harmonic case additionally exercises the UMFPACK-backed Circuit
 # preconditioner (VankaCreate CircuitPrec) in parallel.
 check_mpi_solver() { # logfile solverN label
@@ -57,7 +55,7 @@ check_physics() { # logfile label
   echo "[$2] ${RESULT[$2]}"
 }
 
-# Switch MagnetoDynamics* solver blocks to Direct/MUMPS, leaving auxiliary
+# Switch MagnetoDynamics* solver blocks to Direct/UMFPACK, leaving auxiliary
 # solvers (direction, coil, w-potential) on their reference iterative setup.
 # Notes: "Solver N :: Reference Norm" trailer lines are NOT block headers
 # (the :: guard) and the buffer is flushed at EOF -- losing the reference
@@ -112,7 +110,7 @@ mkdir -p "$D/2241/dat"
 ( cd "$D" && ElmerSolver.exe > serial.log 2>&1 )
 check_passed "$D" "2-transhom-serial"
 
-# ---------- gate 3: dmumps -- 2D transient stranded circuits with MUMPS, serial + 4 ranks ----------
+# ---------- gate 3: 2D transient stranded circuits, UMFPACK serial + iterative 4 ranks ----------
 # (NOT the 3D transhom case: its WhitneyAVSolver system is ungauged 3D edge-element
 #  AV -- ill-posed for direct factorization by formulation, and its pinned norms are
 #  gauge-dependent. The app's direct-solver use case is the 2D nodal systems.)
@@ -131,7 +129,7 @@ mkdir -p "$DI/1381/dat"
   && "$MPIEXEC" -n 4 ElmerSolver_mpi.exe > mpi.log 2>&1 )
 check_mpi_solver "$DI/mpi.log" 6 "3b-trans2D-iter-mpi4"
 
-# ---------- gate 4: zmumps -- 2D harmonic homogenization with MUMPS, serial + 4 ranks ----------
+# ---------- gate 4: 2D harmonic homogenization, UMFPACK serial + iterative 4 ranks ----------
 D="$GATES/g4_harm2d_direct"; mkdir -p "$D"
 cp -r "$SRC/fem/tests/circuits2D_harmonic_stranded_homogenization"/{sif,2077,ELMERSOLVER_STARTINFO} "$D/"
 mkdir -p "$D/2077/dat"

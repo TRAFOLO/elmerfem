@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 3 -- prune the install tree to what TRAFOLO uses (17-module whitelist).
+# Phase 3 -- prune the install tree to what TRAFOLO uses (18-module whitelist).
 set -e
 INSTALL="${ELMER_INSTALL:-$(cd "$(dirname "$0")" && pwd)/../elmer-install-win}"
 LIB="$INSTALL/share/elmersolver/lib"
@@ -7,7 +7,7 @@ LIB="$INSTALL/share/elmersolver/lib"
 echo "=== size before prune ==="
 du -sh "$INSTALL"
 
-# --- solver module whitelist (16 from the SIF-builder grep + htc_udf) ---
+# --- solver module whitelist: the modules the TRAFOLO app's models use ---
 KEEP="CircuitsAndDynamics CoilSolver CoordinateTransform DirectionSolver HeatSolve \
 LoadFields MagnetoDynamics MagnetoDynamics2D Poisson ProcessFields \
 ReloadData ResultOutputSolve SaveData StatCurrentSolve StatElecSolve StatElecSolveVec \
