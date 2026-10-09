@@ -22,10 +22,11 @@
 set -uo pipefail
 KIT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$KIT/.." && pwd)"
-WORK="${MUMPS410_WORK:-$SRC/../mumps410-work}"
-TARBALL="${MUMPS410_TARBALL:-$WORK/mumps_4.10.0.dfsg.orig.tar.gz}"
-I="${MUMPS410_INSTALL:-$SRC/../mumps410-install}"
-MPIEXEC="${MPIEXEC_EXE:-/c/Program Files/Microsoft MPI/Bin/mpiexec.exe}"
+# POSIX paths throughout: CI passes Windows ones (D:\a\...), and tar reads "D:" as a remote host.
+WORK="$(cygpath -u "${MUMPS410_WORK:-$SRC/../mumps410-work}")"
+TARBALL="$(cygpath -u "${MUMPS410_TARBALL:-$WORK/mumps_4.10.0.dfsg.orig.tar.gz}")"
+I="$(cygpath -u "${MUMPS410_INSTALL:-$SRC/../mumps410-install}")"
+MPIEXEC="$(cygpath -u "${MPIEXEC_EXE:-/c/Program Files/Microsoft MPI/Bin/mpiexec.exe}")"
 PFX="${MSYSTEM_PREFIX:-/ucrt64}"
 S="$WORK/mumps-4.10.0.dfsg"
 TARBALL_SHA256=c76339bba516b96a3021af93d9a31b0fbf5a68cfcd02c9578d665ba8018e4b11
@@ -75,7 +76,7 @@ check_wipe_target "$S" "the MUMPS source tree"
 check_wipe_target "$I" MUMPS410_INSTALL
 rm -rf -- "$S" "$I" || die "cannot clean the old build"
 mkdir -p "$I/lib" "$I/include" || die "mkdir $I"
-tar xzf "$TARBALL" -C "$WORK" || die "extract"
+tar --force-local -xzf "$TARBALL" -C "$WORK" || die "extract"
 [ -f "$S/Makefile" ] || die "extracted tree incomplete"
 
 step "source fix: argument kind of MUMPS_731"
