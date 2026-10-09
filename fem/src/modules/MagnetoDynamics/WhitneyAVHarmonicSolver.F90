@@ -682,12 +682,18 @@ CONTAINS
     TG=GetLogical(SolverParams, 'Use tree gauge', Found)
     IF (.NOT. Found) THEN
       TG=GetString(GetSolverParams(),'Linear System Solver',Found)=='direct'
-      ! The gauge removes edge dofs the circuit coils couple to. Measured on
-      ! circuits_harmonic_massive with MUMPS: 5x off in energy, no error.
-      IF (TG .AND. .NOT. TreeGaugeWarned .AND. ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
-        IF (CurrentModel % Circuit_tot_n > 0) CALL Warn('WhitneyAVHarmonicSolver', &
-            'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
-            'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+      ! Wrong without an error with circuit coils (the gauge removes edge dofs they couple to;
+      ! circuits_harmonic_massive with MUMPS: 5x off in energy) and with the electrodynamics
+      ! model (TRAFOLO spiral at 9 GHz: wrong rows in the first iteration, over-constrained tree).
+      IF (TG .AND. .NOT. TreeGaugeWarned) THEN
+        IF (ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
+          IF (CurrentModel % Circuit_tot_n > 0) CALL Warn('WhitneyAVHarmonicSolver', &
+              'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
+              'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+        END IF
+        IF (ElectroDynamics) CALL Warn('WhitneyAVHarmonicSolver', &
+            'The direct solver switches the tree gauge on by itself, which gave wrong results with the '// &
+            'electrodynamics model. Set "Use Tree Gauge = False".')
         TreeGaugeWarned = .TRUE.
       END IF
     END IF

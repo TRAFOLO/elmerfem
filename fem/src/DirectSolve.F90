@@ -752,7 +752,9 @@ CONTAINS
 !> MUMPS, summed over all ranks in the same way as MUMPS sums the distributed entries. For the rows of the
 !> solver's own matrix (field) and for the rows appended to it (constraints, e.g. circuit equations) it
 !> reports separately: max|r_i|, max|b_i| (the right-hand side of the current, possibly linearized, system),
-!> the largest row activity max_i (|A||x|)_i, and a residual indicator max_i |r_i| / (|A||x| + |b|)_i.
+!> the largest row activity max_i (|A||x|)_i, the normwise residual max|r| / (max|A||x| + max|b|) and a
+!> residual indicator max_i |r_i| / (|A||x| + |b|)_i. The warning compares the normwise residual: on 156
+!> TRAFOLO A-V runs it stayed at or below 1.7e-10 for correct solutions, while the indicator reached 0.9.
 !> The indicator is not the exact componentwise backward error: on rows shared by ranks, |A| sums the moduli
 !> of the rank-local partial entries (an upper bound), and rows below 1e-12 of the largest activity in their
 !> block are measured against that floor (their number is reported). On one rank the first effect vanishes.
@@ -771,7 +773,7 @@ CONTAINS
     REAL(KIND=dp) :: x(*), b(*)
     INTEGER :: Comm
     CHARACTER(LEN=*) :: What
-    !> Info level of the report (default 4); indicator above which to warn.
+    !> Info level of the report (default 4); normwise residual above which to warn.
     INTEGER, OPTIONAL :: Level
     REAL(KIND=dp), OPTIONAL :: WarnAbove
 !------------------------------------------------------------------------------
@@ -781,7 +783,7 @@ CONTAINS
 #  endif
     INTEGER :: i, j, k, l, n, nfield, ng, nloc, ierr
     REAL(KIND=dp), ALLOCATABLE :: xg(:), cnt(:), rg(:), ag(:), bg(:), cg(:), buf(:)
-    REAL(KIND=dp) :: s, t, den, rmax(2), bmax(2), amax(2), dmax(2), dfloor(2), wmax(2)
+    REAL(KIND=dp) :: s, t, den, rmax(2), bmax(2), amax(2), dmax(2), dfloor(2), wmax(2), nrel(2)
     INTEGER :: nfloor(2)
     LOGICAL :: GotName
 
@@ -847,11 +849,16 @@ CONTAINS
       END IF
       IF (den > 0.0_dp) wmax(l) = MAX(wmax(l), ABS(rg(k)) / den)
     END DO
-    WRITE(Message, '(2A,2(A,4(ES10.3,A),I0,A),A,I0,A)') 'MUMPS residual check ', What, &
+    nrel = 0.0_dp
+    DO l = 1, 2
+      IF (amax(l) + bmax(l) > 0.0_dp) nrel(l) = rmax(l) / (amax(l) + bmax(l))
+    END DO
+    WRITE(Message, '(2A,2(A,5(ES10.3,A),I0,A),A,I0,A)') 'MUMPS residual check ', What, &
         ': field rows: max|r| ', rmax(1), ', max|b| ', bmax(1), ', max|A||x| ', amax(1), &
-        ', indicator ', wmax(1), ' (', nfloor(1), ' floored)', &
+        ', normwise ', nrel(1), ', indicator ', wmax(1), ' (', nfloor(1), ' floored)', &
         '; constraint rows: max|r| ', rmax(2), ', max|b| ', bmax(2), ', max|A||x| ', amax(2), &
-        ', indicator ', wmax(2), ' (', nfloor(2), ' floored)', '; ', NINT(SUM(cg)), ' constraint rows'
+        ', normwise ', nrel(2), ', indicator ', wmax(2), ' (', nfloor(2), ' floored)', &
+        '; ', NINT(SUM(cg)), ' constraint rows'
     IF (PRESENT(Level)) THEN
       CALL Info('MumpsResidualCheck', Message, Level=Level)
     ELSE
@@ -860,9 +867,9 @@ CONTAINS
     ! MUMPS reports success on a singular system it factorized without null
     ! pivot detection; only the residual shows that the solution is wrong.
     IF (PRESENT(WarnAbove)) THEN
-      IF (MAXVAL(wmax) > WarnAbove) THEN
+      IF (MAXVAL(nrel) > WarnAbove) THEN
         WRITE(Message, '(A,ES10.3,A,ES10.3,A)') 'NOT CONVERGED: direct solver="'// &
-            ListGetString(Solver % Values,'Equation',GotName)//'" MUMPS residual indicator=', MAXVAL(wmax), &
+            ListGetString(Solver % Values,'Equation',GotName)//'" MUMPS normwise residual=', MAXVAL(nrel), &
             ' tolerance=', WarnAbove, ': the solution does not satisfy the linear system. '// &
             'A singular system needs "Mumps Null Pivot Detection = True"; the A-V solvers with '// &
             'circuit coils also need "Use Tree Gauge = False".'
@@ -878,8 +885,8 @@ CONTAINS
 !------------------------------------------------------------------------------
 !> The residual of every MUMPS solution, unless 'Mumps Residual Check = False':
 !> reported at info level 4 when the check was asked for, at level 6
-!> otherwise, and a warning when the indicator exceeds 'Mumps Residual
-!> Tolerance' (default 1e-4). Collective over Comm, so every rank calls it.
+!> otherwise, and a warning when the normwise residual exceeds 'Mumps Residual
+!> Tolerance' (default 1e-8). Collective over Comm, so every rank calls it.
 !------------------------------------------------------------------------------
   SUBROUTINE MumpsCheckSolution(Solver, A, x, b, Comm)
 !------------------------------------------------------------------------------
@@ -888,7 +895,8 @@ CONTAINS
     REAL(KIND=dp) :: x(*), b(*)
     INTEGER :: Comm
 
-    REAL(KIND=dp), PARAMETER :: DefaultResidualTolerance = 1.0e-4_dp
+    ! Correct TRAFOLO A-V solutions stayed at or below 1.7e-10; failed solves reached 5e-2.
+    REAL(KIND=dp), PARAMETER :: DefaultResidualTolerance = 1.0e-8_dp
     REAL(KIND=dp) :: Tol
     LOGICAL :: Check, Asked, GotTol
 
