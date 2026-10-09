@@ -1,5 +1,6 @@
 ! DEV-1560: a single relaxed iteration returns the solution blended with the
-! initial guess, so it warns, once per solver: two scan steps, one warning.
+! initial guess, so it warns, once per solver. Scan step 1 is unrelaxed and
+! steps 2 and 3 are relaxed: exactly one warning, from step 2.
 ! A simple testcase for testing CircuitsAndDynamics module.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: October 2015
@@ -19,7 +20,7 @@ Simulation 1
    Coordinate Mapping(3) = 1 2 3
    Coordinate Scaling = 0.001
    Simulation Type = Scanning
-   Timestep Intervals = 2
+   Timestep Intervals = 3
    Timestep Sizes = 1
    Steady State Max Iterations = 1
    BDF Order = 1
@@ -63,7 +64,8 @@ Solver 3
    Linear System Residual Output = 1000
    BicgStabL Polynomial Degree = 4
    Nonlinear System Max Iterations = 1
-   Nonlinear System Relaxation Factor = 0.5
+   Nonlinear System Relaxation Factor = Variable Timestep
+     Real MATC "1.0 - 0.5*(tx > 1.5)"
    Linear System Abort not Converged = True
    Steady State Convergence Tolerance = 1e-06
 End
