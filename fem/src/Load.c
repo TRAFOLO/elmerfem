@@ -402,7 +402,7 @@ void *STDCALLBULL FC_FUNC(loadfunction,LOADFUNCTION) ( int *Quiet, int *abort_no
    try_open_solver(ElmerLib, Library, &Handle, ErrorBuffer);
    if ( Handle == NULL ) {
       fprintf(stderr, "%s", ErrorBuffer);
-      exit(0);
+      exit(1);
    }
 
 #ifdef HAVE_DLOPEN_API
@@ -410,7 +410,7 @@ void *STDCALLBULL FC_FUNC(loadfunction,LOADFUNCTION) ( int *Quiet, int *abort_no
    if ( (Function = (void(*)())dlsym( Handle,NewName)) == NULL && *abort_not_found )
    {
       fprintf( stderr, "Load: FATAL: Can't find procedure [%s]\n", NewName );
-      exit(0);
+      exit(1);
    }
 
 #elif defined(HAVE_LOADLIBRARY_API)
@@ -418,7 +418,7 @@ void *STDCALLBULL FC_FUNC(loadfunction,LOADFUNCTION) ( int *Quiet, int *abort_no
    if ( (Function = (void *)GetProcAddress(Handle,NewName)) == NULL && *abort_not_found )
    {
      fprintf( stderr,"Load: FATAL: Can't find procedure [%s]\n", NewName );
-     exit(0);
+     exit(1);
    }
 
 #endif
@@ -655,16 +655,17 @@ void STDCALLBULL FC_FUNC(matc_c,MATC) (char *cmd,int *cmdlen,char *result,*resle
 
   if(slen >= *reslen) {
     fprintf( stderr, "MATC result too long %d %d\n", *len, *reslen );
-    exit(0);
+    exit(1);
   } else if (slen>0) {
     *reslen = slen;
     strncpy(result, (const char*)ptr, slen);
 
     if ( strncmp(result, "MATC ERROR:",11)==0 || strncmp(result,"WARNING:",8)==0 ) {
       if (start==0) {
-          fprintf( stderr, "Solver input file error: %s\n", result );
+          /* result is a blank padded Fortran string, not NUL terminated */
+          fprintf( stderr, "Solver input file error: %.*s\n", slen, result );
           fprintf( stderr, "...offending input line: %s\n", ccmd );
-          exit(0);
+          exit(1);
       } else {
         result[0]=' ';
         *reslen = 0;
