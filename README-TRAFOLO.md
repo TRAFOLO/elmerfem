@@ -216,5 +216,23 @@ zip.
 The zip matches the distributed one in content, not byte for byte: the build date in the solver
 banner, `SOURCE.txt` and file timestamps differ.
 
+### Troubleshooting
+
+**`$'\r': command not found` or `syntax error near unexpected token $'\r'`.** Git on Windows
+(`core.autocrlf=true`, the installer default) may check the scripts out with CRLF line endings,
+which bash can reject. Get LF copies of the scripts, either with `dos2unix`:
+
+```bash
+pacman -S --needed dos2unix && dos2unix *.sh
+```
+
+or by checking them out again with LF line endings (this discards local edits to those files):
+
+```bash
+rm *.sh && git -c core.autocrlf=input checkout -- '*.sh'
+```
+
+To avoid it for good, clone with `git clone -c core.autocrlf=input ...`.
+
 Corresponding source for any distributed TRAFOLO Elmer binary is this repository at the commit
 recorded in the bundle's `SOURCE.txt` (GPL compliance).
