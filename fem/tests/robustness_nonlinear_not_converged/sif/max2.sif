@@ -1,5 +1,7 @@
 ! DEV-1560: a nonlinear loop that ends at its iteration limit leaves a
-! NOT CONVERGED warning naming the solver.
+! NOT CONVERGED warning naming the solver. The model is linear: without
+! relaxation the second iteration repeats the first exactly (change 0); the
+! relaxation keeps the change small but above the 1e-30 tolerance.
 ! A simple testcase for testing CircuitsAndDynamics module.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: October 2015
@@ -62,6 +64,7 @@ Solver 3
    BicgStabL Polynomial Degree = 4
    Nonlinear System Max Iterations = 2
    Nonlinear System Convergence Tolerance = 1e-30
+   Nonlinear System Relaxation Factor = 0.5
    Linear System Abort not Converged = True
    Steady State Convergence Tolerance = 1e-06
 End
