@@ -11339,9 +11339,10 @@ END FUNCTION SearchNodeL
     !--------------------------------------------------------------------------
     ! The norm should be bounded in order to reach convergence
     !--------------------------------------------------------------------------
-    IF( Norm /= Norm ) THEN
-      PRINT *,'Norm:',Norm,PrevNorm, n
-      CALL NumericalError(Caller,'Norm of solution appears to be NaN')
+    IF( Norm /= Norm .OR. ABS(Norm) > HUGE(Norm) ) THEN
+      WRITE( Message,'(A,ES12.5)') 'Norm of the solution of "'//SolverDisplayName(Solver)// &
+          '" is NaN or Inf; previous norm ',PrevNorm
+      CALL NumericalError(Caller,Message)
     END IF
 
     IF( SteadyState ) THEN
@@ -11536,11 +11537,28 @@ END FUNCTION SearchNodeL
           Solver % Variable % NonlinConverged = 1
         ELSE IF( IterNo >= MaxIter ) THEN
           IF( ListGetLogical( SolverParams,'Nonlinear System Abort Not Converged',Stat ) ) THEN
-            CALL Fatal(Caller,'Nonlinear iteration did not converge to tolerance')
-          ELSE
-            CALL Info(Caller,'Nonlinear iteration did not converge to tolerance',Level=6)
-            ! Solver % Variable % NonlinConverged = 2            
+            CALL Fatal(Caller,'Nonlinear iteration of "'//SolverDisplayName(Solver)// &
+                '" did not converge to tolerance in '//I2S(MaxIter)//' iterations')
+          ELSE IF( MaxIter > 1 ) THEN
+            WRITE( Message,'(A,I0,A,ES10.3,A,ES10.3)') 'NOT CONVERGED: nonlinear solver="'// &
+                SolverDisplayName(Solver)//'" iterations=',IterNo,' change=',Change, &
+                ' tolerance=',Tolerance
+            CALL Warn(Caller,Message)
+            ! Solver % Variable % NonlinConverged = 2
           END IF
+        END IF
+      END IF
+
+      ! A single iteration is a plain linear solve whose change is measured from the
+      ! initial guess, so it is not a convergence failure, unless it is relaxed: then
+      ! the result is the solution blended with the initial guess. Once per solver.
+      IF( MaxIter <= 1 .AND. Relax ) THEN
+        IF( .NOT. ListGetLogical( SolverParams,'Relaxed Single Iteration Warned',Stat ) ) THEN
+          WRITE( Message,'(A,ES10.3,A)') 'NOT CONVERGED: nonlinear solver="'// &
+              SolverDisplayName(Solver)//'" iterations=1 relaxation=',Relaxation, &
+              ': one relaxed iteration does not reach the solution'
+          CALL Warn(Caller,Message)
+          CALL ListAddLogical( SolverParams,'Relaxed Single Iteration Warned',.TRUE. )
         END IF
       END IF
 
