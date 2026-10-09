@@ -32,6 +32,7 @@ if [ "$MODCOUNT" -ne 18 ] || [ -f "$INSTALL/bin/ViewFactors.exe" ] || [ -d "$INS
   exit 1
 fi
 grep -q "UMFPACK 4.4" "$INSTALL/SOURCE.txt" || { echo "ERROR: SOURCE.txt stale (no UMFPACK) - run license_audit.sh"; exit 1; }
+[ -f "$INSTALL/licenses/THIRD_PARTY_NOTICES.md" ] || { echo "ERROR: licenses/THIRD_PARTY_NOTICES.md missing (SOURCE.txt points to it) - run license_audit.sh"; exit 1; }
 [ -f "$INSTALL/redist/msmpisetup.exe" ] || { echo "ERROR: redist/msmpisetup.exe missing - the app runs it to install the MS-MPI prerequisite (see README-TRAFOLO.md); rebuild with BUNDLE_MSMPI_REDIST=ON"; exit 1; }
 
 # ---- bundle date from the solver banner (build date, not packaging date) ----

@@ -261,6 +261,117 @@ for tc in circuits2D_transient_nonlinear_resistor circuits2D_transient_nonlinear
   check_passed "$D" "9-${tc##*transient_}"
 done
 
+# ---------- gate 10: MUMPS 4.10 with the TRAFOLO A-V block, serial + 4 ranks ----------
+# 3D harmonic A-V with a massive circuit coil, solved with the block TRAFOLO writes when the
+# user selects MUMPS (tree gauge off, null pivots at 1e-10, sequential root, working space 200),
+# against the iterative run of the same case on the same partitioning. The A-V norm of an
+# ungauged direct solve is gauge-dependent, so the reference norms of the test cannot be used:
+# pass = eddy current power, Joule loss and the source current and voltage within 1e-4, no
+# NOT CONVERGED or tree-gauge warning, and the banner reports MUMPS.
+mumps_av_block() { # sif: the WhitneyAVHarmonicSolver block gets the TRAFOLO MUMPS lines
+  awk '
+    function flushbuf(  i, l, k) {
+      for (i = 1; i <= n; i++) {
+        l = buf[i]; k = tolower(l)
+        if (hit && k ~ /^ *(linear system (solver|iterative method|preconditioning|convergence tolerance|max iterations|residual output|abort not converged|robust|direct method)|bicgstabl polynomial degree|use tree gauge) *=/) continue
+        print l
+        if (hit && k ~ /^ *procedure *= *"magnetodynamics" *"whitneyavharmonicsolver"/) {
+          print "   Linear System Solver = Direct"
+          print "   Linear System Direct Method = MUMPS"
+          print "   Use Tree Gauge = Logical False"
+          print "   Mumps Null Pivot Detection = Logical True"
+          print "   Mumps Null Pivot Tolerance = Real 1e-10"
+          print "   Mumps Sequential Root = Logical True"
+          print "   Mumps Percentage Increase Working Space = Integer 200"
+        }
+      }
+      n = 0; inblk = 0; hit = 0
+    }
+    /^Solver [0-9]+/ && $0 !~ /::/ { if (inblk) flushbuf(); inblk = 1 }
+    {
+      if (inblk) {
+        buf[++n] = $0
+        if (tolower($0) ~ /whitneyavharmonicsolver/) hit = 1
+        if ($0 ~ /^End/) flushbuf()
+      } else print
+    }
+    END { if (inblk) flushbuf() }
+  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+# The test keeps SaveScalars switched off; switch it on (that block only).
+enable_scalars() {
+  awk '
+    /^Solver [0-9]+/ && $0 !~ /::/ { inblk = 1; n = 0; ss = 0 }
+    inblk {
+      buf[++n] = $0
+      if (tolower($0) ~ /"savescalars"/) ss = 1
+      if ($0 ~ /^End/) {
+        for (i = 1; i <= n; i++) { l = buf[i]; if (ss) sub(/Exec Solver = Never/, "Exec Solver = Always", l); print l }
+        inblk = 0
+      }
+      next
+    }
+    { print }
+  ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+scalar_col() { # names-file column-name -> 1-based column
+  tr -d '\r' < "$1" | grep -i -m1 ": $2 *\$" | sed 's/^ *\([0-9]*\):.*/\1/'
+}
+value_of() { # names-file dat-file column-name -> value in the last row
+  local c; c=$(scalar_col "$1" "$3"); [ -n "$c" ] || return 1
+  tail -1 "$2" | awk -v c="$c" '{print $c}'
+}
+# Powers relative to themselves; source current and voltage as complex phasors, relative to
+# the magnitude (a part that is zero to round-off must not fail the gate).
+compare_scalars() { # names-file ref.dat run.dat label
+  local ok=1 q a b ar ai br bi
+  for q in "res: eddy current power" "res: joule loss"; do
+    a=$(value_of "$1" "$2" "$q") && b=$(value_of "$1" "$3" "$q") || { echo "  $4: column '$q' missing"; ok=0; continue; }
+    awk -v a="$a" -v b="$b" 'BEGIN{d=a-b; if(d<0)d=-d; s=(a<0?-a:a); if(s<1e-30)s=1e-30; exit !(d/s<=1e-4)}' \
+      || { echo "  $4: $q differs: iterative $a, MUMPS $b"; ok=0; }
+  done
+  for q in "res: i_testsource" "res: v_testsource"; do
+    ar=$(value_of "$1" "$2" "$q re") && ai=$(value_of "$1" "$2" "$q im") && br=$(value_of "$1" "$3" "$q re") \
+      && bi=$(value_of "$1" "$3" "$q im") || { echo "  $4: columns '$q re/im' missing"; ok=0; continue; }
+    awk -v ar="$ar" -v ai="$ai" -v br="$br" -v bi="$bi" \
+      'BEGIN{d=sqrt((ar-br)^2+(ai-bi)^2); s=sqrt(ar^2+ai^2); if(s<1e-30)s=1e-30; exit !(d/s<=1e-4)}' \
+      || { echo "  $4: $q differs: iterative $ar + j $ai, MUMPS $br + j $bi"; ok=0; }
+  done
+  return $((1 - ok))
+}
+G10="$SRC/fem/tests/circuits_harmonic_massive"
+for leg in iter mumps; do
+  for np in 1 4; do
+    D="$GATES/g10_${leg}_np$np"; mkdir -p "$D"
+    cp -r "$G10"/{sif,1962,ELMERSOLVER_STARTINFO} "$D/"
+    mkdir -p "$D/1962/dat"
+    enable_scalars "$D/sif/1962.sif"
+    [ "$leg" = mumps ] && mumps_av_block "$D/sif/1962.sif"
+    if [ "$np" = 1 ]; then
+      ( cd "$D" && ElmerSolver.exe > run.log 2>&1 )
+    else
+      ( cd "$D" && ElmerGrid.exe 2 2 1962 -metis 4 3 -removeunused > grid4.log 2>&1 \
+        && "$MPIEXEC" -n 4 ElmerSolver_mpi.exe > run.log 2>&1 )
+    fi
+  done
+done
+for np in 1 4; do
+  L="g10-MUMPS-np$np"; RESULT[$L]=PASS
+  DI="$GATES/g10_iter_np$np"; DM="$GATES/g10_mumps_np$np"
+  grep -q "Mumps Null Pivot Detection" "$DM/sif/1962.sif" || { echo "  $L: the MUMPS block was not inserted"; RESULT[$L]=FAIL; }
+  grep -q "MUMPS library linked in" "$DM/run.log" || { echo "  $L: the solver reports no MUMPS"; RESULT[$L]=FAIL; }
+  grep -q "ALL DONE" "$DM/run.log" && grep -q "ALL DONE" "$DI/run.log" || { echo "  $L: a run did not finish"; RESULT[$L]=FAIL; }
+  if grep -q "NOT CONVERGED\|tree gauge on by itself" "$DM/run.log"; then echo "  $L: warning in the MUMPS run"; RESULT[$L]=FAIL; fi
+  n=0
+  for dat in "$DI"/1962/dat/1962.dat*; do
+    case "$dat" in *.names) continue;; esac
+    n=$((n + 1))
+    compare_scalars "$DI/1962/dat/1962.dat.names" "$dat" "$DM/1962/dat/$(basename "$dat")" "$L" || RESULT[$L]=FAIL
+  done
+  [ "$n" -gt 0 ] || { echo "  $L: no scalars written"; RESULT[$L]=FAIL; }
+  echo "[$L] ${RESULT[$L]}"
+done
+
 echo ""
 echo "================ GATE SUMMARY ================"
 FAILED=0
