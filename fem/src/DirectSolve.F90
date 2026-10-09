@@ -475,10 +475,9 @@ CONTAINS
       CALL umf4sym( n,n, Rows, Cols, Values, Symbolic, Control, iInfo )
     END IF
 
-    IF (iInfo(1)<0) THEN
-      PRINT *, 'Error occurred in umf4sym: ', iInfo(1)
-      STOP EXIT_ERROR
-    END IF
+    IF (iInfo(1)<0) CALL Fatal('UMFPack_SolveSystem','Symbolic factorization of "'// &
+        SolverDisplayName(Solver)//'" failed with UMFPACK status '//I2S(NINT(iInfo(1)))// &
+        ' (-1: out of memory)')
 
     IF ( BigMode ) THEN
       CALL umf4_l_num(LRows, LCols, Values, Symbolic, A % UMFPack_Numeric, Control, iInfo )
@@ -486,10 +485,14 @@ CONTAINS
       CALL umf4num( Rows, Cols, Values, Symbolic, A % UMFPack_Numeric, Control, iInfo )
     END IF
 
-    IF (iinfo(1)<0) THEN
-      PRINT*, 'Error occurred in umf4num: ', iinfo(1)
-      STOP EXIT_ERROR
-    ENDIF
+    IF (iinfo(1)<0) CALL Fatal('UMFPack_SolveSystem','Numeric factorization of "'// &
+        SolverDisplayName(Solver)//'" failed with UMFPACK status '//I2S(NINT(iinfo(1)))// &
+        ' (-1: out of memory)')
+    ! Status 1 is a singular matrix. UMFPACK still returns a factorization, and
+    ! the solution then holds Inf or NaN, which the norm check reports.
+    IF (NINT(iinfo(1)) == 1) CALL Warn('UMFPack_SolveSystem','Matrix of "'// &
+        SolverDisplayName(Solver)//'" is singular: check that every region has a '// &
+        'reference (a Dirichlet condition, a ground or a gauge) and that circuits are connected')
 
     IF ( BigMode ) THEN
       DEALLOCATE( LRows, LCols )
@@ -509,10 +512,8 @@ CONTAINS
     CALL umf4sol( sys, x, b, A % UMFPack_Numeric, Control, iInfo )
   END IF
 
-  IF (iinfo(1)<0) THEN
-    PRINT*, 'Error occurred in umf4sol: ', iinfo(1)
-    STOP EXIT_ERROR
-  END IF
+  IF (iinfo(1)<0) CALL Fatal('UMFPack_SolveSystem','Solve with "'// &
+      SolverDisplayName(Solver)//'" failed with UMFPACK status '//I2S(NINT(iinfo(1))))
  
   FreeFactorize = ListGetLogical( Solver % Values, &
       'Linear System Free Factorization', stat )

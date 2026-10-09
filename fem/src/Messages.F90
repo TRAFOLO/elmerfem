@@ -309,7 +309,7 @@ CONTAINS
 
 !-----------------------------------------------------------------------
 
-     IF ( .NOT. OutputLevelMask(0) ) STOP EXIT_ERROR
+     IF ( .NOT. OutputLevelMask(0) ) CALL StopOnError()
 
      nadv = .FALSE.
      IF ( PRESENT( noAdvance ) ) nadv = noAdvance
@@ -324,7 +324,7 @@ CONTAINS
         ELSE
            WRITE( InfoOutUnit, '(A)', ADVANCE='YES' ) TRIM(String)
         END IF
-        STOP EXIT_ERROR
+        CALL StopOnError()
      END IF
      nadv1 = nadv
      CALL FLUSH(InfoOutUnit)
@@ -337,6 +337,43 @@ CONTAINS
 #endif 
 !-----------------------------------------------------------------------
    END SUBROUTINE Fatal
+!-----------------------------------------------------------------------
+
+!-----------------------------------------------------------------------
+!> Ends the run with EXIT_ERROR. In a parallel run a Fatal is often raised
+!> on some ranks only, and a STOP there leaves the others waiting in their
+!> next collective call, so the whole job is aborted instead.
+!-----------------------------------------------------------------------
+   SUBROUTINE StopOnError()
+!-----------------------------------------------------------------------
+#if defined(ELMER_HAVE_MPI_MODULE)
+     USE mpi
+#endif
+#if defined(ELMER_HAVE_MPIF_HEADER)
+     INCLUDE "mpif.h"
+#endif
+#if defined(ELMER_HAVE_MPI_MODULE) || defined(ELMER_HAVE_MPIF_HEADER)
+     LOGICAL :: Initialized, Finalized
+     INTEGER :: NoRanks, Rank, ierr
+
+     CALL FLUSH(InfoOutUnit)
+     CALL MPI_Initialized(Initialized, ierr)
+     IF ( Initialized ) THEN
+       CALL MPI_Finalized(Finalized, ierr)
+       IF ( .NOT. Finalized ) THEN
+         CALL MPI_Comm_size(MPI_COMM_WORLD, NoRanks, ierr)
+         IF ( NoRanks > 1 ) THEN
+           CALL MPI_Comm_rank(MPI_COMM_WORLD, Rank, ierr)
+           WRITE( *,'(A,I0,A,I0,A)' ) 'StopOnError: rank ',Rank,' aborts all ',NoRanks,' MPI ranks'
+           CALL FLUSH(6)
+           CALL MPI_Abort(MPI_COMM_WORLD, EXIT_ERROR, ierr)
+         END IF
+       END IF
+     END IF
+#endif
+     STOP EXIT_ERROR
+!-----------------------------------------------------------------------
+   END SUBROUTINE StopOnError
 !-----------------------------------------------------------------------
 
 !-----------------------------------------------------------------------
