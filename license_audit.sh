@@ -80,7 +80,7 @@ Built: $(date -u +%Y-%m-%d)
 Elmer sources (GPL-2.0+/LGPL-2.1, see licenses/):
   TRAFOLO fork of ElmerFEM, branch 'trafolo'
   commit $FORK_COMMIT
-  Repository: https://github.com/TRAFOLO/elmerfem (public at product release)
+  Repository: https://github.com/TRAFOLO/elmerfem
   Includes TRAFOLO modules ProcessFields, LoadFields, htc_udf
   (fem/src/modules/, GPL-2.0+). Corresponding sources are available
   from the repository at the commit above.
