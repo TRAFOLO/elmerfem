@@ -1,28 +1,30 @@
 #!/bin/bash
 # ONE-COMMAND driver: source -> validated, packaged TRAFOLO Elmer bundle.
-# Runs: build -> deploy -> prune -> audit -> gates -> package, stopping on the
-# first failure. Why: skipping a stage is never safe (ninja install silently
+# Runs: mumps -> build -> deploy -> prune -> audit -> gates -> package, stopping on
+# the first failure. Why: skipping a stage is never safe (ninja install silently
 # UN-prunes); this driver + package_bundle.sh's prune guard prevent packaging an
 # unpruned install. Limitation: Windows/MSYS2-UCRT64 only, by design.
 #
 # Usage (from any shell - re-execs itself under the UCRT64 login shell):
 #   bash build_all.sh                  # full pipeline
 #   PROD=1 bash build_all.sh           # + replace the app's installed bundle (close the app!)
-#   FROM=gates bash build_all.sh       # resume from: build|deploy|prune|audit|gates|package
+#   FROM=gates bash build_all.sh       # resume from: mumps|build|deploy|prune|audit|gates|package
 #   STOP_AFTER=gates bash build_all.sh # stop early (e.g. validate without packaging)
 #   DRYRUN=1 bash build_all.sh         # print the stage plan, run nothing
 # Paths (env overrides; defaults are this checkout and its siblings):
-#   ELMER_SRC     this repo                      (default: directory of this script)
-#   ELMER_BUILD   build dir, WIPED on each build (default: ../elmer-build-win)
-#   ELMER_INSTALL install tree, pruned in place  (default: ../elmer-install-win)
-#   ELMER_GATES   validation scratch             (default: ../elmer-gates)
-#   ELMER_VAL     gate input cases               (default: trafolo_bundle/validation)
-#   CODE_DIR      where the zip lands            (default: ..)
+#   ELMER_SRC        this repo                      (default: directory of this script)
+#   ELMER_BUILD      build dir, WIPED on each build (default: ../elmer-build-win)
+#   ELMER_INSTALL    install tree, pruned in place  (default: ../elmer-install-win)
+#   ELMER_GATES      validation scratch             (default: ../elmer-gates)
+#   ELMER_VAL        gate input cases               (default: trafolo_bundle/validation)
+#   CODE_DIR         where the zip lands            (default: ..)
+#   MUMPS410_WORK    MUMPS build area, WIPED        (default: $ELMER_BUILD-mumps410-work)
+#   MUMPS410_INSTALL MUMPS install prefix, WIPED    (default: $ELMER_BUILD-mumps410)
 # See README-TRAFOLO.md "Building the distributed bundle" for the full procedure.
 set -e
 # Control flags travel as ARGV through the re-exec: env vars are not reliably
 # preserved into the MSYS2 login shell. argv survives everything.
-FROM="${1:-${FROM:-build}}"
+FROM="${1:-${FROM:-mumps}}"
 STOP_AFTER="${2:-${STOP_AFTER:-package}}"
 PROD="${3:-${PROD:-0}}"
 DRYRUN="${4:-${DRYRUN:-0}}"
@@ -33,7 +35,7 @@ if [ "$MSYSTEM" != "UCRT64" ]; then
 fi
 export PROD
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ORDER="build deploy prune audit gates package"
+ORDER="mumps build deploy prune audit gates package"
 case " $ORDER " in *" $FROM "*) ;; *) echo "ERROR: FROM=$FROM is not one of: $ORDER"; exit 1;; esac
 case " $ORDER " in *" $STOP_AFTER "*) ;; *) echo "ERROR: STOP_AFTER=$STOP_AFTER is not one of: $ORDER"; exit 1;; esac
 T0=$(date +%s)
@@ -45,7 +47,13 @@ export ELMER_INSTALL="${ELMER_INSTALL:-$ELMER_SRC/../elmer-install-win}"
 export ELMER_GATES="${ELMER_GATES:-$ELMER_SRC/../elmer-gates}"
 export ELMER_VAL="${ELMER_VAL:-$HERE/trafolo_bundle/validation}"
 export CODE_DIR="${CODE_DIR:-$ELMER_SRC/..}"
+# The public-domain MUMPS 4.10.0, built by mumps410/build_mumps410.sh and linked
+# statically by build_msys2.sh (MUMPS_PREFIX); the audit reads its BUILD-INFO.txt.
+export MUMPS410_WORK="${MUMPS410_WORK:-$ELMER_BUILD-mumps410-work}"
+export MUMPS410_INSTALL="${MUMPS410_INSTALL:-$ELMER_BUILD-mumps410}"
+export MUMPS_PREFIX="$MUMPS410_INSTALL"
 
+stage_mumps()   { bash "$HERE/mumps410/build_mumps410.sh"; }
 stage_build() {
   # explicit &&: set -e is suspended inside functions called from `if !` below
   bash "$HERE/build_msys2.sh" && ( cd "$ELMER_BUILD" && ninja )

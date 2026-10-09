@@ -210,6 +210,7 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   LOGICAL :: PiolaVersion, SecondOrder, GotHbCurveVar, HasTensorReluctivity
   LOGICAL :: ExtNewton, StrandedHomogenization
   LOGICAL, ALLOCATABLE, SAVE :: TreeEdges(:)
+  LOGICAL, SAVE :: CircuitGaugeWarned = .FALSE., ElectroDynamicsGaugeWarned = .FALSE.
 
   INTEGER :: n,nb,nd,t,istat,i,j,k,l,nNodes,Active,FluxCount=0
   INTEGER :: NoIterationsMin, NoIterationsMax
@@ -679,8 +680,26 @@ CONTAINS
     ! Check for tree gauge, if requested or using direct solver:
     ! ------------------------------------------------------------
     TG=GetLogical(SolverParams, 'Use tree gauge', Found)
-    IF (.NOT. Found) TG=GetString(GetSolverParams(), &
-        'Linear System Solver',Found)=='direct'
+    IF (.NOT. Found) THEN
+      TG=GetString(GetSolverParams(),'Linear System Solver',Found)=='direct'
+      ! Wrong without an error with circuit coils (the gauge removes edge dofs they couple to;
+      ! circuits_harmonic_massive with MUMPS: 5x off in energy) and with the electrodynamics
+      ! model (TRAFOLO spiral at 9 GHz: wrong rows in the first iteration, over-constrained tree).
+      IF (TG .AND. .NOT. CircuitGaugeWarned .AND. ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
+        IF (CurrentModel % Circuit_tot_n > 0) THEN
+          CALL Warn('WhitneyAVHarmonicSolver', &
+              'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
+              'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+          CircuitGaugeWarned = .TRUE.
+        END IF
+      END IF
+      IF (TG .AND. ElectroDynamics .AND. .NOT. ElectroDynamicsGaugeWarned) THEN
+        CALL Warn('WhitneyAVHarmonicSolver', &
+            'The direct solver switches the tree gauge on by itself, which gave wrong results with the '// &
+            'electrodynamics model. Set "Use Tree Gauge = False".')
+        ElectroDynamicsGaugeWarned = .TRUE.
+      END IF
+    END IF
 
     !
     ! Dirichlet BCs in terms of vector potential A:

@@ -393,6 +393,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
 ! Local variables
 !------------------------------------------------------------------------------
   LOGICAL :: AllocationsDone = .FALSE., Found
+  LOGICAL, SAVE :: CircuitGaugeWarned = .FALSE.
   TYPE(Element_t),POINTER :: Element, Edge
 
   REAL(KIND=dp) :: Norm, PrevDT=-1, RelChange
@@ -644,6 +645,15 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
         ELSE
           CALL Info(Caller,'Defaulting to tree gauge when using direct solver')
           TG = .TRUE.
+          ! The gauge removes edge dofs the circuit coils couple to.
+          IF (.NOT. CircuitGaugeWarned .AND. ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
+            IF (CurrentModel % Circuit_tot_n > 0) THEN
+              CALL Warn(Caller, &
+                  'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
+                  'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+              CircuitGaugeWarned = .TRUE.
+            END IF
+          END IF
         END IF
       END IF
     END IF

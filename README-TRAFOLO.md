@@ -124,13 +124,37 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `A` with an unrelaxed `V` in `E = -i*omega*A - V*grad W` of massive coils, and the current density
   and Joule loss of a nonlinear loop that stopped before convergence came out orders of magnitude
   too large. Test: `circuits_harmonic_massive_relaxation`.
+- MUMPS direct solver interface (`DirectSolve`): the status of every MUMPS initialization,
+  analysis, factorization and solve is checked, so a failure stops all ranks with
+  `INFOG(1)`/`INFOG(2)` (`INFO` in the rank-local wrappers) and a hint instead of returning an
+  unusable solution. New options `Mumps Null Pivot Detection` (`ICNTL(24)`), `Mumps Null Pivot
+  Tolerance` (`CNTL(3)`) and `Mumps Sequential Root` (`ICNTL(13)`); the ordering, factor size and
+  null-pivot threshold used are logged. `Mumps Residual Check = True` reports the residual of the
+  system handed to MUMPS before and after each solve, separately for the field rows and the
+  constraint (circuit) rows. Tested with the public-domain MUMPS 4.10.0 (DEV-1462).
+  The residual is also checked after every solve of the distributed double-precision wrappers
+  (real and complex) by default (`Mumps Residual Check = False` switches it off): MUMPS can report
+  success on a singular system it factorized without null pivot detection, so a normwise residual
+  max|r| / (max|A||x| + max|b|) above `Mumps Residual Tolerance` (default 1e-8) writes
+  `WARNING:: MumpsResidualCheck: NOT CONVERGED: direct solver=...`. On 156 TRAFOLO A-V runs with
+  the tree gauge off, correct solutions stayed at or below 1.7e-10 and failed solves reached 5e-2;
+  the componentwise indicator, which reached 0.9 on correct runs, is only logged. The check
+  detects failed solves, it does not verify a result: a solution can satisfy the linear system
+  and still be wrong, and on rows shared by ranks |A| sums the moduli of the partial entries, so
+  both ratios can understate the residual of the assembled system when partial entries cancel.
+  The A-V solvers warn when a direct solver switches the tree gauge on by itself in a model with
+  circuits (and, harmonic, with the electrodynamics model): on `circuits_harmonic_massive` that
+  setup gave 0.11 J field energy instead of 0.6165 J with exit code 0, while `Use Tree Gauge =
+  False` with `Mumps Null Pivot Detection = True` (tested with tolerance 1e-13) and `Mumps
+  Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
 
 ## Building the distributed bundle
 
 The TRAFOLO product ships a **Windows-only** solver zip built with the standard Elmer CMake
-system (MSYS2 UCRT64 toolchain). The direct solver is Elmer's vendored UMFPACK 4.4. Every script
+system (MSYS2 UCRT64 toolchain). The direct solvers are Elmer's vendored UMFPACK 4.4 and the
+public-domain MUMPS 4.10.0 built by `mumps410/build_mumps410.sh` (see `mumps410/README.md`). Every script
 that turns this source into that zip is in this repo, and TRAFOLO's release job runs exactly these
-scripts (`bash build_all.sh build package 0 0`), so following this section reproduces the
+scripts (`bash build_all.sh mumps package 0 0`), so following this section reproduces the
 distributed archive.
 
 ### One-time setup
@@ -141,13 +165,14 @@ distributed archive.
 2. In an MSYS2 shell:
 
    ```bash
-   pacman -S --needed git \
+   pacman -S --needed git make \
      mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran \
      mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
-     mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-msmpi
+     mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-msmpi \
+     mingw-w64-ucrt-x86_64-metis mingw-w64-ucrt-x86_64-scalapack
    ```
 
-   Do not install `mingw-w64-ucrt-x86_64-mumps`: MUMPS is CeCILL-C, not GPL-compatible, and is
+   Do not install `mingw-w64-ucrt-x86_64-mumps`: that is MUMPS 5.x, CeCILL-C, not GPL-compatible, and is
    never part of the distributed build (see `build_msys2.sh`).
 3. Put the MS-MPI 10.1.1 redistributable installer next to this checkout, at
    `../msmpi_redist/msmpisetup.exe`
@@ -160,13 +185,13 @@ distributed archive.
 From any shell (the driver re-runs itself under MSYS2 UCRT64):
 
 ```bash
-bash build_all.sh                  # all six stages, ~60 min
+bash build_all.sh                  # all seven stages, ~60 min
 ```
 
 Everything is created next to this checkout: `../elmer-build-win` (build tree, wiped on each
 build), `../elmer-install-win` (install tree, pruned in place), `../elmer-gates` (validation
 scratch) and the zip `../ElmerFEM-nogui-mpi-Windows-AMD64.zip`. Override with `ELMER_BUILD`,
-`ELMER_INSTALL`, `ELMER_GATES`, `CODE_DIR` (zip location), `BUNDLE_NAME` (zip file name) and
+`ELMER_INSTALL`, `ELMER_GATES`, `MUMPS410_WORK`, `MUMPS410_INSTALL`, `CODE_DIR` (zip location), `BUNDLE_NAME` (zip file name) and
 `FOLDER_NAME` (top folder inside the zip, default `ElmerFEM-nogui-mpi-Windows-AMD64`). The release
 job sets `BUNDLE_NAME=ElmerFEM-nogui-mpi-Windows-trafolo-<date>`; the folder inside is the same.
 
@@ -175,7 +200,8 @@ gate in the summary is `PASS`.
 
 | Stage | Script | What it does |
 |---|---|---|
-| `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS off, MS-MPI, OpenBLAS, Lua), builds |
+| `mumps` | `mumps410/build_mumps410.sh` | Builds the public-domain MUMPS 4.10.0 (METIS orderings, no PORD) into `MUMPS410_INSTALL` |
+| `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS 4.10.0 linked statically, MS-MPI, OpenBLAS, Lua), builds |
 | `deploy` | `deploy_msys2.sh` | `ninja install` + copies the UCRT64 runtime DLL closure into `bin\` |
 | `prune` | `prune_install.sh` | Keeps the 18 solver modules the TRAFOLO app uses, drops dev tools, headers and import libs |
 | `audit` | `license_audit.sh` | Fails on any GPL-incompatible or unlisted DLL in the import closure; writes `licenses\` and `SOURCE.txt` |
@@ -195,9 +221,10 @@ Validation gates (`run_gates.sh`, against the pruned install):
 | 7 | No `Caught LUA error` / readsif warnings in any log, incl. an absolute backslash-path run |
 | 8 | StatElecSolveVec thin-layer BC responds to permittivity (Eps0 fix regression) |
 | 9 | Nonlinear lumped circuit elements: `circuits2D_transient_nonlinear_resistor` + `_picard` |
+| 10 | MUMPS 4.10.0 with the TRAFOLO A-V block on `circuits_harmonic_massive`, serial + 4-rank, against the iterative run |
 
-There is no parallel direct solver in this bundle: Elmer has one only for MUMPS/CPardiso, neither
-of which can be shipped, so the parallel legs run iterative solvers.
+The parallel direct solver is MUMPS 4.10.0 (public domain). MUMPS 5.x (CeCILL-C) and CPardiso
+cannot be shipped.
 
 `ninja install` reinstalls every module, so the stages after `deploy` must always run after it.
 Stages take positional arguments `FROM STOP_AFTER PROD DRYRUN`:
