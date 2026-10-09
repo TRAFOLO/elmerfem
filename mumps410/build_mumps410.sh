@@ -92,6 +92,34 @@ for a in s c d z; do
   grep -q -F '     &                   int(LRHS_CNTR_MASTER_ROOT,8),INFO(2))' "$f" || die "$f: fix not applied"
 done
 
+step "source fix: mpif.h of ?MUMPS_PARALLEL_ANALYSIS without DLLIMPORT"
+# MS-MPI 10.1.1-23 (MSYS2) marks some mpif.h variables DLLIMPORT, which gfortran rejects for the PRIVATE
+# module variables that the include in this module's declaration part creates. That include gets a copy
+# of the same mpif.h without the DLLIMPORT lines; MUMPS references none of those variables (checked).
+DLLIMPORT_NAMES='MPI_(BOTTOM|IN_PLACE|STATUS_IGNORE|STATUSES_IGNORE|ERRCODES_IGNORE|UNWEIGHTED|WEIGHTS_EMPTY|ARGVS?_NULL)'
+if grep -l -i -E "$DLLIMPORT_NAMES" "$S"/src/*.F "$S"/src/*.h "$S"/include/*.h 2>/dev/null | grep -q .; then
+  die "MUMPS references a DLLIMPORT variable of mpif.h; the filtered copy would be wrong"
+fi
+[ -s "$PFX/include/mpif.h" ] || die "$PFX/include/mpif.h missing (pacman -S mingw-w64-ucrt-x86_64-msmpi)"
+# -a: grep takes this header for a binary file and would print a summary instead of its lines.
+grep -a -v -i '^!GCC\$ *ATTRIBUTES *DLLIMPORT' "$PFX/include/mpif.h" > "$S/src/mpif_module.h" || die "write mpif_module.h"
+removed=$(grep -a -c -i '^!GCC\$ *ATTRIBUTES *DLLIMPORT' "$PFX/include/mpif.h")
+[ $(( $(wc -l < "$PFX/include/mpif.h") - $(wc -l < "$S/src/mpif_module.h") )) = "$removed" ] \
+  || die "mpif_module.h is not mpif.h without its $removed DLLIMPORT lines"
+for a in S C D Z; do
+  f="$S/src/$(printf '%s' "$a" | tr 'SCDZ' 'scdz')mumps_part2.F"
+  awk -v mod="${a}MUMPS_PARALLEL_ANALYSIS" -v count_file="$f.changed" '
+    $0 ~ ("^      MODULE " mod "$") { in_module = 1; in_contains = 0 }
+    in_module && /^      END MODULE/ { in_module = 0 }
+    in_module && toupper($0) ~ /^ *CONTAINS *$/ { in_contains = 1 }
+    in_module && !in_contains && tolower($0) ~ /^ *include *.mpif\.h./ { print "      INCLUDE '\''mpif_module.h'\''"; changed++; next }
+    { print }
+    END { print changed + 0 > count_file }' "$f" > "$f.new" || die "edit $f"
+  changed=$(cat "$f.changed")
+  [ "$changed" = 1 ] || die "$f: expected one mpif.h include in the declarations of ${a}MUMPS_PARALLEL_ANALYSIS, found $changed"
+  mv "$f.new" "$f" && rm -f "$f.changed" || die "replace $f"
+done
+
 step "configuration (METIS only, no PORD)"
 cat > "$S/Makefile.inc" <<'EOF' || die "write Makefile.inc"
 # MUMPS 4.10.0, PORD-free: METIS 5.1 through the TRAFOLO METIS-4 adapter + MUMPS built-in orderings.
