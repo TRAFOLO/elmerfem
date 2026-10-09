@@ -124,25 +124,29 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `A` with an unrelaxed `V` in `E = -i*omega*A - V*grad W` of massive coils, and the current density
   and Joule loss of a nonlinear loop that stopped before convergence came out orders of magnitude
   too large. Test: `circuits_harmonic_massive_relaxation`.
-- MUMPS direct solver interface (`DirectSolve`): the status of every MUMPS call is checked, so a
-  failed initialization, factorization or solve stops all ranks with `INFOG(1)`/`INFOG(2)` and a
-  hint instead of returning an unusable solution. New options `Mumps Null Pivot Detection`
-  (`ICNTL(24)`), `Mumps Null Pivot Tolerance` (`CNTL(3)`) and `Mumps Sequential Root`
-  (`ICNTL(13)`); the ordering, factor size and null-pivot threshold used are logged.
-  `Mumps Residual Check = True` reports the residual of the system handed to MUMPS before and after
-  each solve, separately for the field rows and the constraint (circuit) rows. Tested with the
-  public-domain MUMPS 4.10.0 (DEV-1462).
-  The residual is also checked after every solve by default (`Mumps Residual Check = False`
-  switches it off): MUMPS reports success on a singular system it factorized without null pivot
-  detection, so a normwise residual max|r| / (max|A||x| + max|b|) above `Mumps Residual
-  Tolerance` (default 1e-8) writes `WARNING:: MumpsResidualCheck: NOT CONVERGED: direct
-  solver=...`. On 156 TRAFOLO A-V runs with the tree gauge off, correct solutions stayed at or
-  below 1.7e-10 and failed solves reached 5e-2; the componentwise indicator, which reached 0.9 on
-  correct runs, is only logged. The AV solvers warn when a direct solver switches the tree gauge
-  on in a model with circuits: on `circuits_harmonic_massive` that setup gave 0.11 J field energy
-  instead of 0.6165 J with exit code 0, while `Use Tree Gauge = False` with `Mumps Null Pivot
-  Detection = True` (tested with tolerance 1e-13) and `Mumps Sequential Root = True` matches the
-  iterative solver on 1 and 4 ranks.
+- MUMPS direct solver interface (`DirectSolve`): the status of every MUMPS initialization,
+  analysis, factorization and solve is checked, so a failure stops all ranks with
+  `INFOG(1)`/`INFOG(2)` (`INFO` in the rank-local wrappers) and a hint instead of returning an
+  unusable solution. New options `Mumps Null Pivot Detection` (`ICNTL(24)`), `Mumps Null Pivot
+  Tolerance` (`CNTL(3)`) and `Mumps Sequential Root` (`ICNTL(13)`); the ordering, factor size and
+  null-pivot threshold used are logged. `Mumps Residual Check = True` reports the residual of the
+  system handed to MUMPS before and after each solve, separately for the field rows and the
+  constraint (circuit) rows. Tested with the public-domain MUMPS 4.10.0 (DEV-1462).
+  The residual is also checked after every solve of the distributed double-precision wrappers
+  (real and complex) by default (`Mumps Residual Check = False` switches it off): MUMPS can report
+  success on a singular system it factorized without null pivot detection, so a normwise residual
+  max|r| / (max|A||x| + max|b|) above `Mumps Residual Tolerance` (default 1e-8) writes
+  `WARNING:: MumpsResidualCheck: NOT CONVERGED: direct solver=...`. On 156 TRAFOLO A-V runs with
+  the tree gauge off, correct solutions stayed at or below 1.7e-10 and failed solves reached 5e-2;
+  the componentwise indicator, which reached 0.9 on correct runs, is only logged. The check
+  detects failed solves, it does not verify a result: a solution can satisfy the linear system
+  and still be wrong, and on rows shared by ranks |A| sums the moduli of the partial entries, so
+  both ratios can understate the residual of the assembled system when partial entries cancel.
+  The A-V solvers warn when a direct solver switches the tree gauge on by itself in a model with
+  circuits (and, harmonic, with the electrodynamics model): on `circuits_harmonic_massive` that
+  setup gave 0.11 J field energy instead of 0.6165 J with exit code 0, while `Use Tree Gauge =
+  False` with `Mumps Null Pivot Detection = True` (tested with tolerance 1e-13) and `Mumps
+  Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
 
 ## Building
 

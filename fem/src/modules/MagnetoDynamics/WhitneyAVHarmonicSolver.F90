@@ -210,7 +210,7 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   LOGICAL :: PiolaVersion, SecondOrder, GotHbCurveVar, HasTensorReluctivity
   LOGICAL :: ExtNewton, StrandedHomogenization
   LOGICAL, ALLOCATABLE, SAVE :: TreeEdges(:)
-  LOGICAL, SAVE :: TreeGaugeWarned = .FALSE.
+  LOGICAL, SAVE :: CircuitGaugeWarned = .FALSE., ElectroDynamicsGaugeWarned = .FALSE.
 
   INTEGER :: n,nb,nd,t,istat,i,j,k,l,nNodes,Active,FluxCount=0
   INTEGER :: NoIterationsMin, NoIterationsMax
@@ -685,16 +685,19 @@ CONTAINS
       ! Wrong without an error with circuit coils (the gauge removes edge dofs they couple to;
       ! circuits_harmonic_massive with MUMPS: 5x off in energy) and with the electrodynamics
       ! model (TRAFOLO spiral at 9 GHz: wrong rows in the first iteration, over-constrained tree).
-      IF (TG .AND. .NOT. TreeGaugeWarned) THEN
-        IF (ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
-          IF (CurrentModel % Circuit_tot_n > 0) CALL Warn('WhitneyAVHarmonicSolver', &
+      IF (TG .AND. .NOT. CircuitGaugeWarned .AND. ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
+        IF (CurrentModel % Circuit_tot_n > 0) THEN
+          CALL Warn('WhitneyAVHarmonicSolver', &
               'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
               'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+          CircuitGaugeWarned = .TRUE.
         END IF
-        IF (ElectroDynamics) CALL Warn('WhitneyAVHarmonicSolver', &
+      END IF
+      IF (TG .AND. ElectroDynamics .AND. .NOT. ElectroDynamicsGaugeWarned) THEN
+        CALL Warn('WhitneyAVHarmonicSolver', &
             'The direct solver switches the tree gauge on by itself, which gave wrong results with the '// &
             'electrodynamics model. Set "Use Tree Gauge = False".')
-        TreeGaugeWarned = .TRUE.
+        ElectroDynamicsGaugeWarned = .TRUE.
       END IF
     END IF
 

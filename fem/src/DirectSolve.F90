@@ -755,9 +755,10 @@ CONTAINS
 !> the largest row activity max_i (|A||x|)_i, the normwise residual max|r| / (max|A||x| + max|b|) and a
 !> residual indicator max_i |r_i| / (|A||x| + |b|)_i. The warning compares the normwise residual: on 156
 !> TRAFOLO A-V runs it stayed at or below 1.7e-10 for correct solutions, while the indicator reached 0.9.
-!> The indicator is not the exact componentwise backward error: on rows shared by ranks, |A| sums the moduli
-!> of the rank-local partial entries (an upper bound), and rows below 1e-12 of the largest activity in their
-!> block are measured against that floor (their number is reported). On one rank the first effect vanishes.
+!> Neither ratio is the exact backward error of the assembled system: on rows shared by ranks, |A| sums the
+!> moduli of the rank-local partial entries, which can exceed the modulus of the assembled entry when partial
+!> entries cancel, so both ratios can understate the residual; on one rank this effect vanishes. Rows below
+!> 1e-12 of the largest activity in their block are measured against that floor (their number is reported).
 !> Before the solve, x is the current iterate, so r is the nonlinear residual of that iterate; after the
 !> solve, r is the residual of the linear solve. Works on the real form of complex systems.
 !------------------------------------------------------------------------------
@@ -2139,6 +2140,8 @@ CONTAINS
     END IF
     A % mumpsIDL % JOB  = -1 ! Initialize
     CALL DMumps(A % mumpsIDL)
+    CALL CheckMumpsStatus('MumpsLocal_Factorize', 'initialization', 'INFO', &
+        A % mumpsIDL % INFO(1), A % mumpsIDL % INFO(2))
 
     ! FACTORIZE PHASE
 
@@ -2317,6 +2320,8 @@ CONTAINS
 
     A % ZmumpsIDL % JOB  = -1 ! Initialize
     CALL ZMumps(A % ZmumpsIDL)
+    CALL CheckMumpsStatus('ZMumpsLocal_Factorize', 'initialization', 'INFO', &
+        A % ZmumpsIDL % INFO(1), A % ZmumpsIDL % INFO(2))
 
     ! FACTORIZE PHASE
 

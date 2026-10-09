@@ -12,7 +12,7 @@
 #   MUMPS410_INSTALL  install prefix, WIPED on each run                (default: ../mumps410-install)
 #   MPIEXEC_EXE       Microsoft MPI launcher for the adapter test      (default: C:/Program Files/Microsoft MPI/Bin/mpiexec.exe)
 # Toolchain packages in addition to those of build_msys2.sh:
-#   pacman -S --needed mingw-w64-ucrt-x86_64-metis mingw-w64-ucrt-x86_64-scalapack
+#   pacman -S --needed make mingw-w64-ucrt-x86_64-metis mingw-w64-ucrt-x86_64-scalapack
 #
 # Source: Debian's mumps_4.10.0.dfsg.orig.tar.gz (upstream MUMPS 4.10.0 without the user guide), pinned by its
 # SHA-256 and fetched from the hash-addressed snapshot.debian.org archive. MUMPS 4.10.0 is public domain (its
@@ -30,10 +30,19 @@ PFX="${MSYSTEM_PREFIX:-/ucrt64}"
 S="$WORK/mumps-4.10.0.dfsg"
 TARBALL_SHA256=c76339bba516b96a3021af93d9a31b0fbf5a68cfcd02c9578d665ba8018e4b11
 TARBALL_URL=https://snapshot.debian.org/file/5971cd9ccd8c2d789a222140ca6a3b71d6f5229d
-ADAPTER_CFLAGS="-O2 -Wall -Wextra -Werror -I$PFX/include"
+ADAPTER_CFLAGS=(-O2 -Wall -Wextra -Werror "-I$PFX/include")
 
 die() { echo "FAIL: $*" >&2; exit 1; }
 step() { echo "== $*"; }
+# A folder this script wipes: never a root, the checkout or one of its parents, nor one holding the archive.
+check_wipe_target() { # path label
+  local abs
+  mkdir -p "$1" || die "mkdir $1"
+  abs="$(cd "$1" && pwd -P)" || die "cannot resolve $1"
+  case "$abs" in /|/[a-zA-Z]) die "$2=$1 is a root directory";; esac
+  case "$SRC_ABS/" in "$abs"/*) die "$2=$1 contains the source checkout";; esac
+  case "$TARBALL_ABS" in "$abs"/*) die "$2=$1 contains the source archive $TARBALL";; esac
+}
 # Symbol table of a library. A failing or empty nm run is an inspection failure, never "symbol absent".
 symbols() {
   local out
@@ -44,6 +53,9 @@ symbols() {
 
 step "toolchain"
 [ "${MSYSTEM:-}" = UCRT64 ] || die "run this in the MSYS2 UCRT64 shell"
+for tool in make gcc gfortran ar nm ranlib curl sha256sum tar sed grep; do
+  command -v "$tool" > /dev/null || die "$tool not found (make: pacman -S make)"
+done
 [ -s "$PFX/lib/libmetis.a" ] || die "static METIS missing: pacman -S mingw-w64-ucrt-x86_64-metis"
 [ -s "$PFX/lib/libscalapack.dll.a" ] || die "ScaLAPACK missing: pacman -S mingw-w64-ucrt-x86_64-scalapack"
 [ -f "$MPIEXEC" ] || die "mpiexec not found at $MPIEXEC (install the Microsoft MPI runtime or set MPIEXEC_EXE)"
@@ -57,7 +69,11 @@ if [ ! -f "$TARBALL" ]; then
   mv "$TARBALL.part" "$TARBALL" || die "move the download"
 fi
 echo "$TARBALL_SHA256 *$TARBALL" | sha256sum -c - || die "tarball checksum"
-rm -rf "${S:?}" "${I:?}" || die "cannot clean the old build"
+SRC_ABS="$(cd "$SRC" && pwd -P)"
+TARBALL_ABS="$(cd "$(dirname "$TARBALL")" && pwd -P)/$(basename "$TARBALL")"
+check_wipe_target "$S" "the MUMPS source tree"
+check_wipe_target "$I" MUMPS410_INSTALL
+rm -rf -- "$S" "$I" || die "cannot clean the old build"
 mkdir -p "$I/lib" "$I/include" || die "mkdir $I"
 tar xzf "$TARBALL" -C "$WORK" || die "extract"
 [ -f "$S/Makefile" ] || die "extracted tree incomplete"
@@ -131,15 +147,15 @@ if grep -q -E "INTEGER\(4\)/INTEGER\(8\)|INTEGER\(8\)/INTEGER\(4\)" "$S/build.lo
 fi
 
 step "METIS adapter"
-gcc $ADAPTER_CFLAGS -c "$KIT/metis4_on_metis5.c" -o "$S/lib/metis4_on_metis5.o" || die "adapter compile"
+gcc "${ADAPTER_CFLAGS[@]}" -c "$KIT/metis4_on_metis5.c" -o "$S/lib/metis4_on_metis5.o" || die "adapter compile"
 
 step "adapter tests"
 TD="$S/adapter-tests"
 mkdir -p "$TD" || die "mkdir $TD"
-gcc $ADAPTER_CFLAGS "$KIT/tests/test_adapter_ok.c" "$S/lib/metis4_on_metis5.o" "$PFX/lib/libmetis.a" -lmsmpi \
+gcc "${ADAPTER_CFLAGS[@]}" "$KIT/tests/test_adapter_ok.c" "$S/lib/metis4_on_metis5.o" "$PFX/lib/libmetis.a" -lmsmpi \
   -o "$TD/test_adapter_ok.exe" || die "compile test_adapter_ok"
 "$TD/test_adapter_ok.exe" || die "test_adapter_ok"
-gcc $ADAPTER_CFLAGS "$KIT/tests/test_adapter_fail.c" "$KIT/tests/fake_metis_fails.c" "$S/lib/metis4_on_metis5.o" -lmsmpi \
+gcc "${ADAPTER_CFLAGS[@]}" "$KIT/tests/test_adapter_fail.c" "$KIT/tests/fake_metis_fails.c" "$S/lib/metis4_on_metis5.o" -lmsmpi \
   -o "$TD/test_adapter_fail.exe" || die "compile test_adapter_fail"
 t0=$(date +%s)
 timeout 120 "$MPIEXEC" -n 2 "$(cygpath -w "$TD/test_adapter_fail.exe")" > "$TD/test_adapter_fail.out" 2>&1

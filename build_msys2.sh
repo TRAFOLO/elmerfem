@@ -43,20 +43,39 @@ SRC="${ELMER_SRC:-$(cd "$(dirname "$0")" && pwd)}"
 BUILD="${ELMER_BUILD:-$SRC/../elmer-build-win}"
 INSTALL="${ELMER_INSTALL:-$SRC/../elmer-install-win}"
 PFX="${MSYSTEM_PREFIX:-/ucrt64}"
+PW="$(cygpath -m "$PFX")"
 
+# The build dir is wiped below: never a root, the checkout or one of its parents.
+SRC_ABS="$(cd "$SRC" && pwd -P)"
+mkdir -p "$BUILD"
+BUILD_ABS="$(cd "$BUILD" && pwd -P)"
+case "$BUILD_ABS" in /|/[a-zA-Z]) echo "ERROR: ELMER_BUILD=$BUILD is a root directory"; exit 1;; esac
+case "$SRC_ABS/" in "$BUILD_ABS"/*) echo "ERROR: ELMER_BUILD=$BUILD contains the source checkout"; exit 1;; esac
+
+# MUMPS: every library, the headers and the source record of one mumps410/build_mumps410.sh
+# install, pinned so that FindMumps cannot mix in another installation.
+MUMPS_SHA256=c76339bba516b96a3021af93d9a31b0fbf5a68cfcd02c9578d665ba8018e4b11
+MUMPS_LIBS="dmumps zmumps smumps cmumps mumps_common pord"
 if [ -n "${MUMPS_PREFIX:-}" ]; then
-  [ -s "$MUMPS_PREFIX/lib/libzmumps.a" ] && [ -s "$MUMPS_PREFIX/BUILD-INFO.txt" ] || {
-    echo "ERROR: MUMPS_PREFIX=$MUMPS_PREFIX is not an install of mumps410/build_mumps410.sh"; exit 1; }
-  MUMPS_FLAGS=(-DWITH_Mumps=ON "-DMUMPSROOT=$(cygpath -m "$MUMPS_PREFIX")"
-    "-DMetis_LIBRARIES=$(cygpath -m "$PFX")/lib/libmetis.a" "-DMetis_INCLUDE_DIR=$(cygpath -m "$PFX")/include"
-    "-DSCALAPACKROOT=$(cygpath -m "$PFX")")
+  M="$(cd "$MUMPS_PREFIX" 2>/dev/null && pwd -P)" || { echo "ERROR: MUMPS_PREFIX=$MUMPS_PREFIX does not exist"; exit 1; }
+  for f in include/dmumps_c.h include/zmumps_c.h BUILD-INFO.txt $(printf 'lib/lib%s.a ' $MUMPS_LIBS); do
+    [ -e "$M/$f" ] || { echo "ERROR: $M/$f missing: MUMPS_PREFIX must be an install of mumps410/build_mumps410.sh"; exit 1; }
+  done
+  grep -q "^tarball_sha256=$MUMPS_SHA256\$" "$M/BUILD-INFO.txt" || {
+    echo "ERROR: $M was not built from the pinned MUMPS 4.10.0 archive"; exit 1; }
+  MW="$(cygpath -m "$M")"
+  MUMPS_FLAGS=(-DWITH_Mumps=ON "-DMumps_INCLUDE_DIR=$MW/include"
+    "-DMUMPS_D_LIB=$MW/lib/libdmumps.a" "-DMUMPS_Z_LIB=$MW/lib/libzmumps.a"
+    "-DMUMPS_S_LIB=$MW/lib/libsmumps.a" "-DMUMPS_C_LIB=$MW/lib/libcmumps.a"
+    "-DMUMPS_COMMON_LIB=$MW/lib/libmumps_common.a" "-DMUMPS_PORD_LIB=$MW/lib/libpord.a"
+    "-DMetis_LIBRARIES=$PW/lib/libmetis.a" "-DMetis_INCLUDE_DIR=$PW/include" "-DSCALAPACKROOT=$PW")
 else
   MUMPS_FLAGS=(-DWITH_Mumps=OFF)
 fi
 
-rm -rf "$BUILD"
-mkdir -p "$BUILD"
-cd "$BUILD"
+rm -rf -- "$BUILD_ABS"
+mkdir -p "$BUILD_ABS"
+cd "$BUILD_ABS"
 
 cmake -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
@@ -74,15 +93,17 @@ cmake -G Ninja \
   -DWITH_ELMERGUI=OFF \
   -DWITH_ElmerIce=OFF \
   -DCMAKE_C_FLAGS="-Wno-error=incompatible-pointer-types" \
-  "$SRC" > configure.log 2>&1
+  "$SRC_ABS" > configure.log 2>&1
 
 grep -E "MPI|BLAS|Mumps|Fortran compiler|Build type|install prefix|Configuring done|Generating done" configure.log | head -18
 
 if [ -n "${MUMPS_PREFIX:-}" ]; then
-  libs=$(grep "Mumps libraries:" configure.log) || { echo "ERROR: configure found no MUMPS"; exit 1; }
-  case "$libs" in *"$(cygpath -m "$MUMPS_PREFIX")/lib/libzmumps.a"*) ;; *)
-    echo "ERROR: configure did not pick MUMPS from $MUMPS_PREFIX"; exit 1;; esac
-  case "$libs" in *"/lib/libmetis.a"*) ;; *) echo "ERROR: configure did not pick the static METIS"; exit 1;; esac
+  libs=$(grep -m1 "Mumps libraries:" configure.log) || { echo "ERROR: configure found no MUMPS"; exit 1; }
+  for l in $MUMPS_LIBS; do
+    case "$libs" in *"$MW/lib/lib$l.a"*) ;; *) echo "ERROR: configure did not pick lib$l.a from $MW"; exit 1;; esac
+  done
+  case "$libs" in *"$PW/lib/libmetis.a"*) ;; *) echo "ERROR: configure did not pick the static METIS"; exit 1;; esac
+  grep -q "Mumps include dir: $MW/include" configure.log || { echo "ERROR: configure did not pick the MUMPS headers of $MW"; exit 1; }
   grep -q "Checking if ParMetis library is needed by Mumps -- no" configure.log || {
     echo "ERROR: MUMPS would need ParMETIS"; exit 1; }
 fi
