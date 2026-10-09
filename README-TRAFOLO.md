@@ -134,22 +134,30 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   public-domain MUMPS 4.10.0 (DEV-1462).
   The residual is also checked after every solve by default (`Mumps Residual Check = False`
   switches it off): MUMPS reports success on a singular system it factorized without null pivot
-  detection, so an indicator above `Mumps Residual Tolerance` (default 1e-4) writes
-  `WARNING:: MumpsResidualCheck: NOT CONVERGED: direct solver=...`. The AV solvers warn when a
-  direct solver switches the tree gauge on in a model with circuits: on
-  `circuits_harmonic_massive` that setup gave 0.11 J field energy instead of 0.6165 J with exit
-  code 0, while `Use Tree Gauge = False` with `Mumps Null Pivot Detection = True` (tolerance
-  1e-13) and `Mumps Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
+  detection, so a normwise residual max|r| / (max|A||x| + max|b|) above `Mumps Residual
+  Tolerance` (default 1e-8) writes `WARNING:: MumpsResidualCheck: NOT CONVERGED: direct
+  solver=...`. On 156 TRAFOLO A-V runs with the tree gauge off, correct solutions stayed at or
+  below 1.7e-10 and failed solves reached 5e-2; the componentwise indicator, which reached 0.9 on
+  correct runs, is only logged. The AV solvers warn when a direct solver switches the tree gauge
+  on in a model with circuits: on `circuits_harmonic_massive` that setup gave 0.11 J field energy
+  instead of 0.6165 J with exit code 0, while `Use Tree Gauge = False` with `Mumps Null Pivot
+  Detection = True` (tested with tolerance 1e-13) and `Mumps Sequential Root = True` matches the
+  iterative solver on 1 and 4 ranks.
 
 ## Building
 
 The TRAFOLO product is a **Windows-only** solver bundle built with the standard Elmer CMake
-system (MSYS2 UCRT64 toolchain). The direct solver is Elmer's vendored UMFPACK 4.4. The scripts
-that compile and install the distributed binaries are in the repo root; see the header of
-`build_msys2.sh` for the toolchain packages and path overrides:
+system (MSYS2 UCRT64 toolchain). The direct solvers are Elmer's vendored UMFPACK 4.4 and, when
+`MUMPS_PREFIX` is set, the public-domain MUMPS 4.10.0 built by `mumps410/build_mumps410.sh`
+(METIS 5.1 ordering, no PORD; see `mumps410/README.md`). MUMPS 5.x is CeCILL-C and is never
+linked into a distributed build. The scripts that compile and install the distributed binaries
+are in the repo root; see the header of `build_msys2.sh` for the toolchain packages and path
+overrides:
 
 ```bash
 # MSYS2 UCRT64 shell, Microsoft MPI runtime installed
+bash mumps410/build_mumps410.sh       # MUMPS 4.10.0 into ../mumps410-install (optional)
+MUMPS_PREFIX=../mumps410-install \
 bash build_msys2.sh                   # configure (the distributed flag set; wipes the build dir)
 ninja -C ../elmer-build-win           # build
 bash deploy_msys2.sh                  # install to ../elmer-install-win + copy runtime DLLs
