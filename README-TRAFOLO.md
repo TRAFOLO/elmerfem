@@ -148,29 +148,96 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   False` with `Mumps Null Pivot Detection = True` (tested with tolerance 1e-13) and `Mumps
   Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
 
-## Building
+## Building the distributed bundle
 
-The TRAFOLO product is a **Windows-only** solver bundle built with the standard Elmer CMake
-system (MSYS2 UCRT64 toolchain). The direct solvers are Elmer's vendored UMFPACK 4.4 and, when
-`MUMPS_PREFIX` is set, the public-domain MUMPS 4.10.0 built by `mumps410/build_mumps410.sh`
-(METIS 5.1 ordering, no PORD; see `mumps410/README.md`). MUMPS 5.x is CeCILL-C and is never
-linked into a distributed build. The scripts that compile and install the distributed binaries
-are in the repo root; see the header of `build_msys2.sh` for the toolchain packages and path
-overrides:
+The TRAFOLO product ships a **Windows-only** solver zip built with the standard Elmer CMake
+system (MSYS2 UCRT64 toolchain). The direct solver is Elmer's vendored UMFPACK 4.4. Every script
+that turns this source into that zip is in this repo, and TRAFOLO's release job runs exactly these
+scripts (`bash build_all.sh build package 0 0`), so following this section reproduces the
+distributed archive.
+
+### One-time setup
+
+1. Install [MSYS2](https://www.msys2.org) to `C:\msys64` and the
+   [Microsoft MPI](https://learn.microsoft.com/en-us/message-passing-interface/microsoft-mpi)
+   runtime (the SDK is not needed).
+2. In an MSYS2 shell:
+
+   ```bash
+   pacman -S --needed git \
+     mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-gcc-fortran \
+     mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
+     mingw-w64-ucrt-x86_64-openblas mingw-w64-ucrt-x86_64-msmpi
+   ```
+
+   Do not install `mingw-w64-ucrt-x86_64-mumps`: MUMPS is CeCILL-C, not GPL-compatible, and is
+   never part of the distributed build (see `build_msys2.sh`).
+3. Put the MS-MPI 10.1.1 redistributable installer next to this checkout, at
+   `../msmpi_redist/msmpisetup.exe`
+   ([download](https://download.microsoft.com/download/7/2/7/72731ebb-b63c-4170-ade7-836966263a8f/msmpisetup.exe)).
+   The build installs it into the bundle as `redist\msmpisetup.exe`, and packaging refuses to
+   run without it.
+
+### Build
+
+From any shell (the driver re-runs itself under MSYS2 UCRT64):
 
 ```bash
-# MSYS2 UCRT64 shell, Microsoft MPI runtime installed
-bash build_bundle_msys2.sh            # all steps below, in this order
-bash mumps410/build_mumps410.sh       # MUMPS 4.10.0 into ../mumps410-install
-MUMPS_PREFIX=../mumps410-install \
-bash build_msys2.sh                   # configure (the distributed flag set; wipes the build dir)
-ninja -C ../elmer-build-win           # build
-bash deploy_msys2.sh                  # install to ../elmer-install-win + copy runtime DLLs
-bash prune_install.sh                 # remove what the bundle does not ship
+bash build_all.sh                  # all six stages, ~60 min
 ```
 
-The distributed bundle is this install tree after `prune_install.sh`. There is no CI here —
-validation is run locally.
+Everything is created next to this checkout: `../elmer-build-win` (build tree, wiped on each
+build), `../elmer-install-win` (install tree, pruned in place), `../elmer-gates` (validation
+scratch) and the zip `../ElmerFEM-nogui-mpi-Windows-AMD64.zip`. Override with `ELMER_BUILD`,
+`ELMER_INSTALL`, `ELMER_GATES`, `CODE_DIR` (zip location), `BUNDLE_NAME` (zip file name) and
+`FOLDER_NAME` (top folder inside the zip, default `ElmerFEM-nogui-mpi-Windows-AMD64`). The release
+job sets `BUNDLE_NAME=ElmerFEM-nogui-mpi-Windows-trafolo-<date>`; the folder inside is the same.
+
+Done when the driver prints `ALL STAGES OK`, the audit printed `LICENSE AUDIT: CLEAN`, and every
+gate in the summary is `PASS`.
+
+| Stage | Script | What it does |
+|---|---|---|
+| `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS off, MS-MPI, OpenBLAS, Lua), builds |
+| `deploy` | `deploy_msys2.sh` | `ninja install` + copies the UCRT64 runtime DLL closure into `bin\` |
+| `prune` | `prune_install.sh` | Keeps the 18 solver modules the TRAFOLO app uses, drops dev tools, headers and import libs |
+| `audit` | `license_audit.sh` | Fails on any GPL-incompatible or unlisted DLL in the import closure; writes `licenses\` and `SOURCE.txt` |
+| `gates` | `run_gates.sh` | Runs the validation cases against the pruned install (inputs in `trafolo_bundle/validation/`); all must pass |
+| `package` | `package_bundle.sh` | Refuses an unpruned or unaudited install, zips it |
+
+Validation gates (`run_gates.sh`, against the pruned install):
+
+| Gate | What |
+|---|---|
+| 1a/1b | Impedance BC (3D Whitney harmonic), serial + 4-rank MPI (physical norm; AV norm is gauge-dependent) |
+| 2 | Transient homogenization, serial |
+| 3a/3b | 2D transient circuits: UMFPACK direct serial + iterative 4-rank |
+| 4a/4b | 2D harmonic circuits: UMFPACK direct serial + iterative 4-rank with UMFPACK-backed Circuit preconditioner |
+| 5 | ProcessFields attached to gate 1 must not crash (module/core ABI check) |
+| 6 | htc_udf smoke (`trafolo_bundle/validation/htc_smoke.sif`): h in [1.5, 15] W/m²K on a 0.1 m vertical plate |
+| 7 | No `Caught LUA error` / readsif warnings in any log, incl. an absolute backslash-path run |
+| 8 | StatElecSolveVec thin-layer BC responds to permittivity (Eps0 fix regression) |
+| 9 | Nonlinear lumped circuit elements: `circuits2D_transient_nonlinear_resistor` + `_picard` |
+
+There is no parallel direct solver in this bundle: Elmer has one only for MUMPS/CPardiso, neither
+of which can be shipped, so the parallel legs run iterative solvers.
+
+`ninja install` reinstalls every module, so the stages after `deploy` must always run after it.
+Stages take positional arguments `FROM STOP_AFTER PROD DRYRUN`:
+
+```bash
+bash build_all.sh gates              # resume from a stage after a failure
+bash build_all.sh build gates        # stop after a stage (validate without packaging)
+bash build_all.sh build package 0 1  # print the stage plan, run nothing
+```
+
+`package_bundle.sh` also copies the bundle into the TRAFOLO app's folders under
+`%LOCALAPPDATA%` (`Trafolo_third_party_dev`, and `Trafolo_third_party` with `PROD=1`) and stages
+`../choke_externals_staging`. Those are conveniences for TRAFOLO developers and do not change the
+zip.
+
+The zip matches the distributed one in content, not byte for byte: the build date in the solver
+banner, `SOURCE.txt` and file timestamps differ.
 
 Corresponding source for any distributed TRAFOLO Elmer binary is this repository at the commit
 recorded in the bundle's `SOURCE.txt` (GPL compliance).
