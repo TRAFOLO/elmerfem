@@ -644,6 +644,12 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
         ELSE
           CALL Info(Caller,'Defaulting to tree gauge when using direct solver')
           TG = .TRUE.
+          ! The gauge removes edge dofs the circuit coils couple to.
+          IF (ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
+            IF (CurrentModel % Circuit_tot_n > 0) CALL Warn(Caller, &
+                'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
+                'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+          END IF
         END IF
       END IF
     END IF

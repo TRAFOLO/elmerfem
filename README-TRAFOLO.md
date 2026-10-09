@@ -132,6 +132,14 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Mumps Residual Check = True` reports the residual of the system handed to MUMPS before and after
   each solve, separately for the field rows and the constraint (circuit) rows. Tested with the
   public-domain MUMPS 4.10.0 (DEV-1462).
+  The residual is also checked after every solve by default (`Mumps Residual Check = False`
+  switches it off): MUMPS reports success on a singular system it factorized without null pivot
+  detection, so an indicator above `Mumps Residual Tolerance` (default 1e-4) writes
+  `WARNING:: MumpsResidualCheck: NOT CONVERGED: direct solver=...`. The AV solvers warn when a
+  direct solver switches the tree gauge on in a model with circuits: on
+  `circuits_harmonic_massive` that setup gave 0.11 J field energy instead of 0.6165 J with exit
+  code 0, while `Use Tree Gauge = False` with `Mumps Null Pivot Detection = True` (tolerance
+  1e-13) and `Mumps Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
 
 ## Building
 

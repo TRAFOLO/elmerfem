@@ -759,7 +759,7 @@ CONTAINS
 !> Before the solve, x is the current iterate, so r is the nonlinear residual of that iterate; after the
 !> solve, r is the residual of the linear solve. Works on the real form of complex systems.
 !------------------------------------------------------------------------------
-  SUBROUTINE MumpsResidualCheck(Solver, A, x, b, Comm, What)
+  SUBROUTINE MumpsResidualCheck(Solver, A, x, b, Comm, What, Level, WarnAbove)
 !------------------------------------------------------------------------------
 #ifdef HAVE_MUMPS
 #  if defined(ELMER_HAVE_MPI_MODULE)
@@ -771,6 +771,9 @@ CONTAINS
     REAL(KIND=dp) :: x(*), b(*)
     INTEGER :: Comm
     CHARACTER(LEN=*) :: What
+    !> Info level of the report (default 4); indicator above which to warn.
+    INTEGER, OPTIONAL :: Level
+    REAL(KIND=dp), OPTIONAL :: WarnAbove
 !------------------------------------------------------------------------------
 #ifdef HAVE_MUMPS
 #  if defined(ELMER_HAVE_MPIF_HEADER)
@@ -780,6 +783,7 @@ CONTAINS
     REAL(KIND=dp), ALLOCATABLE :: xg(:), cnt(:), rg(:), ag(:), bg(:), cg(:), buf(:)
     REAL(KIND=dp) :: s, t, den, rmax(2), bmax(2), amax(2), dmax(2), dfloor(2), wmax(2)
     INTEGER :: nfloor(2)
+    LOGICAL :: GotName
 
     n = A % NumberOfRows
     nfield = n
@@ -848,11 +852,58 @@ CONTAINS
         ', indicator ', wmax(1), ' (', nfloor(1), ' floored)', &
         '; constraint rows: max|r| ', rmax(2), ', max|b| ', bmax(2), ', max|A||x| ', amax(2), &
         ', indicator ', wmax(2), ' (', nfloor(2), ' floored)', '; ', NINT(SUM(cg)), ' constraint rows'
-    CALL Info('MumpsResidualCheck', Message, Level=4)
+    IF (PRESENT(Level)) THEN
+      CALL Info('MumpsResidualCheck', Message, Level=Level)
+    ELSE
+      CALL Info('MumpsResidualCheck', Message, Level=4)
+    END IF
+    ! MUMPS reports success on a singular system it factorized without null
+    ! pivot detection; only the residual shows that the solution is wrong.
+    IF (PRESENT(WarnAbove)) THEN
+      IF (MAXVAL(wmax) > WarnAbove) THEN
+        WRITE(Message, '(A,ES10.3,A,ES10.3,A)') 'NOT CONVERGED: direct solver="'// &
+            ListGetString(Solver % Values,'Equation',GotName)//'" MUMPS residual indicator=', MAXVAL(wmax), &
+            ' tolerance=', WarnAbove, ': the solution does not satisfy the linear system. '// &
+            'A singular system needs "Mumps Null Pivot Detection = True"; the A-V solvers with '// &
+            'circuit coils also need "Use Tree Gauge = False".'
+        CALL Warn('MumpsResidualCheck', Message)
+      END IF
+    END IF
     DEALLOCATE(xg, cnt, rg, ag, bg, cg, buf)
 #endif
 !------------------------------------------------------------------------------
   END SUBROUTINE MumpsResidualCheck
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> The residual of every MUMPS solution, unless 'Mumps Residual Check = False':
+!> reported at info level 4 when the check was asked for, at level 6
+!> otherwise, and a warning when the indicator exceeds 'Mumps Residual
+!> Tolerance' (default 1e-4). Collective over Comm, so every rank calls it.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsCheckSolution(Solver, A, x, b, Comm)
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t) :: A
+    REAL(KIND=dp) :: x(*), b(*)
+    INTEGER :: Comm
+
+    REAL(KIND=dp), PARAMETER :: DefaultResidualTolerance = 1.0e-4_dp
+    REAL(KIND=dp) :: Tol
+    LOGICAL :: Check, Asked, GotTol
+
+    Check = ListGetLogical(Solver % Values, 'Mumps Residual Check', Asked)
+    IF (.NOT. Asked) Check = .TRUE.
+    IF (.NOT. Check) RETURN
+    Tol = ListGetConstReal(Solver % Values, 'Mumps Residual Tolerance', GotTol)
+    IF (.NOT. GotTol) Tol = DefaultResidualTolerance
+    IF (Asked) THEN
+      CALL MumpsResidualCheck(Solver, A, x, b, Comm, 'after the solve', Level=4, WarnAbove=Tol)
+    ELSE
+      CALL MumpsResidualCheck(Solver, A, x, b, Comm, 'after the solve', Level=6, WarnAbove=Tol)
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsCheckSolution
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -1628,8 +1679,7 @@ CONTAINS
     ip = A % Gorder(i)
     x(i) = A % MumpsId % RHS(ip)
   END DO
-  IF (ListGetLogical(Solver % Values, 'Mumps Residual Check', stat)) &
-      CALL MumpsResidualCheck(Solver, A, x, b, A % MumpsID % Comm, 'after the solve')
+  CALL MumpsCheckSolution(Solver, A, x, b, A % MumpsID % Comm)
 
   FreeFactorize = ListGetLogical( Solver % Values, 'Linear System Free Factorization', stat )
   IF ( .NOT. stat ) FreeFactorize = .TRUE.
@@ -1868,8 +1918,7 @@ CONTAINS
     x(i)   = REAL( A % ZMumpsId % RHS(ip) )
     x(i+1) = AIMAG( A % ZMumpsId % RHS(ip) )
   END DO
-  IF (ListGetLogical(Solver % Values, 'Mumps Residual Check', stat)) &
-      CALL MumpsResidualCheck(Solver, A, x, b, A % ZMumpsID % Comm, 'after the solve')
+  CALL MumpsCheckSolution(Solver, A, x, b, A % ZMumpsID % Comm)
 
   FreeFactorize = ListGetLogical( Solver % Values, 'Linear System Free Factorization', stat )
   IF ( .NOT. stat ) FreeFactorize = .TRUE.

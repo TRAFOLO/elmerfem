@@ -210,6 +210,7 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   LOGICAL :: PiolaVersion, SecondOrder, GotHbCurveVar, HasTensorReluctivity
   LOGICAL :: ExtNewton, StrandedHomogenization
   LOGICAL, ALLOCATABLE, SAVE :: TreeEdges(:)
+  LOGICAL, SAVE :: TreeGaugeWarned = .FALSE.
 
   INTEGER :: n,nb,nd,t,istat,i,j,k,l,nNodes,Active,FluxCount=0
   INTEGER :: NoIterationsMin, NoIterationsMax
@@ -679,8 +680,17 @@ CONTAINS
     ! Check for tree gauge, if requested or using direct solver:
     ! ------------------------------------------------------------
     TG=GetLogical(SolverParams, 'Use tree gauge', Found)
-    IF (.NOT. Found) TG=GetString(GetSolverParams(), &
-        'Linear System Solver',Found)=='direct'
+    IF (.NOT. Found) THEN
+      TG=GetString(GetSolverParams(),'Linear System Solver',Found)=='direct'
+      ! The gauge removes edge dofs the circuit coils couple to. Measured on
+      ! circuits_harmonic_massive with MUMPS: 5x off in energy, no error.
+      IF (TG .AND. .NOT. TreeGaugeWarned .AND. ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
+        IF (CurrentModel % Circuit_tot_n > 0) CALL Warn('WhitneyAVHarmonicSolver', &
+            'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
+            'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+        TreeGaugeWarned = .TRUE.
+      END IF
+    END IF
 
     !
     ! Dirichlet BCs in terms of vector potential A:
