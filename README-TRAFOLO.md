@@ -160,15 +160,17 @@ overrides:
 
 ```bash
 # MSYS2 UCRT64 shell, Microsoft MPI runtime installed
-bash mumps410/build_mumps410.sh       # MUMPS 4.10.0 into ../mumps410-install (optional)
+bash build_bundle_msys2.sh            # all steps below, in this order
+bash mumps410/build_mumps410.sh       # MUMPS 4.10.0 into ../mumps410-install
 MUMPS_PREFIX=../mumps410-install \
 bash build_msys2.sh                   # configure (the distributed flag set; wipes the build dir)
 ninja -C ../elmer-build-win           # build
 bash deploy_msys2.sh                  # install to ../elmer-install-win + copy runtime DLLs
+bash prune_install.sh                 # remove what the bundle does not ship
 ```
 
-The distributed bundle is this install tree with the solver modules the TRAFOLO app does not use
-removed. There is no CI here — validation is run locally.
+The distributed bundle is this install tree after `prune_install.sh`. There is no CI here —
+validation is run locally.
 
 Corresponding source for any distributed TRAFOLO Elmer binary is this repository at the commit
 recorded in the bundle's `SOURCE.txt` (GPL compliance).

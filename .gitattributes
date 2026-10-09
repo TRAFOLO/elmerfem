@@ -1,3 +1,5 @@
 # The build scripts run in the MSYS2 bash, which rejects carriage returns.
 /build_msys2.sh text eol=lf
 /deploy_msys2.sh text eol=lf
+/prune_install.sh text eol=lf
+/build_bundle_msys2.sh text eol=lf
