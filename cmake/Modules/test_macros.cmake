@@ -258,10 +258,11 @@ ENDMACRO()
 
 # TRAFOLO: a test judged by how the run ends instead of by a norm, for inputs
 # that must stop with a clear message or must warn. EXIT is ZERO or NONZERO,
-# MATCH a regular expression that stdout or stderr has to contain, NOMATCH one
-# they must not contain, SIF the input file when it is not ELMERSOLVER_STARTINFO.
+# MATCH regular expressions that stdout or stderr has to contain, MATCH_ONCE ones
+# it has to contain exactly once, NOMATCH one it must not contain, SIF the input
+# file when it is not ELMERSOLVER_STARTINFO.
 MACRO(RUN_ELMER_EXPECT)
-  CMAKE_PARSE_ARGUMENTS(_expect "" "EXIT;MATCH;NOMATCH;SIF" "" "${ARGN}")
+  CMAKE_PARSE_ARGUMENTS(_expect "" "EXIT;NOMATCH;SIF" "MATCH;MATCH_ONCE" "${ARGN}")
   SET(_expect_found "")
   SET(_expect_log "${MPIEXEC_NTASKS}")
   IF(_expect_SIF)
@@ -297,12 +298,20 @@ MACRO(RUN_ELMER_EXPECT)
   ELSEIF(_expect_EXIT STREQUAL "NONZERO" AND _expect_rc EQUAL 0)
     MESSAGE(FATAL_ERROR "Expected a nonzero exit status, got 0")
   ENDIF()
-  IF(_expect_MATCH)
-    STRING(REGEX MATCH "${_expect_MATCH}" _expect_found "${_expect_out}${_expect_err}")
+  FOREACH(_expect_regex IN LISTS _expect_MATCH)
+    STRING(REGEX MATCH "${_expect_regex}" _expect_found "${_expect_out}${_expect_err}")
     IF(NOT _expect_found)
-      MESSAGE(FATAL_ERROR "Output does not contain: ${_expect_MATCH}")
+      MESSAGE(FATAL_ERROR "Output does not contain: ${_expect_regex}")
     ENDIF()
-  ENDIF()
+  ENDFOREACH()
+  FOREACH(_expect_regex IN LISTS _expect_MATCH_ONCE)
+    STRING(REGEX MATCHALL "${_expect_regex}" _expect_all "${_expect_out}${_expect_err}")
+    LIST(LENGTH _expect_all _expect_count)
+    IF(NOT _expect_count EQUAL 1)
+      MESSAGE(FATAL_ERROR "Output contains ${_expect_count} times instead of once: ${_expect_regex}")
+    ENDIF()
+    SET(_expect_found "${_expect_regex}")
+  ENDFOREACH()
   IF(_expect_NOMATCH)
     STRING(REGEX MATCH "${_expect_NOMATCH}" _expect_unwanted "${_expect_out}${_expect_err}")
     IF(_expect_unwanted)

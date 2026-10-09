@@ -1,5 +1,5 @@
 ! DEV-1560: a single relaxed iteration returns the solution blended with the
-! initial guess, so it warns once.
+! initial guess, so it warns, once per solver: two scan steps, one warning.
 ! A simple testcase for testing CircuitsAndDynamics module.
 ! Author: Eelis Takala, Trafotek Oy
 ! Original date: October 2015
@@ -18,7 +18,9 @@ Simulation 1
    Coordinate System = Cartesian 3D
    Coordinate Mapping(3) = 1 2 3
    Coordinate Scaling = 0.001
-   Simulation Type = Steady
+   Simulation Type = Scanning
+   Timestep Intervals = 2
+   Timestep Sizes = 1
    Steady State Max Iterations = 1
    BDF Order = 1
    Output Intervals = 1

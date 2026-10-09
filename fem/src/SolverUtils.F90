@@ -11551,12 +11551,15 @@ END FUNCTION SearchNodeL
 
       ! A single iteration is a plain linear solve whose change is measured from the
       ! initial guess, so it is not a convergence failure, unless it is relaxed: then
-      ! the result is the solution blended with the initial guess.
-      IF( MaxIter <= 1 .AND. Relax .AND. Solver % TimesVisited == 0 ) THEN
-        WRITE( Message,'(A,ES10.3,A)') 'NOT CONVERGED: nonlinear solver="'// &
-            SolverDisplayName(Solver)//'" iterations=1 relaxation=',Relaxation, &
-            ': one relaxed iteration does not reach the solution'
-        CALL Warn(Caller,Message)
+      ! the result is the solution blended with the initial guess. Once per solver.
+      IF( MaxIter <= 1 .AND. Relax ) THEN
+        IF( .NOT. ListGetLogical( SolverParams,'Relaxed Single Iteration Warned',Stat ) ) THEN
+          WRITE( Message,'(A,ES10.3,A)') 'NOT CONVERGED: nonlinear solver="'// &
+              SolverDisplayName(Solver)//'" iterations=1 relaxation=',Relaxation, &
+              ': one relaxed iteration does not reach the solution'
+          CALL Warn(Caller,Message)
+          CALL ListAddLogical( SolverParams,'Relaxed Single Iteration Warned',.TRUE. )
+        END IF
       END IF
 
       Tolerance = ListGetCReal( SolverParams,'Nonlinear System Divergence Limit',Stat)

@@ -149,24 +149,29 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
 - Failures a caller can see (DEV-1560). A missing solver procedure and a MATC error in the SIF
   exit with status 1 instead of 0 (`Load.c`), and the MATC message no longer prints the
-  unterminated Fortran buffer. `Fatal` aborts all MPI ranks (`MPI_Abort`) when more than one
-  rank runs, so an error raised on some ranks only cannot leave the others waiting. A solve
-  that is kept although it did not converge writes one warning in a fixed form at the default
-  output level, whatever its abort flag:
+  unterminated Fortran buffer. `Fatal` aborts all MPI ranks (`MPI_Abort`, logged as
+  `StopOnError: rank <r> aborts all <n> MPI ranks`) when more than one rank runs, so an error
+  raised on some ranks only cannot leave the others waiting. A solve that is kept although it
+  did not converge writes one warning in a fixed form at the default output level:
   `WARNING:: <caller>: NOT CONVERGED: linear|nonlinear|coupled ... key=value ...`
-  (linear: `solver`, `iterations`, `tolerance`; nonlinear: `solver`, `iterations`,
-  `change`, `tolerance`; coupled: `iterations`, `max`, also in steady runs; the MUMPS residual
-  check above writes `direct`). A single nonlinear iteration (`Nonlinear System Max Iterations`
-  1 or unset) is a plain linear solve and does not warn, unless it is relaxed: then it warns
-  once with `iterations=1 relaxation=...`, because the result is the solution blended with the
-  initial guess. The NaN check of the solution norm also catches Inf, and its message and the
-  abort messages of the linear and nonlinear solvers name the solver's `Equation`. UMFPACK errors
-  are `Fatal` with the solver and the status instead of a bare `PRINT`/`STOP`, and a singular
-  matrix (status 1) warns.
+  (linear: `solver`, `iterations`, `tolerance`, also when `Global Abort Not Converged = False`
+  turns the numerical error into a warning; nonlinear: `solver`, `iterations`, `change`,
+  `tolerance`; coupled: `iterations`, `max`; the MUMPS residual check above writes `direct`).
+  No warning comes from a failed `Linear System Trialing` attempt that the next strategy
+  replaces, from a single nonlinear iteration (`Nonlinear System Max Iterations` 1 or unset,
+  a plain linear solve) or from a fixed number of coupled passes (`Steady State Min Iterations`
+  equal to the maximum, as in the homogenization scans, whose passes solve different problems).
+  A relaxed single nonlinear iteration warns once per solver with `iterations=1 relaxation=...`,
+  because its result is the solution blended with the initial guess. Not covered: the outer
+  iterations of a steady simulation (`Steady State Max Iterations` > 1 there is a timestep
+  count) and the inner iterative solves of a preconditioner, which still warn. The NaN check of
+  the solution norm also catches Inf, and its message and the abort messages of the linear and
+  nonlinear solvers name the solver's `Equation`. UMFPACK errors are `Fatal` with the solver and
+  the status instead of a bare `PRINT`/`STOP`, and a singular matrix (status 1) warns.
   Tests (label `robustness`, macro `RUN_ELMER_EXPECT` in `test_macros.cmake`):
   `robustness_procedure_not_found`, `robustness_matc_syntax_error`,
   `robustness_linear_not_converged`, `robustness_nonlinear_not_converged`,
-  `robustness_fatal_on_some_ranks`.
+  `robustness_fixed_coupled_passes`, `robustness_fatal_on_some_ranks`.
 
 ## Building
 

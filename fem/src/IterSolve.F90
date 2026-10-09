@@ -502,7 +502,7 @@ END FUNCTION MaskedNorm
     LOGICAL :: Internal, NullEdges
     LOGICAL :: ComponentwiseStopC, NormwiseStopC, RowEquilibration
     LOGICAL :: Condition,GotIt, Refactorize,Found,GotDiagFactor,Robust
-    LOGICAL :: ComplexSystem, PseudoComplexSystem, DoFatal, LeftOriented
+    LOGICAL :: ComplexSystem, PseudoComplexSystem, DoFatal, LeftOriented, Fallback
     
     REAL(KIND=dp) :: ILUT_TOL, DiagFactor
 
@@ -1376,27 +1376,36 @@ END FUNCTION MaskedNorm
       END IF
     ELSE
       CALL Info('IterSolve','Returned return code: '//I2S(HUTI_INFO),Level=15)
+      ! The messages have a fixed form that a caller can search the log for, also when
+      ! "Global Abort Not Converged = False" turns a numerical error into a warning.
+      ! A failed trial that DefaultSolve replaces with its next strategy is not kept
+      ! as a result, so it does not warn.
+      Fallback = ListGetLogical( Params,'Linear System Trial Has Fallback',Found )
       IF( HUTI_INFO == HUTI_DIVERGENCE ) THEN
-        CALL NumericalError( 'IterSolve', 'Linear system of "'//SolverDisplayName(Solver)// &
-            '" diverged over maximum tolerance.')
+        WRITE( Message,'(A,ES10.3)') 'NOT CONVERGED: linear solver="'// &
+            SolverDisplayName(Solver)//'" diverged over the maximum tolerance, tolerance=',HUTI_TOLERANCE
+        CALL NumericalError( 'IterSolve', Message )
       ELSE IF( HUTI_INFO == HUTI_MAXITER ) THEN
+        ! The methods do not all fill HUTI_ITERS; here the count is the limit by definition.
+        WRITE( Message,'(A,I0,A,ES10.3)') 'NOT CONVERGED: linear solver="'// &
+            SolverDisplayName(Solver)//'" iterations=',HUTI_MAXIT,' tolerance=',HUTI_TOLERANCE
         DoFatal = ListGetLogical( Params,'Linear System Abort Not Converged',Found )
         IF(.NOT. Found ) DoFatal = .TRUE.
         IF( DoFatal ) THEN
-          CALL NumericalError('IterSolve','Linear system of "'//SolverDisplayName(Solver)// &
-              '" did not converge in '//I2S(HUTI_MAXIT)//' iterations.')
+          CALL NumericalError('IterSolve',Message)
+        ELSE IF( Fallback ) THEN
+          CALL Info('IterSolve',Message,Level=4)
         ELSE
-          ! Kept as a result, but visible at the default output level and in a
-          ! fixed form that a caller can search the log for. The methods do not
-          ! all fill HUTI_ITERS; here the count is the limit by definition.
-          WRITE( Message,'(A,I0,A,ES10.3)') 'NOT CONVERGED: linear solver="'// &
-              SolverDisplayName(Solver)//'" iterations=',HUTI_MAXIT,' tolerance=',HUTI_TOLERANCE
           CALL Warn('IterSolve',Message)
         END IF
       ELSE IF( HUTI_INFO == HUTI_HALTED ) THEN
         WRITE( Message,'(A,ES10.3)') 'NOT CONVERGED: linear solver="'// &
             SolverDisplayName(Solver)//'" halted by the algorithm, tolerance=',HUTI_TOLERANCE
-        CALL Warn('IterSolve',Message)
+        IF( Fallback ) THEN
+          CALL Info('IterSolve',Message,Level=4)
+        ELSE
+          CALL Warn('IterSolve',Message)
+        END IF
       END IF
       IF( ASSOCIATED( Solver % Variable ) ) THEN
         Solver % Variable % LinConverged = 0

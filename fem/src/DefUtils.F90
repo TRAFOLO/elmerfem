@@ -4079,6 +4079,10 @@ CONTAINS
       
 10  CONTINUE
 
+    ! A failed trial with a strategy left is replaced, not kept: IterSolve does not warn.
+    IF( LinearSystemTrialing ) CALL ListAddLogical( Params,'Linear System Trial Has Fallback', &
+        ListCheckPrefix( Params,'linsys'//I2S(NameSpaceI+1) ) )
+
     CALL SolveSystem(A,ParMatrix,b,SOL,x % Norm,x % DOFs,Solver)
     
     IF( InfoActive( 20 ) ) THEN

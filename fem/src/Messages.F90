@@ -346,10 +346,15 @@ CONTAINS
 !-----------------------------------------------------------------------
    SUBROUTINE StopOnError()
 !-----------------------------------------------------------------------
+#if defined(ELMER_HAVE_MPI_MODULE)
+     USE mpi
+#endif
 #if defined(ELMER_HAVE_MPIF_HEADER)
      INCLUDE "mpif.h"
+#endif
+#if defined(ELMER_HAVE_MPI_MODULE) || defined(ELMER_HAVE_MPIF_HEADER)
      LOGICAL :: Initialized, Finalized
-     INTEGER :: NoRanks, ierr
+     INTEGER :: NoRanks, Rank, ierr
 
      CALL FLUSH(InfoOutUnit)
      CALL MPI_Initialized(Initialized, ierr)
@@ -357,7 +362,12 @@ CONTAINS
        CALL MPI_Finalized(Finalized, ierr)
        IF ( .NOT. Finalized ) THEN
          CALL MPI_Comm_size(MPI_COMM_WORLD, NoRanks, ierr)
-         IF ( NoRanks > 1 ) CALL MPI_Abort(MPI_COMM_WORLD, EXIT_ERROR, ierr)
+         IF ( NoRanks > 1 ) THEN
+           CALL MPI_Comm_rank(MPI_COMM_WORLD, Rank, ierr)
+           WRITE( *,'(A,I0,A,I0,A)' ) 'StopOnError: rank ',Rank,' aborts all ',NoRanks,' MPI ranks'
+           CALL FLUSH(6)
+           CALL MPI_Abort(MPI_COMM_WORLD, EXIT_ERROR, ierr)
+         END IF
        END IF
      END IF
 #endif
