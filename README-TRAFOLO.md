@@ -155,13 +155,18 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   output level, whatever its abort flag:
   `WARNING:: <caller>: NOT CONVERGED: linear|nonlinear|coupled ... key=value ...`
   (linear: `solver`, `iterations`, `tolerance`; nonlinear: `solver`, `iterations`,
-  `change`, `tolerance`; coupled: `iterations`, `max`, also in steady runs). The NaN check of
-  the solution norm also catches Inf, and its message and the abort messages of the linear and
-  nonlinear solvers name the solver's `Equation`. UMFPACK errors are `Fatal` with the solver
-  and the status instead of a bare `PRINT`/`STOP`, and a singular matrix (status 1) warns.
+  `change`, `tolerance`; coupled: `iterations`, `max`, also in steady runs; the MUMPS residual
+  check above writes `direct`). A single nonlinear iteration (`Nonlinear System Max Iterations`
+  1 or unset) is a plain linear solve and does not warn, unless it is relaxed: then it warns
+  once with `iterations=1 relaxation=...`, because the result is the solution blended with the
+  initial guess. The NaN check of the solution norm also catches Inf, and its message and the
+  abort messages of the linear and nonlinear solvers name the solver's `Equation`. UMFPACK errors
+  are `Fatal` with the solver and the status instead of a bare `PRINT`/`STOP`, and a singular
+  matrix (status 1) warns.
   Tests (label `robustness`, macro `RUN_ELMER_EXPECT` in `test_macros.cmake`):
   `robustness_procedure_not_found`, `robustness_matc_syntax_error`,
-  `robustness_linear_not_converged`, `robustness_fatal_on_some_ranks`.
+  `robustness_linear_not_converged`, `robustness_nonlinear_not_converged`,
+  `robustness_fatal_on_some_ranks`.
 
 ## Building
 

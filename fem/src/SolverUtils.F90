@@ -11539,14 +11539,24 @@ END FUNCTION SearchNodeL
           IF( ListGetLogical( SolverParams,'Nonlinear System Abort Not Converged',Stat ) ) THEN
             CALL Fatal(Caller,'Nonlinear iteration of "'//SolverDisplayName(Solver)// &
                 '" did not converge to tolerance in '//I2S(MaxIter)//' iterations')
-          ELSE
+          ELSE IF( MaxIter > 1 ) THEN
             WRITE( Message,'(A,I0,A,ES10.3,A,ES10.3)') 'NOT CONVERGED: nonlinear solver="'// &
                 SolverDisplayName(Solver)//'" iterations=',IterNo,' change=',Change, &
                 ' tolerance=',Tolerance
             CALL Warn(Caller,Message)
-            ! Solver % Variable % NonlinConverged = 2            
+            ! Solver % Variable % NonlinConverged = 2
           END IF
         END IF
+      END IF
+
+      ! A single iteration is a plain linear solve whose change is measured from the
+      ! initial guess, so it is not a convergence failure, unless it is relaxed: then
+      ! the result is the solution blended with the initial guess.
+      IF( MaxIter <= 1 .AND. Relax .AND. Solver % TimesVisited == 0 ) THEN
+        WRITE( Message,'(A,ES10.3,A)') 'NOT CONVERGED: nonlinear solver="'// &
+            SolverDisplayName(Solver)//'" iterations=1 relaxation=',Relaxation, &
+            ': one relaxed iteration does not reach the solution'
+        CALL Warn(Caller,Message)
       END IF
 
       Tolerance = ListGetCReal( SolverParams,'Nonlinear System Divergence Limit',Stat)

@@ -258,9 +258,16 @@ ENDMACRO()
 
 # TRAFOLO: a test judged by how the run ends instead of by a norm, for inputs
 # that must stop with a clear message or must warn. EXIT is ZERO or NONZERO,
-# MATCH a regular expression that stdout or stderr has to contain.
+# MATCH a regular expression that stdout or stderr has to contain, NOMATCH one
+# they must not contain, SIF the input file when it is not ELMERSOLVER_STARTINFO.
 MACRO(RUN_ELMER_EXPECT)
-  CMAKE_PARSE_ARGUMENTS(_expect "" "EXIT;MATCH" "" "${ARGN}")
+  CMAKE_PARSE_ARGUMENTS(_expect "" "EXIT;MATCH;NOMATCH;SIF" "" "${ARGN}")
+  SET(_expect_found "")
+  SET(_expect_log "${MPIEXEC_NTASKS}")
+  IF(_expect_SIF)
+    GET_FILENAME_COMPONENT(_expect_name "${_expect_SIF}" NAME_WE)
+    SET(_expect_log "${_expect_name}_${MPIEXEC_NTASKS}")
+  ENDIF()
   SET(ENV{ELMER_HOME} "${BINARY_DIR}/fem/src")
   SET(ENV{ELMER_LIB} "${BINARY_DIR}/fem/src/modules")
   IF(WIN32)
@@ -272,18 +279,18 @@ MACRO(RUN_ELMER_EXPECT)
   SET(ENV{OMP_NUM_THREADS} 1)
 
   IF(WITH_MPI AND ${MPIEXEC_NTASKS} GREATER 1)
-    EXECUTE_PROCESS(COMMAND "${MPIEXEC}" ${MPIEXEC_NUMPROC_FLAG} ${MPIEXEC_NTASKS} ${MPIEXEC_PREFLAGS} ${ELMERSOLVER_BIN} ${MPIEXEC_POSTFLAGS}
+    EXECUTE_PROCESS(COMMAND "${MPIEXEC}" ${MPIEXEC_NUMPROC_FLAG} ${MPIEXEC_NTASKS} ${MPIEXEC_PREFLAGS} ${ELMERSOLVER_BIN} ${MPIEXEC_POSTFLAGS} ${_expect_SIF}
       RESULT_VARIABLE _expect_rc
       OUTPUT_VARIABLE _expect_out
       ERROR_VARIABLE _expect_err)
   ELSE()
-    EXECUTE_PROCESS(COMMAND ${ELMERSOLVER_BIN}
+    EXECUTE_PROCESS(COMMAND ${ELMERSOLVER_BIN} ${_expect_SIF}
       RESULT_VARIABLE _expect_rc
       OUTPUT_VARIABLE _expect_out
       ERROR_VARIABLE _expect_err)
   ENDIF()
-  FILE(WRITE "test-stdout_${MPIEXEC_NTASKS}.log" "${_expect_out}")
-  FILE(WRITE "test-stderr_${MPIEXEC_NTASKS}.log" "${_expect_err}")
+  FILE(WRITE "test-stdout_${_expect_log}.log" "${_expect_out}")
+  FILE(WRITE "test-stderr_${_expect_log}.log" "${_expect_err}")
 
   IF(_expect_EXIT STREQUAL "ZERO" AND NOT _expect_rc EQUAL 0)
     MESSAGE(FATAL_ERROR "Expected exit status 0, got ${_expect_rc}")
@@ -296,6 +303,12 @@ MACRO(RUN_ELMER_EXPECT)
       MESSAGE(FATAL_ERROR "Output does not contain: ${_expect_MATCH}")
     ENDIF()
   ENDIF()
-  MESSAGE(STATUS "Exit status ${_expect_rc}, output matched: ${_expect_found}")
+  IF(_expect_NOMATCH)
+    STRING(REGEX MATCH "${_expect_NOMATCH}" _expect_unwanted "${_expect_out}${_expect_err}")
+    IF(_expect_unwanted)
+      MESSAGE(FATAL_ERROR "Output contains: ${_expect_unwanted}")
+    ENDIF()
+  ENDIF()
+  MESSAGE(STATUS "${_expect_SIF} exit status ${_expect_rc}, output matched: ${_expect_found}")
 ENDMACRO()
 
