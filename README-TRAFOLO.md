@@ -172,6 +172,16 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `robustness_procedure_not_found`, `robustness_matc_syntax_error`,
   `robustness_linear_not_converged`, `robustness_nonlinear_not_converged`,
   `robustness_fixed_coupled_passes`, `robustness_fatal_on_some_ranks`.
+- Gauge-free nonlinear convergence measure (DEV-1564). `Nonlinear System Convergence Measure =
+  "flux density"` measures the L2 change of B = curl(x) between nonlinear iterations of an edge
+  element solver, real or complex, relative to the L2 norm of B (absolute with `Nonlinear System
+  Convergence Absolute`) (`CurlChange` in `SolverUtils`). The default `norm` measures the
+  potential, whose gradient part a direct solve of the ungauged system (MUMPS, tree gauge off)
+  changes on every solve without changing B, so `norm` may stay above the tolerance and run to
+  `Nonlinear System Max Iterations` although the field has converged. Not available with
+  `Nonlinear System Linesearch` or `Nonlinear System Compute Change in Scaled System` (both stop
+  with an error). Tests: `mgdyn_bh_flux_density` (static, iterative),
+  `mgdyn_harmonic_flux_density` (harmonic, linear: stops at iteration 2).
 
 ## Building the distributed bundle
 
