@@ -11053,13 +11053,14 @@ END FUNCTION SearchNodeL
 !> Different convergence measures may be used. 
 !> Also performs relaxation if a non-unity relaxation factor is given.
 !------------------------------------------------------------------------------
-  SUBROUTINE ComputeChange(Solver,SteadyState,nsize,values,values0,Matrix,RHS)
+  SUBROUTINE ComputeChange(Solver,SteadyState,nsize,values,values0,Matrix,RHS,Residual)
 !------------------------------------------------------------------------------
     TYPE(Solver_t), TARGET :: Solver
     LOGICAL :: SteadyState
     TYPE(Matrix_t), OPTIONAL, TARGET :: Matrix
     INTEGER, OPTIONAL :: nsize
     REAL(KIND=dp), OPTIONAL, TARGET :: values(:), values0(:), RHS(:)
+    REAL(KIND=dp), OPTIONAL :: Residual  !< 'residual' measure of a system the caller holds
 !------------------------------------------------------------------------------
     INTEGER :: i, n, nn, RelaxAfter, IterNo, MinIter, MaxIter, dofs
     TYPE(Matrix_t), POINTER :: A
@@ -11365,51 +11366,17 @@ END FUNCTION SearchNodeL
       ! x is solution of A(x0)x=b(x0) thus residual should really be r=b(x)-A(x)x
       ! Instead we use r=b(x0)-A(x0)x0 which unfortunately is one step behind.
       !--------------------------------------------------------------------------
-      IF(PRESENT(RHS)) THEN
-        b => RHS
+      IF( PRESENT(Residual) ) THEN
+        Change = Residual
       ELSE
-        b => A % rhs
-      END IF
-      
-      ALLOCATE(r(n))
-      r=0._dp
-
-      IF (Parallel) THEN
-        ALLOCATE( TmpRHSVec(n), TmpXVec(n) )
-
-        nn = A % ParMatrix % SplittedMatrix % InsideMatrix % NumberOfRows
-
-        TmpRhsVec = b
-        CALL ParallelInitSolve( A, tmpXVec, TmpRhsVec, r)
-
-        tmpXvec = x0(1:n)
-        CALL ParallelVector(a,TmpXvec)
-        CALL ParallelVector(A,tmpRhsvec)
-
-        CALL ParallelMatrixVector(A, TmpXvec, r)
-        DO i=1,nn
-          r(i) = r(i) - tmprhsvec(i)
-        END DO
-
-        Change = ParallelNorm(nn,r)
-        bNorm =  ParallelNorm(nn,tmpRhsVec)
-      ELSE
-        CALL MatrixVectorMultiply( A, x0, r)
-        DO i=1,n
-          r(i) = r(i) - b(i)
-        END DO
-        Change = ComputeNorm(Solver, n, r)
-        bNorm  = ComputeNorm(Solver, n, b)
-      END IF
-
-
-      IF(.NOT. ConvergenceAbsolute) THEN
-        IF(bNorm > 0.0) THEN
-          Change = Change / bNorm
+        IF(PRESENT(RHS)) THEN
+          b => RHS
+        ELSE
+          b => A % rhs
         END IF
+        Change = LaggedResidual( Solver, A, b, x0, n, Parallel, ConvergenceAbsolute )
       END IF
-      DEALLOCATE(r)
-      
+
     CASE('linear system residual')
       !--------------------------------------------------------------------------
       ! Here the true linear system residual r=b(x0)-A(x0)x is computed.
@@ -11757,6 +11724,65 @@ END FUNCTION SearchNodeL
         
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeChange
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Norm of the residual A*x0-b of the previous iterate x0 in the system of the
+!> new solution, relative to the norm of b unless Absolute.
+!------------------------------------------------------------------------------
+  FUNCTION LaggedResidual( Solver, A, b, x0, n, Parallel, Absolute ) RESULT( Change )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t), POINTER :: A
+    REAL(KIND=dp), TARGET :: b(:), x0(:)
+    INTEGER :: n
+    LOGICAL :: Parallel, Absolute
+    REAL(KIND=dp) :: Change
+!------------------------------------------------------------------------------
+    REAL(KIND=dp), ALLOCATABLE, TARGET :: r(:)
+    REAL(KIND=dp), ALLOCATABLE :: TmpXVec(:), TmpRHSVec(:)
+    REAL(KIND=dp) :: bNorm
+    INTEGER :: i, nn
+!------------------------------------------------------------------------------
+    ALLOCATE(r(n))
+    r=0._dp
+
+    IF (Parallel) THEN
+      ALLOCATE( TmpRHSVec(n), TmpXVec(n) )
+
+      nn = A % ParMatrix % SplittedMatrix % InsideMatrix % NumberOfRows
+
+      TmpRhsVec = b(1:n)
+      CALL ParallelInitSolve( A, tmpXVec, TmpRhsVec, r)
+
+      tmpXvec = x0(1:n)
+      CALL ParallelVector(a,TmpXvec)
+      CALL ParallelVector(A,tmpRhsvec)
+
+      CALL ParallelMatrixVector(A, TmpXvec, r)
+      DO i=1,nn
+        r(i) = r(i) - tmprhsvec(i)
+      END DO
+
+      Change = ParallelNorm(nn,r)
+      bNorm =  ParallelNorm(nn,tmpRhsVec)
+    ELSE
+      CALL MatrixVectorMultiply( A, x0, r)
+      DO i=1,n
+        r(i) = r(i) - b(i)
+      END DO
+      Change = ComputeNorm(Solver, n, r)
+      bNorm  = ComputeNorm(Solver, n, b)
+    END IF
+
+    IF(.NOT. Absolute) THEN
+      IF(bNorm > 0.0) THEN
+        Change = Change / bNorm
+      END IF
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaggedResidual
 !------------------------------------------------------------------------------
     
 
@@ -20628,7 +20654,28 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
     IF( SkipConstraints ) THEN
       CALL ListAddLogical( Params,'Skip Advance Nonlinear iter',.FALSE.)
       CALL ListAddLogical( Params,'Skip Compute Nonlinear Change',.FALSE.)
-      CALL ComputeChange(Solver,.FALSE.,StiffMatrix % NumberOfRows,Matrix=StiffMatrix,Rhs=ForceVector)
+      IF( ListGetString(Params,'Nonlinear System Convergence Measure',Found) == 'residual' .AND. &
+          ASSOCIATED( Solver % Variable % NonlinValues ) .AND. .NOT. EliminateConstraints .AND. &
+          .NOT. ( ResidualMode .AND. nIter > 1 ) ) THEN
+        ! The field rows alone leave out the constraint forces, and their right-hand side is
+        ! zero when the constraints (a circuit) drive the field: the first iterate then has
+        ! zero residual. Take the whole system, with the previous field and the new
+        ! multipliers, as ComputeChange does when the constraints are not skipped.
+        BLOCK
+          REAL(KIND=dp), ALLOCATABLE, TARGET :: PrevSolution(:)
+          LOGICAL :: Absolute
+          Absolute = ListGetLogical(Params,'Nonlinear System Convergence Absolute',Found)
+          IF(.NOT. Found) Absolute = ListGetLogical(Params,'Use Absolute Norm for Convergence',Found)
+          j = StiffMatrix % NumberOfRows
+          PrevSolution = CollectionSolution
+          PrevSolution(1:j) = Solver % Variable % NonlinValues(1:j)
+          CALL ComputeChange(Solver,.FALSE.,j,Matrix=StiffMatrix,Rhs=ForceVector, &
+              Residual=LaggedResidual(Solver,CollectionMatrix,CollectionVector,PrevSolution, &
+              CollectionMatrix % NumberOfRows,Parallel,Absolute))
+        END BLOCK
+      ELSE
+        CALL ComputeChange(Solver,.FALSE.,StiffMatrix % NumberOfRows,Matrix=StiffMatrix,Rhs=ForceVector)
+      END IF
     END IF
         
     DEALLOCATE(CollectionSolution)
