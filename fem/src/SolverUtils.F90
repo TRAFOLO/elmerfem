@@ -11047,7 +11047,106 @@ END FUNCTION SearchNodeL
   END SUBROUTINE UpdateDependentObjects
 
 
-  
+!------------------------------------------------------------------------------
+!> L2 change of curl(x) from x0 to x for an edge element solver, real (one dof)
+!> or complex (two dofs), relative to the L2 norm of curl(x) unless Absolute.
+!> Gradient parts of x have no curl.
+!------------------------------------------------------------------------------
+  FUNCTION CurlChange( Solver, x, x0, Absolute ) RESULT( Change )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t), TARGET :: Solver
+    REAL(KIND=dp) :: x(:), x0(:)
+    LOGICAL :: Absolute
+    REAL(KIND=dp) :: Change
+!------------------------------------------------------------------------------
+    TYPE(Solver_t), POINTER :: pSolver
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), WBasis(:,:), RotWBasis(:,:)
+    REAL(KIND=dp) :: detJ, Sums(2), Cur(3,2), Dif(3,2), Sgn
+    INTEGER, ALLOCATABLE :: Indexes(:)
+    INTEGER :: t, i, j, k, l, n, nd, np, Dofs, EdgeBasisDegree, EdgeDofs
+    LOGICAL :: PiolaVersion, SecondOrder, Flip, Parallel, Stat
+!------------------------------------------------------------------------------
+    pSolver => Solver
+    ! Not with 'Single Mesh': then every rank solves a whole mesh of its own
+    Parallel = Solver % Parallel
+    Flip = Solver % Variable % PeriodicFlipActive
+    Dofs = Solver % Variable % Dofs
+    IF( Dofs > 2 ) CALL Fatal('CurlChange','Expected a real or complex edge element field')
+    CALL EdgeElementStyle( Solver % Values, PiolaVersion, QuadraticApproximation = SecondOrder )
+    EdgeBasisDegree = 1
+    IF( SecondOrder ) EdgeBasisDegree = 2
+
+    n = Solver % Mesh % MaxElementNodes
+    nd = Solver % Mesh % MaxElementDOFs
+    ALLOCATE( Basis(n), dBasisdx(n,3), WBasis(nd,3), RotWBasis(nd,3), Indexes(nd) )
+
+    Sums = 0.0_dp
+    EdgeDofs = 0
+    DO t=1,Solver % NumberOfActiveElements
+      Element => Solver % Mesh % Elements( Solver % ActiveElements(t) )
+      IF( Parallel ) THEN
+        IF( Element % PartIndex /= ParEnv % MyPe ) CYCLE
+      END IF
+      n = Element % TYPE % NumberOfNodes
+      nd = mGetElementDOFs( Indexes, Element, Solver )
+      np = n * Solver % Def_Dofs( Element % TYPE % ElementCode / 100, Element % BodyId, 1 )
+      IF( nd <= np ) CYCLE
+      EdgeDofs = EdgeDofs + nd - np
+
+      CALL CopyElementNodesFromMesh( Nodes, Solver % Mesh, n, Element % NodeIndexes )
+      IP = GaussPoints( Element, EdgeBasis=.TRUE., PReferenceElement=PiolaVersion, &
+          EdgeBasisDegree=EdgeBasisDegree )
+      DO j=1,IP % n
+        Stat = ElementInfo( Element, Nodes, IP % U(j), IP % V(j), IP % W(j), detJ, &
+            Basis, dBasisdx, EdgeBasis=WBasis, RotBasis=RotWBasis, USolver=pSolver )
+        Cur = 0.0_dp
+        Dif = 0.0_dp
+        DO i=np+1,nd
+          IF( Indexes(i) <= 0 .OR. Indexes(i) > SIZE(Solver % Variable % Perm) ) CYCLE
+          k = Solver % Variable % Perm( Indexes(i) )
+          IF( k <= 0 ) CYCLE
+          ! Same sign convention as GetLocalSolution for conforming (periodic) edges
+          Sgn = 1.0_dp
+          IF( Flip ) THEN
+            IF( Solver % Mesh % PeriodicFlip( Indexes(i) ) ) Sgn = -1.0_dp
+          END IF
+          DO l=1,Dofs
+            Cur(:,l) = Cur(:,l) + Sgn * x(Dofs*(k-1)+l) * RotWBasis(i-np,:)
+            Dif(:,l) = Dif(:,l) + Sgn * ( x(Dofs*(k-1)+l) - x0(Dofs*(k-1)+l) ) * RotWBasis(i-np,:)
+          END DO
+        END DO
+        Sums(1) = Sums(1) + SUM( Dif(:,1:Dofs)**2 ) * detJ * IP % s(j)
+        Sums(2) = Sums(2) + SUM( Cur(:,1:Dofs)**2 ) * detJ * IP % s(j)
+      END DO
+    END DO
+
+    IF( Parallel ) THEN
+      EdgeDofs = NINT( ParallelReduction( 1.0_dp * EdgeDofs ) )
+      Sums(1) = ParallelReduction( Sums(1) )
+      Sums(2) = ParallelReduction( Sums(2) )
+    END IF
+    IF( EdgeDofs == 0 ) THEN
+      CALL Fatal('CurlChange','Convergence measure "flux density" needs an edge element solver')
+    END IF
+
+    IF( Absolute ) THEN
+      Change = SQRT( Sums(1) )
+    ELSE IF( Sums(2) > 0.0_dp ) THEN
+      Change = SQRT( Sums(1) / Sums(2) )
+    ELSE IF( Sums(1) > 0.0_dp ) THEN
+      Change = 1.0_dp
+    ELSE
+      Change = 0.0_dp
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION CurlChange
+!------------------------------------------------------------------------------
+
+
+
 !------------------------------------------------------------------------------
 !> When a new field has been computed compare it to the previous one.
 !> Different convergence measures may be used. 
@@ -11477,7 +11576,12 @@ END FUNCTION SearchNodeL
       IF( .NOT. ConvergenceAbsolute .AND. Norm + PrevNorm > 0.0) THEN
         Change = Change * 2.0_dp/ (Norm+PrevNorm)
       END IF
-      
+
+    CASE('flux density')
+      ! Edge element solvers: the gradient part of an ungauged potential changes from solve
+      ! to solve without changing B = curl(x), so 'norm' and 'solution' may never settle.
+      Change = CurlChange( Solver, x, x0, ConvergenceAbsolute )
+
     CASE DEFAULT
       CALL Warn(Caller,'Unknown convergence measure: '//TRIM(ConvergenceType))    
       
@@ -12189,6 +12293,11 @@ END FUNCTION SearchNodeL
     !----------------------------------------------------
     IF( FirstIter ) THEN
       CALL Info('CheckStepSize','Initializing step-size search',Level=6)
+
+      ! The line search measures the change of the solution norm itself.
+      IF( ListGetString(SolverParams,'Nonlinear System Convergence Measure',Stat) == 'flux density' ) &
+          CALL Fatal('CheckStepSize','Convergence measure "flux density" is not available with '//&
+          '"Nonlinear System Linesearch"')
 
       IF(PRESENT(nsize)) THEN
         n = nsize
@@ -15472,6 +15581,12 @@ END FUNCTION SearchNodeL
     ComputeChangeScaled = ListGetLogical(Params,&
         'Nonlinear System Compute Change in Scaled System',GotIt)
     IF(.NOT.GotIt) ComputeChangeScaled = .FALSE.
+    ! Diagonal scaling does not keep gradients curl free.
+    IF( ComputeChangeScaled ) THEN
+      IF( ListGetString(Params,'Nonlinear System Convergence Measure',GotIt) == 'flux density' ) &
+          CALL Fatal(Caller,'Convergence measure "flux density" needs the unscaled solution: '//&
+          'do not combine it with "Nonlinear System Compute Change in Scaled System"')
+    END IF
 
     IF(ComputeChangeScaled) THEN
       ALLOCATE(NonlinVals(SIZE(x)))
@@ -16761,7 +16876,7 @@ END FUNCTION SearchNodeL
     IF(.NOT. NeedPrevSol ) THEN
       Method = ListGetString( Params, &
         'Nonlinear System Convergence Measure', Found ) 
-      NeedPrevSol = ( Method == 'residual' .OR. Method == 'solution' )
+      NeedPrevSol = ( Method == 'residual' .OR. Method == 'solution' .OR. Method == 'flux density' )
     END IF
 
     IF( NeedPrevSol ) THEN
