@@ -124,6 +124,16 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `A` with an unrelaxed `V` in `E = -i*omega*A - V*grad W` of massive coils, and the current density
   and Joule loss of a nonlinear loop that stopped before convergence came out orders of magnitude
   too large. Test: `circuits_harmonic_massive_relaxation`.
+- `residual` convergence measure of a constrained system (DEV-1567). With `Nonlinear System
+  Consistent Norm` or `Nonlinear System Convergence Without Constraints`,
+  `SolveWithLinearRestriction` hands `ComputeChange` the field rows only, so `Nonlinear System
+  Convergence Measure = residual` left out the constraint forces. Where the constraints (a
+  circuit) drive the field, the right-hand side of those rows is zero: the first iterate had a
+  zero residual and the nonlinear loop stopped after one iteration. The residual is now that of
+  the whole constrained system for the previous field and the new multipliers
+  (`LaggedResidual` in `SolverUtils`), the value `ComputeChange` gets without those options.
+  Unchanged with `Eliminate Linear Constraints` and `Restriction System Residual Mode`. Test:
+  `circuits_harmonic_massive_residual`.
 - MUMPS direct solver interface (`DirectSolve`): the status of every MUMPS initialization,
   analysis, factorization and solve is checked, so a failure stops all ranks with
   `INFOG(1)`/`INFOG(2)` (`INFO` in the rank-local wrappers) and a hint instead of returning an
