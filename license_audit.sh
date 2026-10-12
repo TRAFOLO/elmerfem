@@ -97,7 +97,8 @@ stage_pkg_texts() { # pkg short -> stages into licenses/third_party/<short>/, pr
 declare -A PKG_TEXTS
 RT_ROWS=""
 # Exact source archives of the MSYS2 packages shipped or linked: the GPL/LGPL corresponding
-# source of the runtime DLLs and the static METIS. release.yml mirrors them next to the bundle.
+# source of the runtime DLLs and the static METIS, named with their origins in
+# licenses/source-packages.txt.
 MSYS2_SOURCES="https://repo.msys2.org/mingw/sources"
 declare -A SRC_ARCHIVES
 add_source_archive() { # pkg version
@@ -176,7 +177,7 @@ fi
 # --- Microsoft MPI redistributable installer ---
 # msmpisetup.exe comes under Microsoft's redistributable licence terms, not under the MIT
 # License of the Microsoft-MPI source repository. The MS-MPI runtime installed on the build
-# machine comes from the same installer (release.yml), so its License folder holds those terms.
+# machine comes from the same installer (in the release CI), so its License folder holds those terms.
 MSMPI_LICENSES="${MSMPI_LICENSE_DIR:-/c/Program Files/Microsoft MPI/License}"
 if [ -f redist/msmpisetup.exe ]; then
   mkdir -p licenses/third_party/msmpi-redist
@@ -253,11 +254,7 @@ fi
   printf '# (MSYS2 source packages: PKGBUILD, patches, upstream tarball). <file> <origin>\n'
   for f in "${!SRC_ARCHIVES[@]}"; do printf '%s %s\n' "$f" "${SRC_ARCHIVES[$f]}"; done | sort
 } > licenses/source-packages.txt
-if [ -n "${SOURCE_MIRROR_URL:-}" ]; then
-  SOURCES_SENTENCE="The exact source archives of these packages and of the third-party code compiled in from MSYS2 or Debian archives (PKGBUILD, patches and upstream tarball), listed in \`source-packages.txt\`, are published with this bundle at $SOURCE_MIRROR_URL and by their origins."
-else
-  SOURCES_SENTENCE="The exact source archives of these packages and of the third-party code compiled in from MSYS2 or Debian archives (PKGBUILD, patches and upstream tarball) are listed in \`source-packages.txt\` and published by their origins."
-fi
+SOURCES_SENTENCE="The exact source archives of these packages and of the third-party code compiled in from MSYS2 or Debian archives (PKGBUILD, patches and upstream tarball) are listed in \`source-packages.txt\` and published by their origins."
 {
   printf '\n## Runtime libraries from MSYS2 (UCRT64)\n\n'
   printf '%s\n' "These DLLs in \`bin/\` are unmodified files of the MSYS2 UCRT64 packages listed. $SOURCES_SENTENCE" ""
@@ -319,8 +316,7 @@ Dynamic third-party runtimes in bin/:
 
 Third-party source archives: licenses/source-packages.txt lists the
   exact source archive of every MSYS2 package shipped or linked (and of
-  MUMPS when linked).${SOURCE_MIRROR_URL:+ They are published with this bundle at
-  $SOURCE_MIRROR_URL}
+  MUMPS when linked), with the origin that publishes it.
 
 Microsoft MPI runtime (msmpi.dll): not shipped in bin/. The unmodified
   Microsoft installer redist/msmpisetup.exe is included to install it,
