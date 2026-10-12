@@ -630,7 +630,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: SheetPower   ! transient foil sheet Joule loss, a part of Power
    INTEGER :: SheetPowerSeen     ! 1 where a transient foil sheet contributed to it
    REAL(KIND=dp) :: localThickness
-   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ValAtIP
+   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ModeLoss(2), ValAtIP
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
@@ -2362,14 +2362,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            
            ! No losses to add if loss coefficient is not given
            IF( Found .OR. MaterialExponents ) THEN
+             ! Per mode into ComponentLoss, both modes once into BodyLoss and the nodal field
              ElemLoss = 0.0_dp
              DO l=1,2
                ValAtIP = SUM( B(l,1:3) ** 2 )
-               ElemLoss(1) = ElemLoss(1) + s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( ValAtIp ** FieldPower(1) )
-               ElemLoss(2) = ElemLoss(2) + s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( ValAtIp ** FieldPower(2) )
-               ComponentLoss(:,l) = ComponentLoss(:,l) + ElemLoss
-               BodyLoss(1:2,BodyId) = BodyLoss(1:2,BodyId) + ElemLoss
+               ModeLoss(1) = s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( ValAtIp ** FieldPower(1) )
+               ModeLoss(2) = s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( ValAtIp ** FieldPower(2) )
+               ComponentLoss(:,l) = ComponentLoss(:,l) + ModeLoss
+               ElemLoss = ElemLoss + ModeLoss
              END DO
+             BodyLoss(1:2,BodyId) = BodyLoss(1:2,BodyId) + ElemLoss
            ELSE
              ElemLoss = 0.0_dp
            END IF

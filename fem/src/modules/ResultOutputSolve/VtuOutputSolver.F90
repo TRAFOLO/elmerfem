@@ -245,6 +245,26 @@ CONTAINS
 
   END SUBROUTINE VtuFileNaming
   
+!------------------------------------------------------------------------------
+!> Text made safe for an XML comment: XML forbids "--" inside a comment, so a
+!> space goes between two hyphens ("a--b" -> "a- -b"). A Solver Input File
+!> path such as "C:\Work--v2\case.sif" otherwise makes the .vtu unreadable.
+!------------------------------------------------------------------------------
+  FUNCTION XmlCommentText( Txt ) RESULT( Safe )
+    CHARACTER(LEN=*), INTENT(IN) :: Txt
+    CHARACTER(LEN=:), ALLOCATABLE :: Safe
+    INTEGER :: i, n
+
+    n = LEN_TRIM(Txt)
+    Safe = ''
+    DO i = 1, n
+      Safe = Safe // Txt(i:i)
+      IF( Txt(i:i) == '-' .AND. i < n ) THEN
+        IF( Txt(i+1:i+1) == '-' ) Safe = Safe // ' '
+      END IF
+    END DO
+  END FUNCTION XmlCommentText
+
 END MODULE VtuXMLFile
 
 
@@ -796,29 +816,29 @@ CONTAINS
     IF( SaveMetainfo ) THEN
       IF( FileIndex == 1 .AND. ParEnv % MyPe == 0 ) THEN
         Txt = GetVersion()
-        WRITE( OutStr,'(A)') '<!-- Elmer version: '//TRIM(Txt)//' -->'//lf     
+        WRITE( OutStr,'(A)') '<!-- Elmer version: '//XmlCommentText(Txt)//' -->'//lf     
         CALL AscBinStrWrite( OutStr )
 
         Txt = GetRevision( Found )
         IF( Found ) THEN
-          WRITE( OutStr,'(A)') '<!-- Elmer revision: '//TRIM(Txt)//' -->'//lf
+          WRITE( OutStr,'(A)') '<!-- Elmer revision: '//XmlCommentText(Txt)//' -->'//lf
           CALL AscBinStrWrite( OutStr )
         END IF
 
         Txt = GetCompilationDate( Found )
         IF( Found ) THEN
-          WRITE( OutStr,'(A)') '<!-- Elmer compilation date: '//TRIM(Txt)//' -->'//lf
+          WRITE( OutStr,'(A)') '<!-- Elmer compilation date: '//XmlCommentText(Txt)//' -->'//lf
           CALL AscBinStrWrite( OutStr )
         END IF
 
         Txt = GetSifName( Found) 
         IF( Found ) THEN
-          WRITE( OutStr,'(A)') '<!-- Solver input file: '//TRIM(Txt)//' -->'//lf
+          WRITE( OutStr,'(A)') '<!-- Solver input file: '//XmlCommentText(Txt)//' -->'//lf
           CALL AscBinStrWrite( OutStr )
         END IF
 
         Txt = FormatDate()      
-        WRITE( OutStr,'(A)') '<!-- File started at: '//TRIM(Txt)//' -->'//lf
+        WRITE( OutStr,'(A)') '<!-- File started at: '//XmlCommentText(Txt)//' -->'//lf
         CALL AscBinStrWrite( OutStr )
       END IF
     END IF
