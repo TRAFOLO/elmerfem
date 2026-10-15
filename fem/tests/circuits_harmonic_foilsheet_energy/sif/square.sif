@@ -1,0 +1,228 @@
+! Magnetic energy of a harmonic foil sheet block against the circuit (DEV-1590):
+! the edgewise sheet of circuits_harmonic_foilsheet_square (four turns, 1 mm
+! copper at 2 mm pitch, 58 MS/m, 50 Hz, half model, 1 A rms) with the sheet
+! conductivity derived from the foil. Its imaginary part puts the foils' own
+! skin reactance, R_dc tau0/3 here, into the strand impedance: 1.5 % of the
+! inductance, which the field energy has to hold too for W = VF Q/omega
+! (CheckHarmonicEnergy).
+Check Keywords "Warn"
+INCLUDE sif/square-circuits.definitions
+INCLUDE square/mesh.names
+Header
+  Mesh DB "." "square"
+End
+Constants
+  Permittivity of Vacuum = 8.8542e-12
+End
+Simulation
+  Max Output Level = 3
+  Coordinate System = Cartesian 3D
+  Coordinate Scaling = 0.001
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+  Frequency = Real 50
+End
+Solver 1  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-12
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Alpha
+  Variable = Alpha
+End
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-12
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+  Equation = Direction Beta
+  Variable = Beta
+End
+Solver 3  !---- CoordinateTransform, RotMSolver
+  Exec Solver = Before All
+  Equation = Transformation matrix
+  Procedure = "CoordinateTransform" "RotMSolver"
+  Variable = -nooutput Dummy
+  Optimize Bandwidth = False
+  Polar Decomposition Determinant Tolerance = Real 1.0e-9
+  Polar Decomposition Max Iterations = Integer 100
+  Exported Variable 1 = -nooutput RotM E[RotM E:9]
+  Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+  Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+  Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+  Discontinuous Galerkin = True
+End
+Solver 4  !---- WPotentialSolver, Wsolve
+  Exec Solver = Before All
+  Procedure = "WPotentialSolver" "Wsolve"
+  Equation = "Wire direction"
+  Variable = W
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Max Iterations = 10000
+  Linear System Convergence Tolerance = 1.0e-12
+  Linear System Preconditioning = ILU0
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+End
+Solver 5  !---- CircuitsAndDynamics, CircuitsAndDynamicsHarmonic
+  Exec Solver = Always
+  Equation = Circuits
+  Variable = X
+  No Matrix = Logical True
+  Procedure = "CircuitsAndDynamics" "CircuitsAndDynamicsHarmonic"
+End
+Solver 6  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
+  Exec Solver = Always
+  Equation = "MGDynamics"
+  Variable = "A[A re:1 A im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Export Lagrange Multiplier = Logical True
+  Linear System Symmetric = Logical True
+  Linear System Complex = Logical True
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BicgstabL
+  BicgStabL Polynomial Degree = 4
+  Linear System Preconditioning = Circuit
+  Linear System Convergence Tolerance = 1.0e-11
+  Linear System Abort Not Converged = False
+  Linear System Max Iterations = 5000
+  Linear System Residual Output = 1000
+  Steady State Convergence Tolerance = 1e-08
+End
+Solver 7  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
+  Exec Solver = Always
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "A"
+  Linear System Symmetric = True
+  Calculate Current Density = Logical True
+  Calculate Homogenization Loss = Logical True
+  Calculate Nodal Fields = Logical False
+  Separate Magnetic Energy = Logical True
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 1000
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 8  !---- CircuitsAndDynamics, CircuitsOutput
+  Exec Solver = Always
+  Equation = Circuits Output
+  Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 9  !---- SaveData, SaveScalars: the magnetic energy
+  Exec Solver = Always
+  Equation = "sv energy"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = square/dat/energy.dat
+  Variable 1 = String "res: Magnetic Field Energy"
+  Variable 2 = String "res: Magnetic Coenergy"
+  Show Norm Index = Integer 1
+End
+Solver 10  !---- TestEnergy, CheckHarmonicEnergy: W against the coil's reactive power
+  Exec Solver = Always
+  Equation = "Check energy"
+  Procedure = "TestEnergy" "CheckHarmonicEnergy"
+End
+Equation 1
+  Active Solvers(2) = 6 7
+End
+Equation 2
+  Active Solvers(10) = 1 2 3 4 5 6 7 8 9 10
+End
+Material 1  !---- air
+  Name = air
+  Electric Conductivity = 0
+  Relative Permeability = 1
+  Relative Permittivity = 1
+End
+Material 2  !---- the winding block
+  Name = copper block
+  Electric Conductivity = 29e6
+  Relative Permeability = 1
+  Relative Permittivity = 1
+End
+Body 1  !---- coil
+  Name = coil
+  Target Bodies(1) = $ coil
+  Equation = 2
+  Material = 2
+  Body Force = 1
+  Alpha reference (3) = Real 1 0 0
+  Beta reference (3) = Real 0 1 0
+End
+Body 2  !---- air
+  Name = air
+  Target Bodies(1) = $ air
+  Equation = 1
+  Material = 1
+End
+Component 1  !---- coil
+  Name = String coil
+  Master Bodies(1) = Integer 1
+  Coil Type = String foil sheet
+  Stacking Direction = String beta
+  Number of Turns = Real 4
+  Foil Thickness = Real 1.0e-3
+  Fill Factor = Real 0.5
+  Sheet Conductivity = Real 58e6
+  Sheet Cells = Integer 4
+  Sheet Segments = Integer 8
+  Sheet Sublayers = Integer 1
+  Electrode Boundaries(2) = Integer 2 3
+  Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
+  Homogenization Model = Logical True
+End
+Body Force 1  !---- Circuit
+  Name = "Circuit"
+  S1 Re = Real 1.41421356237
+  S1 Im = Real 0
+End
+Boundary Condition 1  !---- symmetry plane and outer boundary
+  Target Boundaries(2) = $ sym outer
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 2  !---- electrode
+  Target Boundaries(1) = $ coil_left
+  W = Real 1
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 3  !---- electrode
+  Target Boundaries(1) = $ coil_right
+  W = Real 0
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 4  !---- square outer faces
+  Target Boundaries(1) = $ coil_outer
+  Alpha = Real 0
+End
+Boundary Condition 5  !---- round inner face
+  Target Boundaries(1) = $ coil_inner
+  Alpha = Real 1
+End
+Boundary Condition 6  !---- bottom of the stack
+  Target Boundaries(1) = $ coil_bottom
+  Beta = Real 0
+End
+Boundary Condition 7  !---- top of the stack
+  Target Boundaries(1) = $ coil_top
+  Beta = Real 1
+End
+Solver 9 :: Reference Norm = Real 1.409780753338E-07
+Solver 9 :: Reference Norm Tolerance = Real 1E-6
+$fprintf( stderr, "TEST CASE 1\n");

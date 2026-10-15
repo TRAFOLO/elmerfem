@@ -1,6 +1,7 @@
-! Check the harmonic energy of the litz coil against the circuit: with peak
+! Check the harmonic energy of a homogenized coil against the circuit: with peak
 ! phasors W = VF Q/omega, Q = Im(V conj(I))/2 of the coil and VF the share of
-! the coil the mesh holds. Energy and coenergy agree for linear materials.
+! the coil the mesh holds. Energy and coenergy agree for linear materials. Also
+! built by circuits_harmonic_foilsheet_energy.
 SUBROUTINE CheckHarmonicEnergy(Model, Solver, dt, Transient)
   USE DefUtils
   IMPLICIT NONE
@@ -19,8 +20,8 @@ SUBROUTINE CheckHarmonicEnergy(Model, Solver, dt, Transient)
   IF (Found) ire = GetConstReal(Model % Simulation, 'res: i_component(1) re', Found)
   IF (Found) iim = GetConstReal(Model % Simulation, 'res: i_component(1) im', Found)
   IF (.NOT. Found) CALL Fatal('CheckHarmonicEnergy', 'Circuit voltage or current missing')
-  omega = GetConstReal(Model % Simulation, 'Angular Frequency', Found)
-  IF (.NOT. Found) CALL Fatal('CheckHarmonicEnergy', 'Angular Frequency missing')
+  omega = GetAngularFrequency(Found=Found)
+  IF (.NOT. Found) CALL Fatal('CheckHarmonicEnergy', 'Angular Frequency or Frequency missing')
   vf = GetConstReal(Model % Components(1) % Values, 'Circuit Equation Voltage Factor', Found)
   IF (.NOT. Found) vf = 1._dp
 
