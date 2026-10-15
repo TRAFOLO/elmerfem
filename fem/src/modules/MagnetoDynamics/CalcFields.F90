@@ -1985,15 +1985,13 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              Nu(k,l) = SUM( Nu_el(k,l,1:n) * Basis(1:n) )
            END DO
          END DO
-         IF (CoilType == 'foil sheet') THEN
-           ! The homogenized block still stores magnetic energy; without this the
-           ! coil would drop out of 'res: Magnetic Field Energy' (and hence L).
-           IF (RealField) THEN
-             w_dens = 0.5*SUM(B(1,:)*MATMUL(REAL(Nu), B(1,:)))
-           ELSE
-             w_dens = 0.5*( SUM(MATMUL(REAL(Nu), B(1,:)) * B(1,:)) + &
-                 SUM(MATMUL(REAL(Nu), B(2,:)) * B(2,:)) )
-           END IF
+         ! The homogenized block (litz or foil sheet) still stores magnetic energy; without
+         ! this the coil drops out of 'res: Magnetic Field Energy' (and hence L).
+         IF (RealField) THEN
+           w_dens = 0.5*SUM(B(1,:)*MATMUL(REAL(Nu), B(1,:)))
+         ELSE
+           w_dens = 0.5*( SUM(MATMUL(REAL(Nu), B(1,:)) * B(1,:)) + &
+               SUM(MATMUL(REAL(Nu), B(2,:)) * B(2,:)) )
          END IF
        ELSE
          IF (HasTensorReluctivity) THEN
