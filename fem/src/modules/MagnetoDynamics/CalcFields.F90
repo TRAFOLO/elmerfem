@@ -635,7 +635,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
    ! Stranded coil skin ladder: stage coefficient L tau, state factors, stage heat.
-   REAL(KIND=dp) :: SkinLt, SkinGain, SkinHist, SkinHeat
+   REAL(KIND=dp) :: SkinLt, SkinGain, SkinHist, SkinHeat, SkinL, SkinTau, SkinEnergy
+   LOGICAL :: StrandedTransientHomog
+   INTEGER :: HomogOrder
+   REAL(KIND=dp) :: HomogY0(3), HomogR(6,2), HomogXi(6,2)
    REAL(KIND=dp) :: R_ip, mu_r
    REAL(KIND=dp), SAVE :: mu0 = 1.2566370614359173e-6_dp
 
@@ -1219,6 +1222,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
      CoilBody = .FALSE.
      SkinLt = 0._dp
+     SkinL = 0._dp
+     SkinEnergy = 0._dp
+     StrandedTransientHomog = .FALSE.
      CompParams => GetComponentParams( Element )
      CoilType = ''
      RotM = 0._dp
@@ -1276,7 +1282,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
          HomogenizationModel = GetLogical(CompParams, 'Homogenization Model', Found)
 
-         IF (HomogenizationLoss .and. HomogenizationModel) THEN
+         IF (HomogenizationLoss .AND. HomogenizationModel .AND. .NOT. Transient) THEN
            BLOCK
              REAL(KIND=dp) :: nu_11(n), nuim_11(n), &
                               nu_22(n), nuim_22(n), &
@@ -1322,6 +1328,36 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END BLOCK
          ELSE IF (HomogenizationModel .AND. Transient) THEN
            IF (GetLogical(CompParams, 'Transient Homogenization', Found) .AND. Found) THEN
+             StrandedTransientHomog = .TRUE.
+             ! WhitneyAVSolver publishes the current DG-0 Foster states after
+             ! its solve. Read each element's poles, in the local Alpha/Beta frame.
+             BLOCK
+               TYPE(Variable_t), POINTER :: XiVar
+               REAL(KIND=dp) :: taus(6)
+               INTEGER :: d, ep, off
+               CHARACTER(LEN=8), PARAMETER :: XiName(2) = [ 'Xi Alpha', 'Xi Beta ' ]
+               CHARACTER(LEN=5), PARAMETER :: NuName(2) = [ 'Nu 11', 'Nu 22' ]
+               HomogOrder = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
+               IF (.NOT. Found) CALL Fatal(Caller, 'Homogenization Ladder Order not found!')
+               IF (HomogOrder < 1 .OR. HomogOrder > 6) &
+                   CALL Fatal(Caller, 'Homogenization Ladder Order must be between 1 and 6')
+               HomogY0 = 1._dp / mu0
+               DO d = 1,2
+                 CALL GetFosterLadder(CompParams, NuName(d), HomogOrder, &
+                     HomogY0(d), HomogR(1:HomogOrder,d), taus(1:HomogOrder))
+                 XiVar => VariableGet(pSolver % Mesh % Variables, TRIM(XiName(d)))
+                 IF (.NOT. ASSOCIATED(XiVar)) CALL Fatal(Caller, 'Transient homogenization: '// &
+                     TRIM(XiName(d))//' not found; run WhitneyAVSolver before CalcFields.')
+                 ep = Element % ElementIndex
+                 IF (ASSOCIATED(XiVar % Perm)) ep = XiVar % Perm(ep)
+                 off = (ep-1) * XiVar % DOFs
+                 IF (ep <= 0 .OR. XiVar % DOFs < HomogOrder .OR. &
+                     off + HomogOrder > SIZE(XiVar % Values)) &
+                     CALL Fatal(Caller, 'Transient homogenization: invalid '//TRIM(XiName(d))//' element slot.')
+                 HomogXi(1:HomogOrder,d) = XiVar % Values(off+1:off+HomogOrder)
+               END DO
+               CALL GetElementRotM(Element, RotM, n)
+             END BLOCK
              ! The heat of the circuit's skin ladder (TransientHomogCircuitState
              ! in CircuitsAndDynamics), spread over the winding like the DC loss:
              ! |J|^2/G0 from the ladder's DC conductivity G0 = y0 + alpha, plus
@@ -1337,8 +1373,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                Tcoef(1,1,1:n) = g0
                Tcoef(2,2,1:n) = g0
                Tcoef(3,3,1:n) = g0
-               SkinLt = (s_SigmaMat(1,1) * s_alpha / (g0 * g0)) * (s_SigmaMat(1,1) * s_y0 / g0)
-               IF (SkinLt /= 0._dp) THEN
+               SkinL = s_SigmaMat(1,1) * s_alpha / (g0 * g0)
+               SkinTau = s_SigmaMat(1,1) * s_y0 / g0
+               SkinLt = SkinL * SkinTau
+               IF (SkinL /= 0._dp) THEN
                  SkinGain = GetConstReal(CompParams, 'Stranded Skin State Gain', Found)
                  IF (Found) SkinHist = GetConstReal(CompParams, 'Stranded Skin State History', Found)
                  IF (.NOT. Found) CALL Fatal(Caller, 'Stranded coil skin ladder state not found: '// &
@@ -1854,6 +1892,13 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              SkinHeat = SkinGain * LagrangeVar % Values(IvarId) + SkinHist
              SkinHeat = SkinLt * N_j**2 * SUM(wvec**2) * SkinHeat**2
            END IF
+           IF (SkinL /= 0._dp) THEN
+             ! The skin inductor carries chi = I - tau q, including at y0 = 0
+             ! (a pure series inductance, with no stage heat).
+             SkinEnergy = LagrangeVar % Values(IvarId) - &
+                 SkinTau * (SkinGain * LagrangeVar % Values(IvarId) + SkinHist)
+             SkinEnergy = 0.5_dp * SkinL * N_j**2 * SUM(wvec**2) * SkinEnergy**2
+           END IF
 
          CASE ('massive')
            localV(1) = localV(1) + LagrangeVar % Values(VvarId) * CircEqVoltageFactor
@@ -1978,7 +2023,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              GaussPoint = j, Rdim=mudim, Rtensor=MuTensor, DummyVals = B(1,:) )             
          Nu(1:3,1:3) = muTensor(1:3,1:3)                           
          w_dens = 0.5*SUM(B(1,:)*MATMUL(REAL(Nu), B(1,:)))
-       ELSE IF ((HomogenizationLoss .AND. CoilType == 'stranded' .AND. HomogenizationModel) .OR. &
+       ELSE IF ((HomogenizationLoss .AND. CoilType == 'stranded' .AND. HomogenizationModel &
+                 .AND. .NOT. Transient) .OR. &
                 (CoilType == 'foil sheet' .AND. HomogenizationModel .AND. .NOT. RealField)) THEN
          DO k=1,3
            DO l=1,3
@@ -2088,6 +2134,33 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
        END IF
        
+       IF (StrandedTransientHomog) THEN
+         BLOCK
+           REAL(KIND=dp) :: rm(3,3), b_local(3)
+           DO k = 1,3
+             DO l = 1,3
+               rm(k,l) = SUM(RotM(k,l,1:n) * Basis(1:n))
+             END DO
+           END DO
+           b_local = MATMUL(TRANSPOSE(rm), B(1,:))
+           ! H = y0 B + sum r xi, T xi_dot + xi = B. The storage is
+           ! w = y0 B^2/2 + sum r (B xi - xi^2/2), so
+           ! H B_dot = w_dot - sum r T xi_dot^2 (r < 0 for a passive fit).
+           ! Equivalently w = nu_DC B^2/2 - sum r (B-xi)^2/2. Its sinusoidal
+           ! average is Re(nu) |B|^2/4, as in the harmonic energy calculation.
+           w_dens = 0.5_dp * SUM(HomogY0 * b_local**2) + SkinEnergy
+           DO k = 1,2
+             w_dens = w_dens + SUM(HomogR(1:HomogOrder,k) * HomogXi(1:HomogOrder,k) * &
+                 (b_local(k) - 0.5_dp * HomogXi(1:HomogOrder,k)))
+           END DO
+           ! Total coenergy includes the internal conjugate-state products,
+           ! not just macroscopic H.B. This full linear quadratic model has
+           ! equal energy and coenergy. Apply this only to the energy totals;
+           ! the force/field postprocessing above keeps its existing convention.
+           HdotB = 2._dp * w_dens
+         END BLOCK
+       END IF
+
        Energy(1) = Energy(1) + s*0.5*ABS(PR_ip)*SUM(E**2)
        Energy(2) = Energy(2) + s*w_dens
        Energy(3) = Energy(3) + (HdotB - w_dens) * s
