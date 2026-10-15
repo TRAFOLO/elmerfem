@@ -638,7 +638,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    ! weight of its circuit terms (K, the integral of N_j^2 |w|^2).
    REAL(KIND=dp) :: WindingWsq
    ! Stranded coil skin ladder: stage coefficient L tau, state factors, stage heat,
-   ! inductor current, and the energy density it stores outside B.
+   ! inductor current, and the energy density it (or a foil sheet strand's skin
+   ! reactance) stores outside B.
    REAL(KIND=dp) :: SkinLt, SkinGain, SkinHist, SkinHeat, SkinL, SkinTau, SkinChi, SkinEnergy
    ! Homogenized blocks: harmonic litz and foil sheet, and the transient litz ladder.
    LOGICAL :: StrandedHarmonicHomog, SheetHarmonicHomog, StrandedTransientHomog, XiSlotOk
@@ -1790,6 +1791,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            ! it carries no current and no cell voltage.
            CALL FoilSheetLayoutQuadStrand(FsQ, FsCells, FsSegments, FsSublayers, FsFillFactor, &
                j, alpha, beta, Basis, np, FsK, FsJ)
+           SkinEnergy = 0._dp
            IF (FsK > 0) THEN
              FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
              FsK = FoilSheetLayerCell(FsSublayers, FsK)
@@ -1798,6 +1800,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              ! and foil winding kernels), so E = J/sigma_s.
              IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
                imag_value = LagrangeVar % Values(VvarId+FsDof) + im * LagrangeVar % Values(VvarId+FsDof+1)
+               ! The skin reactance of a complex sheet conductivity is an inductance
+               ! of the strand the field does not hold: 1/2 Im(1/sigma_s)/omega |J|^2
+               ! with peak phasors, as the strand impedance of the circuit has it.
+               IF (Omega > 0._dp) SkinEnergy = 0.5_dp * FsSigmaRef**2 * ABS(imag_value)**2 * &
+                   SUM(wvec**2) * AIMAG(1._dp / CMat_ip(3,3)) / Omega
                imag_value = -FsSigmaRef * imag_value / CMat_ip(3,3)
                E(1,:) = E(1,:) + REAL(imag_value) * wvec
                E(2,:) = E(2,:) + AIMAG(imag_value) * wvec
@@ -2205,7 +2212,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        END IF
 
        ! The skin ladder's inductor (transient) or the reactance of a complex sigma
-       ! 33 (harmonic) of a stranded coil stores energy outside B, linearly.
+       ! 33 (harmonic) of a stranded coil or a foil sheet strand stores energy
+       ! outside B, linearly.
        w_dens = w_dens + SkinEnergy
        HdotB = HdotB + 2._dp * SkinEnergy
 

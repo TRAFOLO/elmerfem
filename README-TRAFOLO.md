@@ -55,8 +55,9 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   normalized winding vector (0.125 % off the circuit's reactive power in the test, 2.5e-7 now); the
   skin heat keeps the normalized vector, like the DC and the harmonic loss it converges to. These
   blocks report coenergy = energy. Harmonic energies are peak-phasor values, twice the time average.
-  Foil sheet blocks are not covered: their transient ladder storage and harmonic skin reactance are
-  still missing. The ladder order limit is `MaxHomogLadderOrder` (`CircuitUtils`). Tests:
+  Foil sheet blocks: the harmonic skin reactance of the strands, 1/2 Im(1/sigma_s)/omega |J|^2, counts
+  too (1.5 % of the inductance in `circuits_harmonic_foilsheet_energy`); their transient ladder and
+  skin storage are still missing. The ladder order limit is `MaxHomogLadderOrder` (`CircuitUtils`). Tests:
   `circuits_harmonic_stranded_homogenization_energy` (W against the coil's reactive power, complex
   `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy` (mean W over a
   period against the BDF2-corrected reactive power).
