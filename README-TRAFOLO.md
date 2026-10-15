@@ -41,6 +41,25 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   (the state is not in restart files). The stranded coil's flux coupling takes the variable-step
   BDF weights (`TransientLadderBDF`) instead of a fixed 1.5/-2/0.5. Tests:
   `circuits_transient_stranded_skinladder_dc`, `_sine`, `_rl`, `_energy`, `_fatal`.
+- Magnetic energy of homogenized litz windings (`CalcFields`, DEV-1590). `res: Magnetic Field
+  Energy` (with `Separate Magnetic Energy`) now holds what a stranded coil with `Homogenization
+  Model` stores, so that a harmonic 2 W/(VF |I|^2), I the peak current, is the circuit's inductance.
+  Harmonic: 1/2 Re(nu) |B|^2 of the homogenized tensor, rotated at the integration point as
+  WhitneyAVHarmonicSolver assembles it, and 1/2 Im(1/sigma 33)/omega |J|^2 for the reactance of a
+  complex `Sigma 33` (none at 0 Hz or with an explicit `Resistance`); with or without `Calculate
+  Homogenization Loss`, which before decided whether the coil counted at all (12.7 % low in the test
+  with it, the material reluctivity without it). Transient: the Foster ladder storage y0 B^2/2 + sum
+  r xi (B - xi/2) in the local Alpha/Beta frame from the published `Xi Alpha`/`Xi Beta` states (3D),
+  and the skin inductor's L chi^2/2, chi = I - tau q; before, the material reluctivity (6 % low).
+  The skin inductor energy takes the circuit's weight N_j^2 |w|^2, as K does, instead of the
+  normalized winding vector (0.125 % off the circuit's reactive power in the test, 2.5e-7 now); the
+  skin heat keeps the normalized vector, like the DC and the harmonic loss it converges to. These
+  blocks report coenergy = energy. Harmonic energies are peak-phasor values, twice the time average.
+  Foil sheet blocks are not covered: their transient ladder storage and harmonic skin reactance are
+  still missing. The ladder order limit is `MaxHomogLadderOrder` (`CircuitUtils`). Tests:
+  `circuits_harmonic_stranded_homogenization_energy` (W against the coil's reactive power, complex
+  `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy` (mean W over a
+  period against the BDF2-corrected reactive power).
 - Windows SIF path handling fix in the Lua layer.
 - `CircuitsAndDynamics` — nonlinear (solution-dependent) lumped circuit elements in
   transient runs: the exported `crt i`/`crt v` variables are refreshed from the latest

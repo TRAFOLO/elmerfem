@@ -876,7 +876,6 @@ CONTAINS
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     INTEGER :: d
-    CHARACTER(LEN=8), PARAMETER :: StrandedXiName(3) = ['Xi Alpha','Xi Beta ','Xi Gamma']
     CHARACTER(LEN=:), ALLOCATABLE :: vname
     INTEGER :: nv
 
@@ -885,7 +884,7 @@ CONTAINS
       IF (XiSet == XiSheet) THEN
         vname = FoilSheetXiName(d)
       ELSE
-        vname = TRIM(StrandedXiName(d))
+        vname = StrandedXiName(d)
       END IF
       XiD(d,XiSet) % var => VariableGet(Solver % Mesh % Variables, vname)
       IF (.NOT. ASSOCIATED(XiD(d,XiSet) % var)) CALL Fatal(Caller, &
@@ -1116,8 +1115,8 @@ CONTAINS
                'Homogenization Ladder Order missing on Component (required when Transient Homogenization = True)')
          END IF
        END IF
-       IF (HomogLadderOrder < 1 .OR. HomogLadderOrder > 6) CALL Fatal(Caller, &
-           'Homogenization Ladder Order must be between 1 and 6')
+       IF (HomogLadderOrder < 1 .OR. HomogLadderOrder > MaxHomogLadderOrder) CALL Fatal(Caller, &
+           'Homogenization Ladder Order must be between 1 and '//I2S(MaxHomogLadderOrder))
 
        IF (HomogLadderOrder_alloc /= HomogLadderOrder) THEN
          IF (ALLOCATED(fos_y0)) DEALLOCATE(fos_y0, fos_r, fos_T, hcoef_n, hcoef_n1)
@@ -1130,12 +1129,10 @@ CONTAINS
        ! One Foster ladder per active direction. GetFosterLadder takes the
        ! Residues/Taus form and, at order 1, the original alpha/Sigma triplet,
        ! so the stranded SIFs are read exactly as before.
-       IF (dir_active(1)) CALL GetFosterLadder(CompParams, 'Nu 11', HomogLadderOrder, &
-                                               fos_y0(1), fos_r(:,1), fos_T(:,1))
-       IF (dir_active(2)) CALL GetFosterLadder(CompParams, 'Nu 22', HomogLadderOrder, &
-                                               fos_y0(2), fos_r(:,2), fos_T(:,2))
-       IF (dir_active(3)) CALL GetFosterLadder(CompParams, 'Nu 33', HomogLadderOrder, &
-                                               fos_y0(3), fos_r(:,3), fos_T(:,3))
+       DO i = 1, 3
+         IF (dir_active(i)) CALL GetFosterLadder(CompParams, HomogNuKey(i), HomogLadderOrder, &
+                                                 fos_y0(i), fos_r(:,i), fos_T(:,i))
+       END DO
 
        ! BDF coefficients for  T_k xi_dot + xi = b.
        ! Stencil: xi_dot(t^{n+1}) ~ (a1*xi^{n+1} + a2*xi^n + a3*xi^{n-1}) / bdf_dt,
@@ -2430,8 +2427,9 @@ END SUBROUTINE LocalConstraintMatrix
     ! xi_*_elem are SCALAR (one value per element, DG-0 storage).
     ! For BDF-2 the RHS history needs xi^n AND xi^{n-1}; r_*_ladder_n_1 is 0 in BDF-1.
     ! Ladder states of this element: xi^n and xi^{n-1}, per pole and per local
-    ! direction. The ladder order is capped at 6, so a fixed shape is enough.
-    REAL(KIND=dp) :: xi_e(6,3), xi_e1(6,3)
+    ! direction. The ladder order is capped at MaxHomogLadderOrder, so a fixed
+    ! shape is enough.
+    REAL(KIND=dp) :: xi_e(MaxHomogLadderOrder,3), xi_e1(MaxHomogLadderOrder,3)
     REAL(KIND=dp) :: h_hist_local(3), h_hist_global(3)
     INTEGER :: xi_perm_idx, xi_off, xd, xk
 
@@ -3800,8 +3798,10 @@ END SUBROUTINE LocalConstraintMatrix
                                         a_loc(:), rotm_loc(:,:,:)
     INTEGER, SAVE :: alloc_n = 0, alloc_nd = 0
     REAL(KIND=dp) :: detJ_loc, rml(3,3), curlA_ip(3), wt, elem_volume
-    REAL(KIND=dp) :: bbar(3), y0l(3), rl(6,3), Tl(6,3), mki(6,3)
-    REAL(KIND=dp) :: xin(6,3), xin1(6,3), xinew(6,3), xdot, p_loss_elem, prox_total, &
+    REAL(KIND=dp) :: bbar(3), y0l(3), rl(MaxHomogLadderOrder,3), Tl(MaxHomogLadderOrder,3), &
+                     mki(MaxHomogLadderOrder,3)
+    REAL(KIND=dp) :: xin(MaxHomogLadderOrder,3), xin1(MaxHomogLadderOrder,3), &
+                     xinew(MaxHomogLadderOrder,3), xdot, p_loss_elem, prox_total, &
                      prox_stranded
     LOGICAL :: dloc(3), stackalpha_loc, sheet_loc
     INTEGER :: dstack_loc, dplane_loc(2)
@@ -3843,7 +3843,7 @@ END SUBROUTINE LocalConstraintMatrix
 
       nlad = GetInteger(cParams, 'Homogenization Ladder Order', found_loc)
       IF (.NOT. found_loc) nlad = 4
-      IF (nlad < 1 .OR. nlad > 6) CYCLE
+      IF (nlad < 1 .OR. nlad > MaxHomogLadderOrder) CYCLE
 
       ! This element's slot in each active direction's Xi variable.
       eperm = 0
@@ -3871,9 +3871,9 @@ END SUBROUTINE LocalConstraintMatrix
       IF (bdf_dt <= 0.0_dp) CYCLE
 
       y0l = 0._dp; rl = 0._dp; Tl = 1._dp
-      IF (dloc(1)) CALL GetFosterLadder(cParams, 'Nu 11', nlad, y0l(1), rl(1:nlad,1), Tl(1:nlad,1))
-      IF (dloc(2)) CALL GetFosterLadder(cParams, 'Nu 22', nlad, y0l(2), rl(1:nlad,2), Tl(1:nlad,2))
-      IF (dloc(3)) CALL GetFosterLadder(cParams, 'Nu 33', nlad, y0l(3), rl(1:nlad,3), Tl(1:nlad,3))
+      DO d = 1, 3
+        IF (dloc(d)) CALL GetFosterLadder(cParams, HomogNuKey(d), nlad, y0l(d), rl(1:nlad,d), Tl(1:nlad,d))
+      END DO
       DO d = 1, 3
         DO k = 1, nlad
           mki(k,d) = 1._dp / (1._dp + (bdf_alpha_1 / bdf_dt) * Tl(k,d))

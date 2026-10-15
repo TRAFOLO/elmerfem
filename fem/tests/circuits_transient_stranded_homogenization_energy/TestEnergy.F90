@@ -15,7 +15,10 @@ SUBROUTINE CheckEnergy(Model, Solver, dt, Transient)
   IF (.NOT. Found) CALL Fatal('CheckEnergy', 'Magnetic energy missing')
   co = GetConstReal(Model % Simulation, 'res: Magnetic Coenergy', Found)
   IF (.NOT. Found) CALL Fatal('CheckEnergy', 'Magnetic coenergy missing')
-  IF (ABS(w-co) > 1.e-12_dp * MAX(ABS(w), 1.e-20_dp)) &
+  ! A guard, not the check: CalcFields sets the litz block's coenergy to its
+  ! energy, so this only fails on a broken total or a nonlinear material.
+  ! The comparisons are written so that a NaN fails too.
+  IF (.NOT. (ABS(w-co) <= 1.e-12_dp * MAX(ABS(w), 1.e-20_dp))) &
       CALL Fatal('CheckEnergy', 'Linear full-state energy and coenergy differ')
 
   ! Discard the first 50 Hz cycle, then Fourier analyze the next 40 samples.
@@ -46,6 +49,6 @@ SUBROUTINE CheckEnergy(Model, Solver, dt, Transient)
     WRITE(Message,'(A,4ES22.12)') 'Final energy, mean energy, circuit energy, relative error: ', &
         w, ew, circuit_w, err
     CALL Info('CheckEnergy', Message, Level=1)
-    IF (err > 2.e-3_dp) CALL Fatal('CheckEnergy', 'Stored energy does not match circuit reactive power')
+    IF (.NOT. (err <= 1.e-5_dp)) CALL Fatal('CheckEnergy', 'Stored energy does not match circuit reactive power')
   END IF
 END SUBROUTINE CheckEnergy

@@ -104,7 +104,7 @@ Solver 7
    Potential Variable = String "A"
    Calculate Current Density = Logical True
    Loss Estimation = Logical True
-   Calculate Homogenization Loss = Logical True
+   ! No 'Calculate Homogenization Loss': the litz energy must not depend on it.
    Separate Magnetic Energy = Logical True
    Calculate Joule Heating = Logical True
    Steady State Convergence Tolerance = 0
@@ -137,9 +137,14 @@ Solver 10
    Variable 1 = String "res: Magnetic Field Energy"
    Variable 2 = String "res: Magnetic Coenergy"
    Show Norm Index = Integer 1
-   ! Energy equals coenergy (linear materials) and 1/4 L I^2 from the circuit voltage.
-   Reference Norm = 1.935110813867E-003
+   ! Pins the energy; Solver 11 checks it against the circuit's reactive power.
+   Reference Norm = 1.968684881491E-003
    Reference Norm Tolerance = 1.0e-5
+End
+Solver 11
+   Exec Solver = After timestep
+   Equation = "Check energy"
+   Procedure = "TestEnergy" "CheckHarmonicEnergy"
 End
 Equation 1
    Active Solvers(2) = 6 7
@@ -208,6 +213,8 @@ Component 1
    Nu 33 = Real $ 773655      ! these are not physical
    Nu 33 im = Real $ 259371   ! 
    Sigma 33 = Real 9e7
+   ! Inductive, as TRAFOLO writes it: the circuit sees a reactance the field does not hold.
+   Sigma 33 im = Real -2e7
    Number of Turns = Real 144
    Electrode Area = Real 0.000185614878383
    Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)

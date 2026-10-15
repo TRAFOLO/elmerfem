@@ -150,7 +150,7 @@ Solver 11
    Show Norm Index = Integer 1
    ! At the final current zero the internal ladder states still store energy.
    ! CheckEnergy also checks full-state coenergy and mean circuit reactive power.
-   Reference Norm = Real 1.037144725642e-5
+   Reference Norm = Real 1.048761791239e-5
    Reference Norm Tolerance = Real 1.0e-5
 End
 Equation 1
