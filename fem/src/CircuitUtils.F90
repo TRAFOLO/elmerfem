@@ -54,6 +54,13 @@ MODULE CircuitUtils
     ! constant step; the transient ladders follow it.
     REAL(KIND=dp), PARAMETER :: ConstantStepTolerance = 1.0e-6_dp
 
+    ! Highest 'Homogenization Ladder Order' of a Foster reluctivity ladder. It
+    ! sizes the fixed ladder arrays of the solvers and post processing.
+    INTEGER, PARAMETER :: MaxHomogLadderOrder = 6
+
+    ! Local directions of a homogenized block, in the order of RotM's columns.
+    CHARACTER(LEN=5), PARAMETER :: HomogDirName(3) = ['Alpha', 'Beta ', 'Gamma']
+
     !> Element quadrature of the foil sheet strand integrals, shared by the
     !> harmonic and the transient kernel and by the strand checks. A linear tet
     !> keeps its pieces as barycentric centroids and volume fractions; a linear
@@ -716,8 +723,8 @@ CONTAINS
 !------------------------------------------------------------------------------
     IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal('GetFosterLadder', &
         'Component parameters not associated when reading "' // TRIM(name) // '"')
-    IF (n_ladder < 1 .OR. n_ladder > 6) CALL Fatal('GetFosterLadder', &
-        'Homogenization Ladder Order must be between 1 and 6')
+    IF (n_ladder < 1 .OR. n_ladder > MaxHomogLadderOrder) CALL Fatal('GetFosterLadder', &
+        'Homogenization Ladder Order must be between 1 and '//I2S(MaxHomogLadderOrder))
 
     key = TRIM(name) // ' y0'
     y0 = GetConstReal(CompParams, key, Found)
@@ -852,7 +859,7 @@ CONTAINS
     INTEGER, INTENT(IN)        :: n_ladder
     REAL(KIND=dp), INTENT(OUT) :: nu_inf, res(n_ladder), taus(n_ladder)
 
-    INTEGER, PARAMETER :: MAXN = 6
+    INTEGER, PARAMETER :: MAXN = MaxHomogLadderOrder
     REAL(KIND=dp) :: c(MAXN), tau(MAXN), den(0:MAXN), num(0:MAXN), prod(0:MAXN)
     REAL(KIND=dp) :: cmat(MAXN,MAXN), wr(MAXN), wi(MAXN), vdum(1,1), work(8*MAXN)
     REAL(KIND=dp) :: mu0, cst, sk, dval, dnum, leadD, leadN
@@ -860,7 +867,7 @@ CONTAINS
 
     IF (n_ladder < 1 .OR. n_ladder > MAXN) &
         CALL Fatal('FoilSheetNuFoster', &
-            'Foil sheet: "Homogenization Ladder Order" must be between 1 and 6!')
+            'Foil sheet: "Homogenization Ladder Order" must be between 1 and '//I2S(MAXN)//'!')
     mu0 = 4.0d-7 * PI
 
     DO n = 1, n_ladder
@@ -1097,7 +1104,22 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-!> Reluctivity keyword of a local direction: 'Nu 11', 'Nu 22' or 'Nu 33'.
+!> Reluctivity keyword of a local direction of a homogenized block: 'Nu 11',
+!> 'Nu 22' or 'Nu 33'.
+!------------------------------------------------------------------------------
+  FUNCTION HomogNuKey(d) RESULT(key)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: d
+    CHARACTER(LEN=5) :: key
+
+    WRITE(key,'(A,I1,I1)') 'Nu ', d, d
+!------------------------------------------------------------------------------
+  END FUNCTION HomogNuKey
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Reluctivity keyword of a local direction of a foil sheet.
 !------------------------------------------------------------------------------
   FUNCTION FoilSheetNuKey(d) RESULT(key)
 !------------------------------------------------------------------------------
@@ -1105,7 +1127,7 @@ CONTAINS
     INTEGER :: d
     CHARACTER(LEN=5) :: key
 
-    WRITE(key,'(A,I1,I1)') 'Nu ', d, d
+    key = HomogNuKey(d)
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetNuKey
 !------------------------------------------------------------------------------
@@ -1121,11 +1143,26 @@ CONTAINS
     IMPLICIT NONE
     INTEGER :: d
     CHARACTER(LEN=:), ALLOCATABLE :: vname
-    CHARACTER(LEN=5), PARAMETER :: DirName(3) = ['Alpha', 'Beta ', 'Gamma']
 
-    vname = 'Foil Sheet Xi '//TRIM(DirName(d))
+    vname = 'Foil Sheet Xi '//TRIM(HomogDirName(d))
 !------------------------------------------------------------------------------
   END FUNCTION FoilSheetXiName
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Elemental reluctivity ladder state of a homogenized stranded winding along
+!> local direction d, which its SIF declares as an -elem Exported Variable with
+!> 'Homogenization Ladder Order' dofs.
+!------------------------------------------------------------------------------
+  FUNCTION StrandedXiName(d) RESULT(vname)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: d
+    CHARACTER(LEN=:), ALLOCATABLE :: vname
+
+    vname = 'Xi '//TRIM(HomogDirName(d))
+!------------------------------------------------------------------------------
+  END FUNCTION StrandedXiName
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -4329,7 +4366,7 @@ END FUNCTION isComponentName
     LOGICAL :: StackAlongAlpha
     INTEGER :: nSub
     REAL(KIND=dp) :: tfoil, ff, sgm, tau0, sdc, mu0
-    REAL(KIND=dp) :: nuinf, rr(6), tt(6), arr(6,1)
+    REAL(KIND=dp) :: nuinf, rr(MaxHomogLadderOrder), tt(MaxHomogLadderOrder), arr(MaxHomogLadderOrder,1)
     INTEGER :: nlad, nlk, dStack, dPlane(2), d
     LOGICAL :: FoundT, FoundF, FoundS, HavePhys, Homog, Found, Transient
     LOGICAL :: SigmaVaries
