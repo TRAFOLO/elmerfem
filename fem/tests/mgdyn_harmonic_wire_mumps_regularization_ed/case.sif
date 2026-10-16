@@ -232,10 +232,10 @@ Boundary Condition 6
 End
 
 
-! Joule heating, coil current and its components: the iterative solver converged to 1e-12 gives
-! 1.57903430E+03, 1.51582278E-06, 0.147238365 and 2.73515479E-02, MUMPS without the shift the
-! values below. The norm of the potential depends on the gauge (iterative 6.6e-6, MUMPS without
-! the shift 3.6e-5).
+! Joule heating, eddy current power and the coil current components: the iterative solver
+! converged to 1e-12 gives 1.57903430E+03, 1.51582278E-06, 0.147238365 and 2.73515479E-02, MUMPS
+! without the shift the values below. The norm of the potential depends on the gauge (iterative
+! 6.6e-6, MUMPS without the shift 3.6e-5).
 Solver 1 :: Reference Norm = 1.1417037E-05
 Solver 1 :: Reference Norm Tolerance = 0.05
 Solver 3 :: Reference Norm = 1.57903429E+03

@@ -235,11 +235,11 @@ Boundary Condition 6
 End
 
 
-! Joule heating, coil current and its components: the iterative solver of mgdyn_harmonic_wire
-! converged to 1e-14 gives 1.57903428E+03, 1.51582277E-06, 0.14723836 and -2.7351547E-02
-! (its 1e-8 stops 2.3e-4 off). The norm of the potential depends on the gauge (4.62e-6 on one
-! rank, 4.73e-6 on two): it shows that the shifted factorization leaves no large gauge component
-! (without the shift MUMPS returns a norm of 5.2e-5).
+! Joule heating, eddy current power and the coil current components: the iterative solver of
+! mgdyn_harmonic_wire converged to 1e-14 gives 1.57903428E+03, 1.51582277E-06, 0.14723836 and
+! -2.7351547E-02 (its 1e-8 stops 2.3e-4 off). The norm of the potential depends on the gauge
+! (4.62e-6 on one rank, 4.73e-6 on two): it shows that the shifted factorization leaves no large
+! gauge component (without the shift MUMPS returns a norm of 5.2e-5).
 Solver 1 :: Reference Norm = 4.6222758E-06
 Solver 1 :: Reference Norm Tolerance = 0.05
 Solver 3 :: Reference Norm = 1.57903429E+03
