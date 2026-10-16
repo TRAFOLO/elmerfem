@@ -209,6 +209,7 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   LOGICAL :: Stat, TG, Jfix, JfixSolve, LaminateStack, CoilBody, EdgeBasis,LFact,LFactFound
   LOGICAL :: PiolaVersion, SecondOrder, GotHbCurveVar, HasTensorReluctivity
   LOGICAL :: ExtNewton, StrandedHomogenization
+  LOGICAL :: LamLayerHasNormal, LamSheet
   LOGICAL, ALLOCATABLE, SAVE :: TreeEdges(:)
   LOGICAL, SAVE :: CircuitGaugeWarned = .FALSE., ElectroDynamicsGaugeWarned = .FALSE.
 
@@ -229,6 +230,10 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   REAL(KIND=dp), POINTER :: Cwrk(:,:,:), Cwrk_im(:,:,:), LamThick(:)
   REAL(KIND=dp), POINTER :: sValues(:), fixpot(:)
   REAL(KIND=dp) :: NewtonTol
+  ! 'layered' laminate stack model of the current body
+  REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
+  REAL(KIND=dp), ALLOCATABLE :: SheetLamThick(:)
+  COMPLEX(KIND=dp), ALLOCATABLE :: SheetCond(:)
   
   CHARACTER(LEN=MAX_NAME_LEN):: LaminateStackModel, CoilType, HbCurveVarName
 
@@ -248,7 +253,8 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
 
   
   SAVE MASS, STIFF, LOAD, ReLOAD, FORCE, Tcoef, JFixVec, JFixFORCE, Acoef, Acoef_t, &
-     Cwrk, Cwrk_im, LamCond, LamThick, AllocationsDone, RotM, GapLength, MuParameter, SkinCond
+     Cwrk, Cwrk_im, LamCond, LamThick, AllocationsDone, RotM, GapLength, MuParameter, SkinCond, &
+     SheetLamThick, SheetCond
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN
 
@@ -316,7 +322,7 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
      ALLOCATE( FORCE(N), LOAD(7,N), ReLOAD(3,N), STIFF(N,N), MASS(n,n), &
           JFixVec(3,N),JFixFORCE(n), Tcoef(3,3,N), RotM(3,3,N), &
           GapLength(N), MuParameter(N), SkinCond(N), Acoef(N), LamCond(N), &
-          LamThick(N), STAT=istat )
+          LamThick(N), SheetLamThick(N), SheetCond(N), STAT=istat )
      IF ( istat /= 0 ) THEN
         CALL Fatal( 'WhitneyAVHarmonicSolver', 'Memory allocation error.' )
      END IF
@@ -546,6 +552,27 @@ CONTAINS
            IF (.NOT. Found) CALL Fatal('WhitneyAVHarmonicSolver', 'Laminate Stack Conductivity not found!')
            LamCond(1:n) = CMPLX( REAL(LamCond(1:n)), &
                   GetReal( Material, 'Electric Conductivity im',  Found), KIND=dp)
+         CASE('layered')
+           ! Anisotropic complex reluctivity of insulated laminations. The net
+           ! currents of the laminations are carried by 'Thin Sheet Laminate
+           ! Thickness' boundaries on their mid-surfaces, so this body itself
+           ! should be given zero conductivity.
+           IF (ListCheckPresent(Material, 'H-B Curve') .OR. HasTensorReluctivity) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'The layered laminate stack model needs a scalar linear permeability!')
+           ! the lamination sheets take a real permeability, and the sheet
+           ! correction holds only for the same mu in body and sheets
+           IF (ANY(ABS(AIMAG(Acoef(1:n))) > AEPS * ABS(Acoef(1:n)))) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'The layered laminate stack model needs a real permeability!')
+           IF (ANY(ABS(Tcoef(:,:,1:n)) > AEPS)) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'A layered laminate stack body must have zero Electric Conductivity!')
+           IF (CoilBody) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'A layered laminate stack body cannot be a coil component!')
+           CALL GetLaminateLayeredParameters(Material, LamLayerThick, LamLayerCond, &
+               LamLayerFill, LamLayerNormal, LamLayerHasNormal)
          CASE DEFAULT
            CALL WARN('WhitneyAVHarmonicSolver', 'Nonexistent Laminate Stack Model chosen!')
          END SELECT
@@ -654,14 +681,32 @@ CONTAINS
            CALL LocalMatrixSkinBC(MASS,STIFF,FORCE,SkinCond,MuParameter,Element,CircuitDrivenBC,n,nd)
          ELSE         
            GapLength = GetConstReal( BC, 'Thin Sheet Thickness', Found)
-           IF (Found) THEN
+           SheetLamThick = GetConstReal( BC, 'Thin Sheet Laminate Thickness', LamSheet)
+           IF (Found .OR. LamSheet) THEN
              MuParameter=GetConstReal( BC, 'Thin Sheet Relative Permeability', Found)
              IF (.NOT. Found) MuParameter = 1.0_dp ! if not found default to "air" property
              ! Technically, there is no skin but why create yet another conductivity variable?
              SkinCond = GetConstReal( BC, 'Thin Sheet Electric Conductivity', Found)
              IF (.NOT. Found) SkinCond = 1.0_dp ! if not found default to "air" property
-             CALL LocalMatrixThinSheet( MASS, STIFF, FORCE, LOAD, GapLength, MuParameter, &
-                                            SkinCond, Element, n, nd )
+             IF (LamSheet) THEN
+               ! One insulated lamination of a 'layered' stack: the sheet on its
+               ! mid-surface carries its net current. The stack body holds the
+               ! lamination's magnetic energy, so there is no magnetic term here
+               ! and the conductance factor compensates the part of the
+               ! net-current impedance the body already holds.
+               Omega = GetAngularFrequency(Found=Found)
+               DO i = 1, n
+                 SheetCond(i) = SkinCond(i) * LaminateSheetFactor(Omega, &
+                     CMPLX(VacuumPermeability() * MuParameter(i), 0.0_dp, KIND=dp), &
+                     SkinCond(i), SheetLamThick(i))
+               END DO
+               CALL LocalMatrixThinSheet( MASS, STIFF, FORCE, LOAD, SheetLamThick, MuParameter, &
+                                              SheetCond, .FALSE., Element, n, nd )
+             ELSE
+               SheetCond(1:n) = SkinCond(1:n)
+               CALL LocalMatrixThinSheet( MASS, STIFF, FORCE, LOAD, GapLength, MuParameter, &
+                                              SheetCond, .TRUE., Element, n, nd )
+             END IF
            ELSE
              CALL LocalMatrixBC(MASS,STIFF,FORCE,LOAD,Acoef,Element,n,nd )
            END IF
@@ -1532,7 +1577,10 @@ END BLOCK
          END SELECT
        END IF
 
-       IF (HasTensorReluctivity) THEN
+       IF (LaminateStack .AND. LaminateStackModel == 'layered') THEN
+         Nu = LaminateLayeredReluctivity(Omega, mu, LamLayerCond, LamLayerThick, &
+             LamLayerFill, LamLayerNormal, LamLayerHasNormal)
+       ELSE IF (HasTensorReluctivity) THEN
          IF (SIZE(Acoef_t,2) == 1) THEN
            Nu = CMPLX(0._dp, 0._dp, kind=dp)
            DO i = 1,3
@@ -1920,18 +1968,21 @@ END BLOCK
 
 !------------------------------------------------------------------------------
   SUBROUTINE LocalMatrixThinSheet(MASS, STIFF, FORCE, LOAD, Thickness, Permeability, &
-                                          Conductivity, Element, n, nd )
+                                          Conductivity, MagneticTerm, Element, n, nd )
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     COMPLEX(KIND=dp) :: LOAD(:,:)
     COMPLEX(KIND=dp) :: MASS(:,:), STIFF(:,:), FORCE(:)
+    COMPLEX(KIND=dp) :: Conductivity(:)
+    LOGICAL :: MagneticTerm
     INTEGER :: n, nd
     TYPE(Element_t), POINTER :: Element, Parent, Edge
 !------------------------------------------------------------------------------
     REAL(KIND=dp) :: Basis(n),dBasisdx(n,3),DetJ
     REAL(KIND=dp) :: WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: Thickness(:), Permeability(:), Conductivity(:)
-    REAL(KIND=dp) :: sheetThickness, mu, muVacuum, C
+    REAL(KIND=dp) :: Thickness(:), Permeability(:)
+    REAL(KIND=dp) :: sheetThickness, mu, muVacuum
+    COMPLEX(KIND=dp) :: C
 
     COMPLEX(KIND=dp) :: DAMP(nd,nd)
     
@@ -2005,8 +2056,10 @@ END BLOCK
            q = j+np
            ! Magnetic energy term due to the magnetic flux density 
            ! ----------------------------------------------------
-           STIFF(p,q) = STIFF(p,q) + sheetThickness / (mu*muVacuum) * &
-              SUM(RotWBasis(i,:)*RotWBasis(j,:))*detJ*IP%s(t)
+           IF (MagneticTerm) THEN
+             STIFF(p,q) = STIFF(p,q) + sheetThickness / (mu*muVacuum) * &
+                SUM(RotWBasis(i,:)*RotWBasis(j,:))*detJ*IP%s(t)
+           END IF
 
            ! Compute the conductivity term <j * omega * C A x n,eta x n> 
            ! for stiffness matrix (without anisotropy taken into account)

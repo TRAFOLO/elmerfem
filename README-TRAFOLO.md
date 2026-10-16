@@ -219,6 +219,32 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Nonlinear System Linesearch` or `Nonlinear System Compute Change in Scaled System` (both stop
   with an error). Tests: `mgdyn_bh_flux_density` (static, iterative),
   `mgdyn_harmonic_flux_density` (harmonic, linear: stops at iteration 2).
+- `layered` laminate stack model of the harmonic A-V solver (DEV-1600), for stacks of insulated
+  laminations whose thickness d exceeds the skin depth. A body with `Laminate Stack Model =
+  "layered"`, `Laminate Thickness` d, `Laminate Stack Conductivity` sigma, `Laminate Stacking
+  Factor` F (new, default 1) and `Laminate Normal(3)` (new, optional) gets the reluctivity tensor
+  nu_par = 1/(F mu g + (1-F) mu0) in the lamination plane and nu_perp = F nu + (1-F)/mu0 along the
+  normal, g = tanh(x)/x, x = sqrt(i omega mu sigma) d/2 (`LaminateLayeredReluctivity` in `Utils`);
+  without a normal (corner bodies, where the laminations bend) nu_par in every direction. The body
+  must have zero conductivity: the net current of every lamination flows in a `Thin Sheet` boundary
+  on its mid-surface with the new keyword `Thin Sheet Laminate Thickness` d (and `Thin Sheet
+  Electric Conductivity`, `Thin Sheet Relative Permeability` of the lamination), which gives the
+  sheet the complex conductance sigma d sinh(kd)/(kd) and no magnetic term (`LaminateSheetFactor`):
+  the body already holds i omega mu g d/4 of the net-current impedance, and with this factor the
+  impedance between the lamination faces is the exact x coth(x)/(sigma d). `CalcFields` uses the
+  same tensor for H and the energy, adds the sheets' reactive part to the field energy and
+  publishes `res: Laminate stack loss`: the Im(nu) loss of the bodies plus the sheet loss; only the
+  sum is meaningful, the sheet part alone can be negative (d of about 3-5 skin depths). The loss is
+  not in the `Joule Heating` field (no thermal coupling yet). An H-B curve, a tensor or complex
+  permeability, a nonzero conductivity or a coil component in a `layered` body, and `layered` in
+  the transient solver, stop with a Fatal. Validated against a resolved model of three 8 um NiFe
+  laminations (mu_r 190, 1.67 MS/m) around a copper bar, 1 MHz - 1 GHz, single bar and a pair 20 um
+  apart in and out of phase: R -3.2 .. +0.9 %, L -0.3 .. +2.5 % (the tensor alone: L up to +9.8 %).
+  Test: `mgdyn_laminate_layered_harmonic` (MUMPS).
+- `res: Thin sheet current power` (`CalcFields`) evaluates the sheet field with the DOF counts and
+  the edge basis of the potential solver, on the same mesh face as the assembly (DEV-1600). Before,
+  it took its own solver's counts and a Piola basis and reported about 1e9 W instead of 1e-2 W in a
+  3-D harmonic model with the default edge elements.
 
 ## Building the distributed bundle
 

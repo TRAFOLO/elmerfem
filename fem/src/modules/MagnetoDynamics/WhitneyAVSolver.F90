@@ -1229,6 +1229,8 @@ CONTAINS
          LamCond(1:n) = GetReal( Material, 'Laminate Stack Conductivity', Found )
          IF (.NOT. Found) CALL Fatal(Caller, 'Laminate Stack Conductivity not found!')
 
+       CASE('layered')
+         CALL Fatal(Caller, 'The layered laminate stack model is only available in the harmonic solver!')
        CASE DEFAULT
          CALL WARN(Caller, 'Nonexistent Laminate Stack Model chosen!')
        END SELECT
