@@ -219,6 +219,15 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Nonlinear System Linesearch` or `Nonlinear System Compute Change in Scaled System` (both stop
   with an error). Tests: `mgdyn_bh_flux_density` (static, iterative),
   `mgdyn_harmonic_flux_density` (harmonic, linear: stops at iteration 2).
+- Harmonic core loss independent of the source phase (DEV-1599). `MagnetoDynamicsCalcFields`
+  evaluated the `Harmonic Loss` terms on Re B and Im B separately and summed them, so for a field
+  exponent other than 2 the loss changed when every source was turned by the same angle (unit cube,
+  45 degrees: +14 % at exponent 1.6, -16 % at 2.5). The terms are now evaluated on the major and
+  minor semi-axes of the elliptical B, which do not depend on the phase; a unidirectional field
+  gives the Steinmetz law at its peak B, exponent 2 and real fields (transient runs) give the
+  previous values exactly. `ComponentLoss` and its log lines refer to the two axes. Upstream Elmer
+  (devel) and `FourierLoss` (for each harmonic's cos/sin pair) have the same per-mode sum. Test:
+  `mgdyn_harmonic_loss_phase`.
 
 ## Building the distributed bundle
 

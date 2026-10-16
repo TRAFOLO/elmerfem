@@ -630,7 +630,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: SheetPower   ! transient foil sheet Joule loss, a part of Power
    INTEGER :: SheetPowerSeen     ! 1 where a transient foil sheet contributed to it
    REAL(KIND=dp) :: localThickness
-   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ModeLoss(2), ValAtIP
+   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ModeLoss(2), BSq(2), AxisSq(2), &
+       BRe(3), BIm(3), BScale
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
@@ -2466,9 +2467,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            jh_k = k
          END IF
          
-         !-------------------------------------------------
-         ! Compute a loss estimate for cos and sin modes:
-         !-------------------------------------------------
+         !-------------------------------------------------------
+         ! Compute a loss estimate on the principal axes of B:
+         !-------------------------------------------------------
          IF (LossEstimation) THEN
            BodyLoss(3,BodyId) = BodyLoss(3,BodyId) + Coeff
 
@@ -2489,12 +2490,30 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            
            ! No losses to add if loss coefficient is not given
            IF( Found .OR. MaterialExponents ) THEN
-             ! Per mode into ComponentLoss, both modes once into BodyLoss and the nodal field
+             ! The loss law holds for a unidirectional sinusoidal B. Re B and Im B are two instants of an
+             ! elliptical B whose time origin is arbitrary, so each mode on its own depends on the source phase;
+             ! the principal axes of the ellipse do not: Bmaj^2 + Bmin^2 = |Re B|^2 + |Im B|^2 and
+             ! Bmaj * Bmin = |Re B x Im B|. Per axis into ComponentLoss, both axes once into BodyLoss and the field.
+             BSq(1) = SUM( B(1,1:3) ** 2 )
+             BSq(2) = SUM( B(2,1:3) ** 2 )
+             IF( BSq(1) == 0.0_dp .OR. BSq(2) == 0.0_dp ) THEN
+               ! A real-valued field (transient runs) keeps exactly the values of the per-mode sum
+               AxisSq(1) = BSq(1) + BSq(2)
+               AxisSq(2) = 0.0_dp
+             ELSE
+               ! Scaled by the largest component, so that no fourth power over- or underflows
+               BScale = MAXVAL( ABS( B(1:2,1:3) ) )
+               BRe = B(1,1:3) / BScale
+               BIm = B(2,1:3) / BScale
+               AxisSq(1) = 0.5_dp * ( SUM( BRe ** 2 ) + SUM( BIm ** 2 ) ) &
+                   + SQRT( 0.25_dp * ( SUM( BRe ** 2 ) - SUM( BIm ** 2 ) ) ** 2 + SUM( BRe * BIm ) ** 2 )
+               AxisSq(2) = SUM( CrossProduct( BRe, BIm ) ** 2 ) / AxisSq(1) * BScale ** 2
+               AxisSq(1) = AxisSq(1) * BScale ** 2
+             END IF
              ElemLoss = 0.0_dp
              DO l=1,2
-               ValAtIP = SUM( B(l,1:3) ** 2 )
-               ModeLoss(1) = s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( ValAtIp ** FieldPower(1) )
-               ModeLoss(2) = s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( ValAtIp ** FieldPower(2) )
+               ModeLoss(1) = s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( AxisSq(l) ** FieldPower(1) )
+               ModeLoss(2) = s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( AxisSq(l) ** FieldPower(2) )
                ComponentLoss(:,l) = ComponentLoss(:,l) + ModeLoss
                ElemLoss = ElemLoss + ModeLoss
              END DO
@@ -3176,9 +3195,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        ELSE
          CALL Info(Caller,'Harmonic Loss Quadratic by components',Level=6)
        END IF
-       WRITE( Message,'(A,ES15.6)') 'Loss for cos mode: ', ComponentLoss(k,1)
+       WRITE( Message,'(A,ES15.6)') 'Loss along the major axis: ', ComponentLoss(k,1)
        CALL Info(Caller, Message, Level=6 )
-       WRITE( Message,'(A,ES15.6)') 'Loss for sin mode: ', ComponentLoss(k,2)
+       WRITE( Message,'(A,ES15.6)') 'Loss along the minor axis: ', ComponentLoss(k,2)
        CALL Info(Caller, Message, Level=6 )
        WRITE( Message,'(A,ES15.6)') 'Total loss: ',TotalLoss(k)
        CALL Info(Caller,Message, Level=5 )
