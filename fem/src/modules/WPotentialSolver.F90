@@ -279,6 +279,8 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
        IF (Found) CoilBody = .TRUE.
      END IF 
      WCoilType = CoilType
+     ! Each element takes "Without RotM" from its own component.
+     NoRotM = .FALSE.
 
       IF (CoilBody) THEN
         SELECT CASE (CoilType)
@@ -384,6 +386,8 @@ SUBROUTINE Wsolve( Model,Solver,dt,TransientSimulation )
        IF (Found) CoilBody = .TRUE.
      END IF 
      WCoilType = CoilType
+     ! Each element takes "Without RotM" from its own component.
+     NoRotM = .FALSE.
 
       IF (CoilBody) THEN
         SELECT CASE (CoilType)
