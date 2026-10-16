@@ -99,7 +99,8 @@ Solver 6  !---- MagnetoDynamics, WhitneyAVSolver
    Linear System Solver = Iterative
    Linear System Iterative Method = BicgstabL
    Linear System preconditioning = none
-   Linear System Convergence Tolerance = 1.0e-10
+   ! Without preconditioning the solve can stall just above 1e-10.
+   Linear System Convergence Tolerance = 1.0e-9
    Linear System Abort Not Converged = True
    Linear System Max Iterations = 3000
    Linear System Residual Output = 1000
