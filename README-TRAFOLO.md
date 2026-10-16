@@ -228,7 +228,8 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   and the point counts are now set per call, and the cache is initialized once, under a lock.
   TRAFOLO's thermal runs use `HeatSolve`, which assembles serially and does not call it;
   `StatElecSolve` calls it in a threaded loop, but with first-order elements and no integration
-  keywords the race only rewrote equal values.
+  keywords the race only rewrote equal values. The distributed bundle is built without OpenMP,
+  so shipped TRAFOLO never ran these loops threaded; the failure showed in threaded test builds.
 
 ## Building the distributed bundle
 
