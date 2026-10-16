@@ -137,6 +137,13 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   solver stopped with a segmentation fault after "Coils touch at ... nodes"). Reached with
   ElmerGrid `-metis` partitions on 4 or more ranks. Test:
   `circuits_harmonic_foilsheet_touching_partition`.
+- `Wsolve` takes `Without RotM` per element from its own component (DEV-1559). Before, the flag
+  that a stranded coil with `Without RotM = True` set stayed on for the foil winding, flat wire and
+  foil sheet elements visited after it, so their W was solved with the foil conductivity tensor
+  left in the global axes instead of the foil's frame. TRAFOLO writes `Without RotM` for every
+  non-homogenized stranded coil, so models mixing such a coil with foil windings could get foil
+  losses up to ~30 % too high, depending on element order and partitioning. Test:
+  `circuits_harmonic_foil_stranded_norotm`.
 - The Lagrange multiplier separated from the collection solution (`SolveWithLinearRestriction`)
   follows `Nonlinear System Relaxation Factor` (and `Nonlinear System Relaxation After`) unless
   `Lagrange Multiplier Relaxation Factor` is given, so the exported circuit voltages and currents
