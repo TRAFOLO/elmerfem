@@ -184,6 +184,17 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   setup gave 0.11 J field energy instead of 0.6165 J with exit code 0, while `Use Tree Gauge =
   False` with `Mumps Null Pivot Detection = True` (tested with tolerance 1e-13) and `Mumps
   Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
+- `Mumps Drop Zeros = True` (complex systems, `ZMumps_SolveSystem`, DEV-1564) leaves the
+  off-diagonal entries that are exactly zero out of the matrix given to MUMPS and logs how many.
+  The couplings of Dirichlet dofs are zeroed but stay in the sparsity pattern, where they enter
+  the ordering and the fill of the factors. The equations do not change; in the tests the
+  results agree with the solve without the option. In the A-V system the edge-potential
+  couplings of non-conducting regions are zero as well: in `mgdyn_harmonic_wire_mumps_drop_zeros`
+  a third of the entries are left out, the factors have 21 to 27 % fewer entries and their
+  computation 36 % fewer flops. The effect depends on the ordering MUMPS picks: on small systems
+  ordered by AMF the factors can grow. Tests: `mgdyn_harmonic_wire_mumps_drop_zeros` (with
+  `Mumps Diagonal Regularization`), `VectorHelmholtzWaveguideMumpsDropZeros` (PEC walls), both on
+  1 and 2 ranks.
 - Failures a caller can see (DEV-1560). A missing solver procedure and a MATC error in the SIF
   exit with status 1 instead of 0 (`Load.c`), and the MATC message no longer prints the
   unterminated Fortran buffer. `Fatal` aborts all MPI ranks (`MPI_Abort`, logged as

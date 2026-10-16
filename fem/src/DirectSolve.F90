@@ -917,6 +917,52 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> 'Mumps Drop Zeros': leaves the off-diagonal entries that are exactly zero out
+!> of the complex matrix given to MUMPS. The couplings of Dirichlet dofs are
+!> zeroed but stay in the sparsity pattern, where they enter the ordering and
+!> the fill of the factors. The equations do not change; the ordering does, and
+!> with it the rounding and, for a singular system factorized with null-pivot
+!> detection, the null-space part of the solution. Collective over the MUMPS
+!> communicator.
+!------------------------------------------------------------------------------
+  SUBROUTINE ZMumpsDropZeros( A )
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPI_MODULE)
+    USE mpi
+#  endif
+#endif
+    TYPE(Matrix_t) :: A
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPIF_HEADER)
+    INCLUDE 'mpif.h'
+#  endif
+    INTEGER :: i, n, ierr
+    REAL(KIND=dp) :: counts(2), total(2)
+
+    n = 0
+    DO i=1,A % ZMumpsID % nz_loc
+      IF ( A % ZMumpsID % a_loc(i) == (0.0_dp, 0.0_dp) .AND. &
+          A % ZMumpsID % irn_loc(i) /= A % ZMumpsID % jcn_loc(i) ) CYCLE
+      n = n + 1
+      A % ZMumpsID % irn_loc(n) = A % ZMumpsID % irn_loc(i)
+      A % ZMumpsID % jcn_loc(n) = A % ZMumpsID % jcn_loc(i)
+      A % ZMumpsID % a_loc(n) = A % ZMumpsID % a_loc(i)
+    END DO
+    ! counted in double precision: the global sums can exceed the default integer range
+    counts = [REAL(A % ZMumpsID % nz_loc - n, dp), REAL(A % ZMumpsID % nz_loc, dp)]
+    A % ZMumpsID % nz_loc = n
+    CALL MPI_ALLREDUCE( counts, total, 2, MPI_DOUBLE_PRECISION, MPI_SUM, A % ZMumpsID % Comm, ierr )
+    WRITE(Message, '(A,I0,A,I0,A)') 'MUMPS drop zeros: ', NINT(total(1), KIND=8), ' of ', &
+        NINT(total(2), KIND=8), ' entries left out'
+    CALL Info('ZMumps_SolveSystem', Message, Level=5)
+#endif
+!------------------------------------------------------------------------------
+  END SUBROUTINE ZMumpsDropZeros
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
  SUBROUTINE FreeMumpsFactorizations(A)
 !------------------------------------------------------------------------------
     TYPE(Matrix_t) :: A
@@ -2243,6 +2289,7 @@ CONTAINS
         END DO
       END DO
     END IF
+    IF ( ListGetLogical( Solver % Values, 'Mumps Drop Zeros', stat ) ) CALL ZMumpsDropZeros( A )
 
     ALLOCATE(A % ZMumpsID % rhs(A % ZMumpsId % n))
 
