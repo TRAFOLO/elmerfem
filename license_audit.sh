@@ -48,6 +48,23 @@ done
 # msmpi may be imported (system prerequisite) but must not be SHIPPED
 if ls bin/msmpi.dll 2>/dev/null; then echo "FORBIDDEN FILE: bin/msmpi.dll must not be zipped"; FAIL=1; fi
 
+# The DLLs built from this tree; all other DLLs in bin/ come from MSYS2.
+ELMER_BUILT='^(libelmersolver|libmatc|libfhuti|libmpi_stubs|libarpack|libparpack)\.dll$'
+# Elmer is built without OpenMP (DEV-1596, -DWITH_OpenMP=OFF in build_msys2.sh):
+# the threaded assembly of some solvers has races (DEV-1595), and on Windows
+# formatted output from several threads can crash libgfortran's setlocale.
+# libgomp-1.dll ships for OpenBLAS only, so no binary built here may import it.
+# The import shows a dynamically linked OpenMP runtime; it does not show OpenMP
+# code that never calls the runtime, which then runs serially anyway.
+for f in bin/*.exe bin/*.dll share/elmersolver/lib/*.dll; do
+  [ -f "$f" ] || continue
+  case "$f" in bin/*.dll) basename "$f" | grep -qE "$ELMER_BUILT" || continue ;; esac
+  headers=$(objdump -x "$f" 2>/dev/null) || { echo "ERROR: objdump cannot read $f"; FAIL=1; continue; }
+  if echo "$headers" | grep "DLL Name" | grep -qi "libgomp"; then
+    echo "OPENMP IN ELMER: $f imports libgomp-1.dll (keep -DWITH_OpenMP=OFF in build_msys2.sh)"; FAIL=1
+  fi
+done
+
 # every shipped DLL file must be in the allowlist (catches accidental copies)
 # libmsmpifec: since MSYS2 msmpi 10.1.1-23 the MS-MPI Fortran interface is in
 # this DLL. MIT (Microsoft-MPI), so it ships with its license text;
@@ -85,7 +102,6 @@ copy_required "$HERE/trafolo_bundle/licenses/LICENSE.ARPACK.txt" licenses/LICENS
 # deploy_msys2.sh copies with cp -n, so a reused install dir can hold stale DLLs:
 # only a byte-identical file shows which package version the notice must name.
 PFX="${MSYSTEM_PREFIX:-/ucrt64}"
-ELMER_BUILT='^(libelmersolver|libmatc|libfhuti|libmpi_stubs|libarpack|libparpack)\.dll$'
 # cmp is in diffutils, which the MSYS2 base install lacks; sha256sum is in coreutils.
 same_bytes() { [ "$(sha256sum < "$1")" = "$(sha256sum < "$2")" ]; }
 stage_pkg_texts() { # pkg short -> stages into licenses/third_party/<short>/, prints the names

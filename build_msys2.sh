@@ -77,6 +77,10 @@ rm -rf -- "$BUILD_ABS"
 mkdir -p "$BUILD_ABS"
 cd "$BUILD_ABS"
 
+# OpenMP stays off (DEV-1596). TRAFOLO parallelizes with MPI ranks; threads would
+# bring the races of some threaded assemblies (DEV-1595) and, on Windows, libgfortran
+# setlocale crashes from formatted output on several threads. license_audit.sh fails
+# if an Elmer binary imports libgomp-1.dll.
 cmake -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$INSTALL" \

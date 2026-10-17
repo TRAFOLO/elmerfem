@@ -611,9 +611,13 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), beta(:), NF_ip(:,:)
    INTEGER :: FwStack, FwAcross
    LOGICAL :: FwStackAlongAlpha, FsStackAlongAlpha
-   INTEGER :: FsCells, FsSegments, FsSublayers, FsK, FsJ, FsDof
+   INTEGER :: FsCells, FsSegments, FsSublayers, FsK, FsJ, FsDof, FsStrand
    REAL(KIND=dp) :: FsFillFactor
-   REAL(KIND=dp) :: FsSigmaRef, FsSign, FsDofScale
+   REAL(KIND=dp) :: FsSigmaRef, FsSign, FsDofScale, FsY, FsSigmaDc
+   ! Transient foil sheet strand skin ladder energy, A y^2 + B_j y + C_j.
+   LOGICAL :: SheetSkinStored
+   REAL(KIND=dp) :: SheetSkinA
+   REAL(KIND=dp), POINTER :: SheetSkinB(:,:), SheetSkinC(:,:)
    TYPE(FoilSheetQuad_t) :: FsQ
    LOGICAL :: FsExact
    INTEGER :: nIp
@@ -637,7 +641,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    COMPLEX(KIND=dp) :: SheetFactor
    INTEGER :: SheetPowerSeen     ! 1 where a transient foil sheet contributed to it
    REAL(KIND=dp) :: localThickness
-   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ModeLoss(2), ValAtIP
+   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ModeLoss(2), BSq(2), AxisSq(2), &
+       BRe(3), BIm(3), BScale
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
@@ -648,11 +653,13 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    ! inductor current, and the energy density it (or a foil sheet strand's skin
    ! reactance) stores outside B.
    REAL(KIND=dp) :: SkinLt, SkinGain, SkinHist, SkinHeat, SkinL, SkinTau, SkinChi, SkinEnergy
-   ! Homogenized blocks: harmonic litz and foil sheet, and the transient litz ladder.
-   LOGICAL :: StrandedHarmonicHomog, SheetHarmonicHomog, StrandedTransientHomog, XiSlotOk
+   ! Homogenized blocks: harmonic litz and foil sheet, and the transient ladder of
+   ! either, as in WhitneyAVSolver.
+   LOGICAL :: StrandedHarmonicHomog, SheetHarmonicHomog, StrandedTransientHomog
    ! The circuit holds the reactance of the litz sigma 33 (no explicit 'Resistance').
    LOGICAL :: SkinReactanceStored
-   INTEGER :: HomogOrder
+   ! The transient ladder: local directions HomogDir carry poles HomogR and states HomogXi.
+   INTEGER :: HomogOrder, HomogDir(2)
    REAL(KIND=dp) :: HomogY0(3), HomogR(MaxHomogLadderOrder,2), HomogXi(MaxHomogLadderOrder,2)
    REAL(KIND=dp) :: RotMip(3,3)
    REAL(KIND=dp) :: R_ip, mu_r
@@ -1245,6 +1252,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      SheetHarmonicHomog = .FALSE.
      SkinReactanceStored = .FALSE.
      StrandedTransientHomog = .FALSE.
+     SheetSkinStored = .FALSE.
      CompParams => GetComponentParams( Element )
      CoilType = ''
      RotM = 0._dp
@@ -1358,28 +1366,15 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              IF (dim == 3) THEN
                StrandedTransientHomog = .TRUE.
                BLOCK
-                 TYPE(Variable_t), POINTER :: XiVar
-                 REAL(KIND=dp) :: taus(MaxHomogLadderOrder)
-                 INTEGER :: d, ep, off
+                 INTEGER :: d
                  HomogOrder = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
                  IF (.NOT. Found) CALL Fatal(Caller, 'Homogenization Ladder Order not found!')
                  IF (HomogOrder < 1 .OR. HomogOrder > MaxHomogLadderOrder) CALL Fatal(Caller, &
                      'Homogenization Ladder Order must be between 1 and '//I2S(MaxHomogLadderOrder))
                  HomogY0 = 1._dp / mu0
+                 HomogDir = [1, 2]
                  DO d = 1,2
-                   CALL GetFosterLadder(CompParams, HomogNuKey(d), HomogOrder, &
-                       HomogY0(d), HomogR(1:HomogOrder,d), taus(1:HomogOrder))
-                   XiVar => VariableGet(pSolver % Mesh % Variables, StrandedXiName(d))
-                   IF (.NOT. ASSOCIATED(XiVar)) CALL Fatal(Caller, 'Transient homogenization: '// &
-                       StrandedXiName(d)//' not found; run WhitneyAVSolver before CalcFields.')
-                   ep = Element % ElementIndex
-                   IF (ASSOCIATED(XiVar % Perm)) ep = XiVar % Perm(ep)
-                   off = (ep-1) * XiVar % DOFs
-                   XiSlotOk = ep > 0 .AND. XiVar % DOFs >= HomogOrder .AND. &
-                       off + HomogOrder <= SIZE(XiVar % Values)
-                   IF (.NOT. XiSlotOk) CALL Fatal(Caller, &
-                       'Transient homogenization: invalid '//StrandedXiName(d)//' element slot.')
-                   HomogXi(1:HomogOrder,d) = XiVar % Values(off+1:off+HomogOrder)
+                   CALL GetHomogLadderState(d, StrandedXiName(HomogDir(d)))
                  END DO
                  CALL GetElementRotM(Element, RotM, n)
                END BLOCK
@@ -1492,6 +1487,44 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                Nu_el(1:3,1:3,k) = MATMUL(MATMUL(RotM(1:3,1:3,k), Nu_el(1:3,1:3,k)), TRANSPOSE(RotM(1:3,1:3,k)))
              END DO
            END BLOCK
+         END IF
+
+         ! In transient the in-plane reluctivity is the Foster ladder written by
+         ! InitFoilSheetMaterial, with the gate and directions of WhitneyAVSolver.
+         ! Its states store energy that the DC 'Nu' read above leaves out.
+         IF (HomogenizationModel .AND. Transient) THEN
+           IF (ListCheckPresent(CompParams, 'Nu 33 Residues')) THEN
+             StrandedTransientHomog = .TRUE.
+             BLOCK
+               INTEGER :: d, dStack
+               HomogOrder = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
+               IF (.NOT. Found) HomogOrder = 4
+               IF (HomogOrder < 1 .OR. HomogOrder > MaxHomogLadderOrder) CALL Fatal(Caller, &
+                   'Homogenization Ladder Order must be between 1 and '//I2S(MaxHomogLadderOrder))
+               CALL FoilSheetNuDirections(FsStackAlongAlpha, dStack, HomogDir)
+               HomogY0 = 1._dp / mu0
+               HomogY0(dStack) = GetConstReal(CompParams, FoilSheetNuKey(dStack)//' y0', Found)
+               IF (.NOT. Found) HomogY0(dStack) = 1._dp / mu0
+               DO d = 1,2
+                 CALL GetHomogLadderState(d, FoilSheetXiName(HomogDir(d)))
+               END DO
+             END BLOCK
+           END IF
+         END IF
+
+         ! The strand skin ladder stores w_j (sum_k tau_k x_kj^2 + Ltail y_j^2/2) in
+         ! strand j, w_j its DC resistance weight. CircuitsAndDynamics publishes the
+         ! bracket as A y_j^2 + B_j y_j + C_j for the whole timestep.
+         IF (Transient) THEN
+           SheetSkinA = GetConstReal(CompParams, 'Foil Sheet Skin Energy Quadratic', SheetSkinStored)
+           IF (SheetSkinStored) THEN
+             SheetSkinB => ListGetConstRealArray(CompParams, 'Foil Sheet Skin Energy Linear', Found)
+             IF (Found) SheetSkinC => ListGetConstRealArray(CompParams, 'Foil Sheet Skin Energy Constant', Found)
+             IF (.NOT. Found) CALL Fatal(Caller, 'Foil sheet skin ladder energy state is incomplete.')
+             ! The conductivity of the circuit's strand rows, which w_j is built with.
+             FsSigmaDc = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
+             IF (.NOT. Found) FsSigmaDc = GetConstReal(CompParams, 'Sigma 33', Found)
+           END IF
          END IF
 
        CASE ('foil winding')
@@ -1981,13 +2014,20 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          CASE ('foil sheet')
            CALL FoilSheetLayoutQuadStrand(FsQ, FsCells, FsSegments, FsSublayers, FsFillFactor, &
                j, alpha, beta, Basis, np, FsK, FsJ)
+           SkinEnergy = 0._dp
            IF (FsK > 0) THEN
              FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+             ! The strand index of the circuit's skin ladder (Add_foil_sheet).
+             FsStrand = (FsK-1) * FsSegments + FsJ
              FsK = FoilSheetLayerCell(FsSublayers, FsK)
              wvec = FoilSheetQuadDirection(FsQ, j, alpha, beta, dBasisdx, n, FsSign)
+             FsY = LagrangeVar % Values(VvarId+FsDof) / FsDofScale
              IF (REAL(CMat_ip(3,3)) /= 0._dp) &
-                 E(1,:) = E(1,:) - FsSigmaRef * LagrangeVar % Values(VvarId+FsDof) / FsDofScale &
-                     / REAL(CMat_ip(3,3)) * wvec
+                 E(1,:) = E(1,:) - FsSigmaRef * FsY / REAL(CMat_ip(3,3)) * wvec
+             IF (SheetSkinStored) THEN
+               IF (FsStrand <= SIZE(SheetSkinB,1)) SkinEnergy = FsSigmaRef**2 * SUM(wvec**2) / FsSigmaDc * &
+                   (SheetSkinA * FsY**2 + SheetSkinB(FsStrand,1) * FsY + SheetSkinC(FsStrand,1))
+             END IF
              localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
            END IF
 
@@ -2226,7 +2266,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            w_dens = 0.5_dp * SUM(HomogY0 * b_local**2)
            DO k = 1,2
              w_dens = w_dens + SUM(HomogR(1:HomogOrder,k) * HomogXi(1:HomogOrder,k) * &
-                 (b_local(k) - 0.5_dp * HomogXi(1:HomogOrder,k)))
+                 (b_local(HomogDir(k)) - 0.5_dp * HomogXi(1:HomogOrder,k)))
            END DO
            ! The coenergy of this linear model includes the conjugate products of
            ! the internal states, not just the macroscopic H.B, and equals the
@@ -2490,9 +2530,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            jh_k = k
          END IF
          
-         !-------------------------------------------------
-         ! Compute a loss estimate for cos and sin modes:
-         !-------------------------------------------------
+         !-------------------------------------------------------
+         ! Compute a loss estimate on the principal axes of B:
+         !-------------------------------------------------------
          IF (LossEstimation) THEN
            BodyLoss(3,BodyId) = BodyLoss(3,BodyId) + Coeff
 
@@ -2513,12 +2553,30 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            
            ! No losses to add if loss coefficient is not given
            IF( Found .OR. MaterialExponents ) THEN
-             ! Per mode into ComponentLoss, both modes once into BodyLoss and the nodal field
+             ! The loss law holds for a unidirectional sinusoidal B. Re B and Im B are two instants of an
+             ! elliptical B whose time origin is arbitrary, so each mode on its own depends on the source phase;
+             ! the principal axes of the ellipse do not: Bmaj^2 + Bmin^2 = |Re B|^2 + |Im B|^2 and
+             ! Bmaj * Bmin = |Re B x Im B|. Per axis into ComponentLoss, both axes once into BodyLoss and the field.
+             BSq(1) = SUM( B(1,1:3) ** 2 )
+             BSq(2) = SUM( B(2,1:3) ** 2 )
+             IF( BSq(1) == 0.0_dp .OR. BSq(2) == 0.0_dp ) THEN
+               ! A real-valued field (transient runs) keeps exactly the values of the per-mode sum
+               AxisSq(1) = BSq(1) + BSq(2)
+               AxisSq(2) = 0.0_dp
+             ELSE
+               ! Scaled by the largest component, so that no fourth power over- or underflows
+               BScale = MAXVAL( ABS( B(1:2,1:3) ) )
+               BRe = B(1,1:3) / BScale
+               BIm = B(2,1:3) / BScale
+               AxisSq(1) = 0.5_dp * ( SUM( BRe ** 2 ) + SUM( BIm ** 2 ) ) &
+                   + SQRT( 0.25_dp * ( SUM( BRe ** 2 ) - SUM( BIm ** 2 ) ) ** 2 + SUM( BRe * BIm ) ** 2 )
+               AxisSq(2) = SUM( CrossProduct( BRe, BIm ) ** 2 ) / AxisSq(1) * BScale ** 2
+               AxisSq(1) = AxisSq(1) * BScale ** 2
+             END IF
              ElemLoss = 0.0_dp
              DO l=1,2
-               ValAtIP = SUM( B(l,1:3) ** 2 )
-               ModeLoss(1) = s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( ValAtIp ** FieldPower(1) )
-               ModeLoss(2) = s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( ValAtIp ** FieldPower(2) )
+               ModeLoss(1) = s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( AxisSq(l) ** FieldPower(1) )
+               ModeLoss(2) = s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( AxisSq(l) ** FieldPower(2) )
                ComponentLoss(:,l) = ComponentLoss(:,l) + ModeLoss
                ElemLoss = ElemLoss + ModeLoss
              END DO
@@ -3212,9 +3270,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        ELSE
          CALL Info(Caller,'Harmonic Loss Quadratic by components',Level=6)
        END IF
-       WRITE( Message,'(A,ES15.6)') 'Loss for cos mode: ', ComponentLoss(k,1)
+       WRITE( Message,'(A,ES15.6)') 'Loss along the major axis: ', ComponentLoss(k,1)
        CALL Info(Caller, Message, Level=6 )
-       WRITE( Message,'(A,ES15.6)') 'Loss for sin mode: ', ComponentLoss(k,2)
+       WRITE( Message,'(A,ES15.6)') 'Loss along the minor axis: ', ComponentLoss(k,2)
        CALL Info(Caller, Message, Level=6 )
        WRITE( Message,'(A,ES15.6)') 'Total loss: ',TotalLoss(k)
        CALL Info(Caller,Message, Level=5 )
@@ -3698,7 +3756,35 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
 CONTAINS
 
-  
+!-------------------------------------------------------------------
+!> The Foster ladder of local direction HomogDir(k) of the element at hand and
+!> its current states, which WhitneyAVSolver publishes after its solve in the
+!> -elem variable XiName, into slot k of HomogR and HomogXi.
+!-------------------------------------------------------------------
+  SUBROUTINE GetHomogLadderState(k, XiName)
+!-------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: k
+    CHARACTER(*) :: XiName
+    TYPE(Variable_t), POINTER :: XiVar
+    REAL(KIND=dp) :: taus(MaxHomogLadderOrder)
+    INTEGER :: ep, off
+
+    CALL GetFosterLadder(CompParams, HomogNuKey(HomogDir(k)), HomogOrder, &
+        HomogY0(HomogDir(k)), HomogR(1:HomogOrder,k), taus(1:HomogOrder))
+    XiVar => VariableGet(pSolver % Mesh % Variables, XiName)
+    IF (.NOT. ASSOCIATED(XiVar)) CALL Fatal(Caller, 'Transient homogenization: '// &
+        XiName//' not found; run WhitneyAVSolver before CalcFields.')
+    ep = Element % ElementIndex
+    IF (ASSOCIATED(XiVar % Perm)) ep = XiVar % Perm(ep)
+    off = (ep-1) * XiVar % DOFs
+    IF (ep <= 0 .OR. XiVar % DOFs < HomogOrder .OR. off + HomogOrder > SIZE(XiVar % Values)) &
+        CALL Fatal(Caller, 'Transient homogenization: invalid '//XiName//' element slot.')
+    HomogXi(1:HomogOrder,k) = XiVar % Values(off+1:off+HomogOrder)
+!-------------------------------------------------------------------
+  END SUBROUTINE GetHomogLadderState
+!-------------------------------------------------------------------
+
 !-------------------------------------------------------------------
   SUBROUTINE SumElementalVariable(Var, Values, BodyId, uAdditive)
 !-------------------------------------------------------------------

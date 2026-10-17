@@ -1,0 +1,9 @@
+IF(HAVE_MUMPS)
+  INCLUDE(test_macros)
+  INCLUDE_DIRECTORIES(${CMAKE_BINARY_DIR}/fem/src)
+
+  CONFIGURE_FILE(case.sif case.sif COPYONLY)
+  file(COPY ELMERSOLVER_STARTINFO shoebox_hexas.grd DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+
+  ADD_ELMER_TEST(VectorHelmholtzWaveguideMumpsDropZeros NPROCS 1 2 LABELS whitney emwave mumps)
+ENDIF()

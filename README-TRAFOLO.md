@@ -56,11 +56,18 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   skin heat keeps the normalized vector, like the DC and the harmonic loss it converges to. These
   blocks report coenergy = energy. Harmonic energies are peak-phasor values, twice the time average.
   Foil sheet blocks: the harmonic skin reactance of the strands, 1/2 Im(1/sigma_s)/omega |J|^2, counts
-  too (1.5 % of the inductance in `circuits_harmonic_foilsheet_energy`); their transient ladder and
-  skin storage are still missing. The ladder order limit is `MaxHomogLadderOrder` (`CircuitUtils`). Tests:
-  `circuits_harmonic_stranded_homogenization_energy` (W against the coil's reactive power, complex
-  `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy` (mean W over a
-  period against the BDF2-corrected reactive power).
+  too (1.5 % of the inductance in `circuits_harmonic_foilsheet_energy`). Transient (DEV-1594): the
+  in-plane reluctivity ladder stores as the litz one does, from the `Foil Sheet Xi` states of the two
+  in-plane directions, and strand j's skin ladder stores w_j (sum_k tau_k x_kj^2 + L_tail y_j^2/2), w_j
+  its DC resistance weight, which `CircuitsAndDynamics` publishes every step as `Foil Sheet Skin
+  Energy Quadratic`/`Linear`/`Constant`; before, the DC reluctivity alone (9.3 % low with both
+  ladders, 4.6 % with the skin ladder alone). The ladder order limit is `MaxHomogLadderOrder`
+  (`CircuitUtils`). Tests: `circuits_harmonic_stranded_homogenization_energy` (W against the coil's
+  reactive power, complex `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy`
+  (mean W over the last period against the BDF2-corrected reactive power),
+  `circuits_transient_foilsheet_energy` (the same with both foil sheet ladders, the skin ladder alone and
+  both ladders stacked along Beta, on 1 and 4 ranks, within 1e-4: the currents circulating between the
+  sheet segments decay slowly, so each case runs 3 or 5 periods).
 - Windows SIF path handling fix in the Lua layer.
 - `CircuitsAndDynamics` — nonlinear (solution-dependent) lumped circuit elements in
   transient runs: the exported `crt i`/`crt v` variables are refreshed from the latest
@@ -184,6 +191,17 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   setup gave 0.11 J field energy instead of 0.6165 J with exit code 0, while `Use Tree Gauge =
   False` with `Mumps Null Pivot Detection = True` (tested with tolerance 1e-13) and `Mumps
   Sequential Root = True` matches the iterative solver on 1 and 4 ranks.
+- `Mumps Drop Zeros = True` (complex systems, `ZMumps_SolveSystem`, DEV-1564) leaves the
+  off-diagonal entries that are exactly zero out of the matrix given to MUMPS and logs how many.
+  The couplings of Dirichlet dofs are zeroed but stay in the sparsity pattern, where they enter
+  the ordering and the fill of the factors. The equations do not change; in the tests the
+  results agree with the solve without the option. In the A-V system the edge-potential
+  couplings of non-conducting regions are zero as well: in `mgdyn_harmonic_wire_mumps_drop_zeros`
+  a third of the entries are left out, the factors have 21 to 27 % fewer entries and their
+  computation 36 % fewer flops. The effect depends on the ordering MUMPS picks: on small systems
+  ordered by AMF the factors can grow. Tests: `mgdyn_harmonic_wire_mumps_drop_zeros` (with
+  `Mumps Diagonal Regularization`), `VectorHelmholtzWaveguideMumpsDropZeros` (PEC walls), both on
+  1 and 2 ranks.
 - Failures a caller can see (DEV-1560). A missing solver procedure and a MATC error in the SIF
   exit with status 1 instead of 0 (`Load.c`), and the MATC message no longer prints the
   unterminated Fortran buffer. `Fatal` aborts all MPI ranks (`MPI_Abort`, logged as
@@ -219,6 +237,52 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Nonlinear System Linesearch` or `Nonlinear System Compute Change in Scaled System` (both stop
   with an error). Tests: `mgdyn_bh_flux_density` (static, iterative),
   `mgdyn_harmonic_flux_density` (harmonic, linear: stops at iteration 2).
+- Thread-safe `GaussPointsAdapt` (`SolverUtils`, DEV-1595), the function as upstream ElmerCSC fixed
+  it in `f5374b755` (July 2026), unchanged. Its rule cache was shared by the OpenMP threads: threads
+  entering the first threaded assembly of a solver together re-ran its initialization, which
+  briefly reset the cached p-element flag, so an element could get the plain Gauss rule. With
+  `Element = p:1 b:4` that gave a singular bubble block (`LUDecomp: Matrix is singular`) in about
+  6 % of `Step_stokes_heat_vec` runs at 16 or 32 threads, none in 600 runs after the fix. The flag
+  and the point counts are now set per call, and the cache is initialized once, under a lock.
+  TRAFOLO's thermal runs use `HeatSolve`, which assembles serially and does not call it;
+  `StatElecSolve` calls it in a threaded loop, but with first-order elements and no integration
+  keywords the race only rewrote equal values. The distributed bundle is built without OpenMP,
+  so shipped TRAFOLO never ran these loops threaded; the failure showed in threaded test builds.
+- MUMPS with a gauge-free A-V system (DEV-1564). Without a gauge the A-V system is singular.
+  `Mumps Null Pivot Detection` can then pin a physical pivot that falls below its threshold,
+  which gives a wrong solution without an error; without it MUMPS has to delay the singular
+  pivots, which can cost much time and memory or stop with `INFOG(1) = -17`, and in a Newton
+  loop the gauge part of the solution can grow from iteration to iteration.
+  `Mumps Diagonal Regularization = alpha` adds alpha*|a_ii| to the diagonal of the matrix
+  MUMPS factorizes (real and complex, distributed: each rank shifts its partial entry), and
+  `Mumps Iterative Refinement` (on with a shift) refines against the unshifted matrix, x <- x +
+  F^-1 (b - A x): at least two corrections, then on while the componentwise backward error,
+  measured with the row scales of the first solution, halves (at most `Mumps Refinement Max
+  Iterations`, 10). It must end below `Mumps Refinement Tolerance` (1e-11; in the comparison
+  tests below it ends between 2e-16 and 2e-14): a correction that raises the error tenfold, or
+  a later one that raises it above the tolerance, is taken back, and a stop above the tolerance
+  warns. An inconsistent system (e.g. a coil current that is not divergence free) cannot be
+  refined below the level of its inconsistency.
+  `Mumps Regularize Nodal Dofs = False` leaves the rows of the nodal dofs unshifted. The
+  harmonic A-V solver sets it with its electrodynamics or Darwin model: there the potential
+  carries the capacitive field, which a shift of its rows next to a conductor would disturb
+  (the conductive part of such a row is many orders of magnitude larger), so the potential must
+  be fixed somewhere (a boundary value, an electrode); without them the potential exists in
+  conductors only and the shift of its rows also fixes the potential constant of a floating
+  conductor. In the tests the shifted solutions equal the unshifted direct solve or the
+  iterative solver converged to 1e-12 or below, in 2 to 5 corrections. Tests:
+  `mgdyn_harmonic_wire_mumps_regularization` (and `_ed`, the edge-only shift),
+  `circuits_harmonic_massive_mumps`, `WinkelBmPoissonMumpsRegularized` (real systems),
+  `robustness_mumps_refinement` (the warnings).
+- Harmonic core loss independent of the source phase (DEV-1599). `MagnetoDynamicsCalcFields`
+  evaluated the `Harmonic Loss` terms on Re B and Im B separately and summed them, so for a field
+  exponent other than 2 the loss changed when every source was turned by the same angle (unit cube,
+  45 degrees: +14 % at exponent 1.6, -16 % at 2.5). The terms are now evaluated on the major and
+  minor semi-axes of the elliptical B, which do not depend on the phase; a unidirectional field
+  gives the Steinmetz law at its peak B, exponent 2 and real fields (transient runs) give the
+  previous values exactly. `ComponentLoss` and its log lines refer to the two axes. Upstream Elmer
+  (devel) and `FourierLoss` (for each harmonic's cos/sin pair) have the same per-mode sum. Test:
+  `mgdyn_harmonic_loss_phase`.
 - `layered` laminate stack model of the harmonic A-V solver (DEV-1600), for stacks of insulated
   laminations whose thickness d exceeds the skin depth. A body with `Laminate Stack Model =
   "layered"`, `Laminate Thickness` d, `Laminate Stack Conductivity` sigma, `Laminate Stacking
@@ -299,12 +363,19 @@ gate in the summary is `PASS`.
 | Stage | Script | What it does |
 |---|---|---|
 | `mumps` | `mumps410/build_mumps410.sh` | Builds the public-domain MUMPS 4.10.0 (METIS orderings, no PORD) into `MUMPS410_INSTALL` |
-| `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS 4.10.0 linked statically, MS-MPI, OpenBLAS, Lua), builds |
+| `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS 4.10.0 linked statically, MS-MPI, OpenBLAS, Lua, OpenMP off), builds |
 | `deploy` | `deploy_msys2.sh` | `ninja install` + copies the UCRT64 runtime DLL closure into `bin\` |
 | `prune` | `prune_install.sh` | Keeps the 18 solver modules the TRAFOLO app uses, drops dev tools, headers and import libs |
-| `audit` | `license_audit.sh` | Fails on any GPL-incompatible or unlisted DLL in the import closure; writes `licenses\` and `SOURCE.txt` |
+| `audit` | `license_audit.sh` | Fails on any GPL-incompatible or unlisted DLL in the import closure, and on an Elmer binary that imports `libgomp-1.dll`; writes `licenses\` and `SOURCE.txt` |
 | `gates` | `run_gates.sh` | Runs the validation cases against the pruned install (inputs in `trafolo_bundle/validation/`); all must pass |
 | `package` | `package_bundle.sh` | Refuses an unpruned or unaudited install, zips it |
+
+The bundle's Elmer is built without OpenMP (`-DWITH_OpenMP=OFF`, DEV-1596). TRAFOLO runs Elmer
+with MPI ranks only (`mpiexec -n <ranks>`). Threaded, some assemblies have races (DEV-1595), and on
+Windows libgfortran's `setlocale` can crash when several threads write formatted output.
+`libgomp-1.dll` still ships because OpenBLAS imports it. Local test builds use the same flag, so
+that ctest runs what ships: unless `OMP_NUM_THREADS` is set, `RUN_ELMER_TEST` sets it to the
+physical cores divided by the ranks, so an OpenMP build runs most tests with several threads.
 
 Validation gates (`run_gates.sh`, against the pruned install):
 

@@ -48,7 +48,7 @@ SUBROUTINE WhitneyAVHarmonicSolver_Init0(Model,Solver,dt,Transient)
   LOGICAL :: Transient
 !------------------------------------------------------------------------------
   TYPE(ValueList_t), POINTER :: SolverParams
-  LOGICAL :: Found, PiolaVersion, SecondOrder, SecondFamily
+  LOGICAL :: Found, PiolaVersion, SecondOrder, SecondFamily, Capacitive
   CHARACTER(:), ALLOCATABLE :: ElemType
 
   TYPE(Solver_t), POINTER :: Solvers(:)
@@ -75,6 +75,15 @@ SUBROUTINE WhitneyAVHarmonicSolver_Init0(Model,Solver,dt,Transient)
   END IF
 
   CALL ListAddNewLogical( SolverParams, 'Linear System Complex', .TRUE. )
+  ! The shifted edge dofs remove the gauge freedom. With the electrodynamics or Darwin
+  ! model the scalar potential also carries the capacitive part of the field, which a
+  ! shift of its rows next to a conductor would disturb, so the potential must then be
+  ! fixed somewhere (a boundary value, an electrode). Without them the potential exists
+  ! in conductors only, and the shift of its rows also fixes the potential constant of a
+  ! floating conductor.
+  Capacitive = ListGetLogical( SolverParams, 'Electrodynamics Model', Found )
+  IF ( .NOT. Capacitive ) Capacitive = ListGetLogical( SolverParams, 'Darwin Model', Found )
+  CALL ListAddNewLogical( SolverParams, 'Mumps Regularize Nodal Dofs', .NOT. Capacitive )
 
 ! This is for internal communication with the saving routines
   CALL ListAddLogical( SolverParams,'Hcurl Basis',.TRUE.)
