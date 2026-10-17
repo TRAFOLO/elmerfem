@@ -262,7 +262,13 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   tests below it ends between 2e-16 and 2e-14): a correction that raises the error tenfold, or
   a later one that raises it above the tolerance, is taken back, and a stop above the tolerance
   warns. An inconsistent system (e.g. a coil current that is not divergence free) cannot be
-  refined below the level of its inconsistency.
+  refined below the level of its inconsistency. A row with next to no activity, below 1e-12 of
+  the largest one of its block, is measured against that largest activity (a block-relative
+  fallback after the normwise part of Arioli, Demmel and Duff's sparse backward error): its
+  residual can be rounding noise in a part of the solution that is zero for practical purposes,
+  e.g. a circuit branch without current, which measured against the old floor of 1e-12 of the
+  block could exceed the tolerance and warn about a correct solution. Such a row is accepted up
+  to the tolerance times its block's largest activity. Test: `mumps_refinement_row_scale`.
   `Mumps Regularize Nodal Dofs = False` leaves the rows of the nodal dofs unshifted. The
   harmonic A-V solver sets it with its electrodynamics or Darwin model: there the potential
   carries the capacitive field, which a shift of its rows next to a conductor would disturb
