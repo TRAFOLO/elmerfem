@@ -963,6 +963,47 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> 'Mumps Ordering' (amd, amf, scotch, pord, metis, qamd or auto): the
+!> fill-reducing ordering of the MUMPS analysis, ICNTL(7). Unset keeps MUMPS's
+!> automatic choice, which on systems with quasi-dense rows (e.g. circuit
+!> equations) can pick QAMD and much larger factors than METIS. An ordering
+!> the MUMPS build lacks falls back to MUMPS's own choice; the ordering used
+!> (INFOG(7)) is logged.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsOrdering( Solver, icntl7 )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    INTEGER :: icntl7
+!------------------------------------------------------------------------------
+    CHARACTER(:), ALLOCATABLE :: Ordering
+    LOGICAL :: Found
+
+    Ordering = ListGetString( Solver % Values, 'Mumps Ordering', Found )
+    IF ( .NOT. Found ) RETURN
+    SELECT CASE( Ordering )
+    CASE( 'amd' )
+      icntl7 = 0
+    CASE( 'amf' )
+      icntl7 = 2
+    CASE( 'scotch' )
+      icntl7 = 3
+    CASE( 'pord' )
+      icntl7 = 4
+    CASE( 'metis' )
+      icntl7 = 5
+    CASE( 'qamd' )
+      icntl7 = 6
+    CASE( 'auto' )
+      icntl7 = 7
+    CASE DEFAULT
+      CALL Fatal( 'MumpsOrdering', 'Unknown "Mumps Ordering": '//TRIM(Ordering)// &
+          ' (amd, amf, scotch, pord, metis, qamd or auto)' )
+    END SELECT
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsOrdering
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
  SUBROUTINE FreeMumpsFactorizations(A)
 !------------------------------------------------------------------------------
     TYPE(Matrix_t) :: A
@@ -1717,6 +1758,7 @@ CONTAINS
     A % MumpsID % icntl(18) = 3 ! 'distributed' matrix 
     A % MumpsID % icntl(21) = 1 ! 'distributed' solution phase
 
+    CALL MumpsOrdering( Solver, A % MumpsID % icntl(7) )
     A % MumpsID % job = 4
     CALL DMumps(A % MumpsID)
     CALL Flush(6)
@@ -2323,6 +2365,7 @@ CONTAINS
     A % ZMumpsID % icntl(18) = 3 ! 'distributed' matrix 
     A % ZMumpsID % icntl(21) = 1 ! 'distributed' solution phase
 
+    CALL MumpsOrdering( Solver, A % ZMumpsID % icntl(7) )
     A % ZMumpsID % job = 4
     CALL ZMumps(A % ZMumpsID)
     CALL Flush(6)
