@@ -302,7 +302,9 @@ CONTAINS
     IMPLICIT NONE
     REAL(KIND=dp), INTENT(IN) :: dt, bdfw(3)
     INTEGER :: i, k, j
-    REAL(KIND=dp) :: c, a, hx, h
+    REAL(KIND=dp) :: c, a, hx, h, ta
+    REAL(KIND=dp), ALLOCATABLE :: eb(:,:), ec(:,:)
+    TYPE(ValueList_t), POINTER :: CompParams
 
     IF (.NOT. fskin_allocated) RETURN
     IF (dt <= 0._dp) RETURN
@@ -340,14 +342,30 @@ CONTAINS
         FSkin(i) % Gdiag = FSkin(i) % Gdiag + 2._dp * a * FSkin(i) % Minv(k)
       END DO
 
+      ! Strand j stores w(j) (sum_k tau_k x_kj^2 + Ltail y_j^2/2): the inductor
+      ! 2 tau_k R_dc of stage k carries x_kj and the tail one y_j. With
+      ! x_kj = (y_j + hx_kj) Minv_k in this step that is w(j) (A y_j^2 + B_j y_j + C_j),
+      ! published for MagnetoDynamicsCalcFields, which knows y_j and w(j) in space.
+      ALLOCATE(eb(FSkin(i) % nStrand,1), ec(FSkin(i) % nStrand,1))
       DO j = 1, FSkin(i) % nStrand
         h = FSkin(i) % Ltail * (-(bdfw(2)*FSkin(i) % yo(j) + bdfw(3)*FSkin(i) % yoo(j))) / dt
+        eb(j,1) = 0._dp
+        ec(j,1) = 0._dp
         DO k = 1, FSkin(i) % N
           hx = FSkin(i) % tau(k) * (-(bdfw(2)*FSkin(i) % xo(k,j) + bdfw(3)*FSkin(i) % xoo(k,j))) / dt
           h = h + 2._dp * hx * FSkin(i) % Minv(k)
+          ta = FSkin(i) % tau(k) * FSkin(i) % Minv(k)**2
+          eb(j,1) = eb(j,1) + 2._dp * ta * hx
+          ec(j,1) = ec(j,1) + ta * hx**2
         END DO
         FSkin(i) % hist(j) = h
       END DO
+      CompParams => CurrentModel % Components(i) % Values
+      CALL ListAddConstReal(CompParams, 'Foil Sheet Skin Energy Quadratic', &
+          0.5_dp * FSkin(i) % Ltail + SUM(FSkin(i) % tau * FSkin(i) % Minv**2))
+      CALL ListAddConstRealArray(CompParams, 'Foil Sheet Skin Energy Linear', FSkin(i) % nStrand, 1, eb)
+      CALL ListAddConstRealArray(CompParams, 'Foil Sheet Skin Energy Constant', FSkin(i) % nStrand, 1, ec)
+      DEALLOCATE(eb, ec)
 
       WRITE(Message,'(A,I0,A,ES12.5,A,ES12.5,A,ES12.5)') 'Foil skin ladder comp ', i, &
           ': Gdiag = ', FSkin(i) % Gdiag, ', hist(1) = ', FSkin(i) % hist(1), &

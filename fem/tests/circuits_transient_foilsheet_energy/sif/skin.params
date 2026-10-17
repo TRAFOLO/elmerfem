@@ -1,0 +1,3 @@
+! The strand skin ladder alone (in-plane reluctivity 1/mu0)
+$ nsteps = 48
+$ ref_energy = 2.223338019e-6
