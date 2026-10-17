@@ -226,6 +226,17 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Nonlinear System Linesearch` or `Nonlinear System Compute Change in Scaled System` (both stop
   with an error). Tests: `mgdyn_bh_flux_density` (static, iterative),
   `mgdyn_harmonic_flux_density` (harmonic, linear: stops at iteration 2).
+- Thread-safe `GaussPointsAdapt` (`SolverUtils`, DEV-1595), the function as upstream ElmerCSC fixed
+  it in `f5374b755` (July 2026), unchanged. Its rule cache was shared by the OpenMP threads: threads
+  entering the first threaded assembly of a solver together re-ran its initialization, which
+  briefly reset the cached p-element flag, so an element could get the plain Gauss rule. With
+  `Element = p:1 b:4` that gave a singular bubble block (`LUDecomp: Matrix is singular`) in about
+  6 % of `Step_stokes_heat_vec` runs at 16 or 32 threads, none in 600 runs after the fix. The flag
+  and the point counts are now set per call, and the cache is initialized once, under a lock.
+  TRAFOLO's thermal runs use `HeatSolve`, which assembles serially and does not call it;
+  `StatElecSolve` calls it in a threaded loop, but with first-order elements and no integration
+  keywords the race only rewrote equal values. The distributed bundle is built without OpenMP,
+  so shipped TRAFOLO never ran these loops threaded; the failure showed in threaded test builds.
 - MUMPS with a gauge-free A-V system (DEV-1564). Without a gauge the A-V system is singular.
   `Mumps Null Pivot Detection` can then pin a physical pivot that falls below its threshold,
   which gives a wrong solution without an error; without it MUMPS has to delay the singular
