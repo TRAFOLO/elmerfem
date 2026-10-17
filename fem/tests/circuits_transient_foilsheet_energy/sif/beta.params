@@ -1,0 +1,3 @@
+! Both ladders, the sheets stacked along Beta: the in-plane directions are Alpha and Gamma
+$ nsteps = 80
+$ ref_energy = 7.986954121e-6

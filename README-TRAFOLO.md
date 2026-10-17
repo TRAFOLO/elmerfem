@@ -56,11 +56,18 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   skin heat keeps the normalized vector, like the DC and the harmonic loss it converges to. These
   blocks report coenergy = energy. Harmonic energies are peak-phasor values, twice the time average.
   Foil sheet blocks: the harmonic skin reactance of the strands, 1/2 Im(1/sigma_s)/omega |J|^2, counts
-  too (1.5 % of the inductance in `circuits_harmonic_foilsheet_energy`); their transient ladder and
-  skin storage are still missing. The ladder order limit is `MaxHomogLadderOrder` (`CircuitUtils`). Tests:
-  `circuits_harmonic_stranded_homogenization_energy` (W against the coil's reactive power, complex
-  `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy` (mean W over a
-  period against the BDF2-corrected reactive power).
+  too (1.5 % of the inductance in `circuits_harmonic_foilsheet_energy`). Transient (DEV-1594): the
+  in-plane reluctivity ladder stores as the litz one does, from the `Foil Sheet Xi` states of the two
+  in-plane directions, and strand j's skin ladder stores w_j (sum_k tau_k x_kj^2 + L_tail y_j^2/2), w_j
+  its DC resistance weight, which `CircuitsAndDynamics` publishes every step as `Foil Sheet Skin
+  Energy Quadratic`/`Linear`/`Constant`; before, the DC reluctivity alone (9.3 % low with both
+  ladders, 4.6 % with the skin ladder alone). The ladder order limit is `MaxHomogLadderOrder`
+  (`CircuitUtils`). Tests: `circuits_harmonic_stranded_homogenization_energy` (W against the coil's
+  reactive power, complex `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy`
+  (mean W over the last period against the BDF2-corrected reactive power),
+  `circuits_transient_foilsheet_energy` (the same with both foil sheet ladders, the skin ladder alone and
+  both ladders stacked along Beta, on 1 and 4 ranks, within 1e-4: the currents circulating between the
+  sheet segments decay slowly, so each case runs 3 or 5 periods).
 - Windows SIF path handling fix in the Lua layer.
 - `CircuitsAndDynamics` — nonlinear (solution-dependent) lumped circuit elements in
   transient runs: the exported `crt i`/`crt v` variables are refreshed from the latest
@@ -219,6 +226,32 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Nonlinear System Linesearch` or `Nonlinear System Compute Change in Scaled System` (both stop
   with an error). Tests: `mgdyn_bh_flux_density` (static, iterative),
   `mgdyn_harmonic_flux_density` (harmonic, linear: stops at iteration 2).
+- MUMPS with a gauge-free A-V system (DEV-1564). Without a gauge the A-V system is singular.
+  `Mumps Null Pivot Detection` can then pin a physical pivot that falls below its threshold,
+  which gives a wrong solution without an error; without it MUMPS has to delay the singular
+  pivots, which can cost much time and memory or stop with `INFOG(1) = -17`, and in a Newton
+  loop the gauge part of the solution can grow from iteration to iteration.
+  `Mumps Diagonal Regularization = alpha` adds alpha*|a_ii| to the diagonal of the matrix
+  MUMPS factorizes (real and complex, distributed: each rank shifts its partial entry), and
+  `Mumps Iterative Refinement` (on with a shift) refines against the unshifted matrix, x <- x +
+  F^-1 (b - A x): at least two corrections, then on while the componentwise backward error,
+  measured with the row scales of the first solution, halves (at most `Mumps Refinement Max
+  Iterations`, 10). It must end below `Mumps Refinement Tolerance` (1e-11; in the comparison
+  tests below it ends between 2e-16 and 2e-14): a correction that raises the error tenfold, or
+  a later one that raises it above the tolerance, is taken back, and a stop above the tolerance
+  warns. An inconsistent system (e.g. a coil current that is not divergence free) cannot be
+  refined below the level of its inconsistency.
+  `Mumps Regularize Nodal Dofs = False` leaves the rows of the nodal dofs unshifted. The
+  harmonic A-V solver sets it with its electrodynamics or Darwin model: there the potential
+  carries the capacitive field, which a shift of its rows next to a conductor would disturb
+  (the conductive part of such a row is many orders of magnitude larger), so the potential must
+  be fixed somewhere (a boundary value, an electrode); without them the potential exists in
+  conductors only and the shift of its rows also fixes the potential constant of a floating
+  conductor. In the tests the shifted solutions equal the unshifted direct solve or the
+  iterative solver converged to 1e-12 or below, in 2 to 5 corrections. Tests:
+  `mgdyn_harmonic_wire_mumps_regularization` (and `_ed`, the edge-only shift),
+  `circuits_harmonic_massive_mumps`, `WinkelBmPoissonMumpsRegularized` (real systems),
+  `robustness_mumps_refinement` (the warnings).
 - Harmonic core loss independent of the source phase (DEV-1599). `MagnetoDynamicsCalcFields`
   evaluated the `Harmonic Loss` terms on Re B and Im B separately and summed them, so for a field
   exponent other than 2 the loss changed when every source was turned by the same angle (unit cube,
