@@ -56,11 +56,18 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   skin heat keeps the normalized vector, like the DC and the harmonic loss it converges to. These
   blocks report coenergy = energy. Harmonic energies are peak-phasor values, twice the time average.
   Foil sheet blocks: the harmonic skin reactance of the strands, 1/2 Im(1/sigma_s)/omega |J|^2, counts
-  too (1.5 % of the inductance in `circuits_harmonic_foilsheet_energy`); their transient ladder and
-  skin storage are still missing. The ladder order limit is `MaxHomogLadderOrder` (`CircuitUtils`). Tests:
-  `circuits_harmonic_stranded_homogenization_energy` (W against the coil's reactive power, complex
-  `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy` (mean W over a
-  period against the BDF2-corrected reactive power).
+  too (1.5 % of the inductance in `circuits_harmonic_foilsheet_energy`). Transient (DEV-1594): the
+  in-plane reluctivity ladder stores as the litz one does, from the `Foil Sheet Xi` states of the two
+  in-plane directions, and strand j's skin ladder stores w_j (sum_k tau_k x_kj^2 + L_tail y_j^2/2), w_j
+  its DC resistance weight, which `CircuitsAndDynamics` publishes every step as `Foil Sheet Skin
+  Energy Quadratic`/`Linear`/`Constant`; before, the DC reluctivity alone (9.3 % low with both
+  ladders, 4.6 % with the skin ladder alone). The ladder order limit is `MaxHomogLadderOrder`
+  (`CircuitUtils`). Tests: `circuits_harmonic_stranded_homogenization_energy` (W against the coil's
+  reactive power, complex `Sigma 33`, no loss output), `circuits_transient_stranded_homogenization_energy`
+  (mean W over the last period against the BDF2-corrected reactive power),
+  `circuits_transient_foilsheet_energy` (the same with both foil sheet ladders, the skin ladder alone and
+  both ladders stacked along Beta, on 1 and 4 ranks, within 1e-4: the currents circulating between the
+  sheet segments decay slowly, so each case runs 3 or 5 periods).
 - Windows SIF path handling fix in the Lua layer.
 - `CircuitsAndDynamics` — nonlinear (solution-dependent) lumped circuit elements in
   transient runs: the exported `crt i`/`crt v` variables are refreshed from the latest
