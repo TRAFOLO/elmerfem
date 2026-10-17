@@ -317,12 +317,19 @@ gate in the summary is `PASS`.
 | Stage | Script | What it does |
 |---|---|---|
 | `mumps` | `mumps410/build_mumps410.sh` | Builds the public-domain MUMPS 4.10.0 (METIS orderings, no PORD) into `MUMPS410_INSTALL` |
-| `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS 4.10.0 linked statically, MS-MPI, OpenBLAS, Lua), builds |
+| `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS 4.10.0 linked statically, MS-MPI, OpenBLAS, Lua, OpenMP off), builds |
 | `deploy` | `deploy_msys2.sh` | `ninja install` + copies the UCRT64 runtime DLL closure into `bin\` |
 | `prune` | `prune_install.sh` | Keeps the 18 solver modules the TRAFOLO app uses, drops dev tools, headers and import libs |
-| `audit` | `license_audit.sh` | Fails on any GPL-incompatible or unlisted DLL in the import closure; writes `licenses\` and `SOURCE.txt` |
+| `audit` | `license_audit.sh` | Fails on any GPL-incompatible or unlisted DLL in the import closure, and on an Elmer binary that imports `libgomp-1.dll`; writes `licenses\` and `SOURCE.txt` |
 | `gates` | `run_gates.sh` | Runs the validation cases against the pruned install (inputs in `trafolo_bundle/validation/`); all must pass |
 | `package` | `package_bundle.sh` | Refuses an unpruned or unaudited install, zips it |
+
+The bundle's Elmer is built without OpenMP (`-DWITH_OpenMP=OFF`, DEV-1596). TRAFOLO runs Elmer
+with MPI ranks only (`mpiexec -n <ranks>`). Threaded, some assemblies have races (DEV-1595), and on
+Windows libgfortran's `setlocale` can crash when several threads write formatted output.
+`libgomp-1.dll` still ships because OpenBLAS imports it. Local test builds use the same flag, so
+that ctest runs what ships: unless `OMP_NUM_THREADS` is set, `RUN_ELMER_TEST` sets it to the
+physical cores divided by the ranks, so an OpenMP build runs most tests with several threads.
 
 Validation gates (`run_gates.sh`, against the pruned install):
 
