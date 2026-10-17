@@ -7,8 +7,10 @@ SUBROUTINE CheckEnergy(Model, Solver, dt, Transient)
   REAL(KIND=dp) :: dt
   LOGICAL :: Transient, Found
   INTEGER, SAVE :: step = 0
+  INTEGER :: n_per, n_steps
+  INTEGER, POINTER :: intervals(:)
   REAL(KIND=dp), SAVE :: ew = 0._dp, vs = 0._dp, vc = 0._dp, is = 0._dp, ic = 0._dp
-  REAL(KIND=dp) :: w, co, v, current, phase, omega, omega_bdf, circuit_w, err
+  REAL(KIND=dp) :: w, co, v, current, phase, omega, omega_bdf, circuit_w, err, tol
 
   step = step + 1
   w = GetConstReal(Model % Simulation, 'res: Magnetic Field Energy', Found)
@@ -21,19 +23,24 @@ SUBROUTINE CheckEnergy(Model, Solver, dt, Transient)
   IF (.NOT. (ABS(w-co) <= 1.e-12_dp * MAX(ABS(w), 1.e-20_dp))) &
       CALL Fatal('CheckEnergy', 'Linear full-state energy and coenergy differ')
 
-  ! Discard the first 50 Hz cycle, then Fourier analyze the next 40 samples.
+  ! Fourier analyze the n_per samples of the last 50 Hz cycle of the run; the
+  ! cycles before it let the start transient decay.
   omega = 100._dp * ACOS(-1._dp)
-  IF (step > 40) THEN
+  n_per = NINT(2._dp * ACOS(-1._dp) / (omega * dt))
+  intervals => ListGetIntegerArray(Model % Simulation, 'Timestep Intervals', Found)
+  IF (.NOT. Found) CALL Fatal('CheckEnergy', 'Timestep Intervals missing')
+  n_steps = SUM(intervals)
+  IF (step > n_steps - n_per) THEN
     v = GetConstReal(Model % Simulation, 'res: v_component(1)', Found)
     IF (.NOT. Found) CALL Fatal('CheckEnergy', 'Circuit voltage missing')
     current = GetConstReal(Model % Simulation, 'res: i_component(1)', Found)
     IF (.NOT. Found) CALL Fatal('CheckEnergy', 'Circuit current missing')
     phase = omega * GetTime()
-    ew = ew + w / 40._dp
-    vs = vs + v * SIN(phase) / 20._dp
-    vc = vc + v * COS(phase) / 20._dp
-    is = is + current * SIN(phase) / 20._dp
-    ic = ic + current * COS(phase) / 20._dp
+    ew = ew + w / n_per
+    vs = vs + v * SIN(phase) / (0.5_dp * n_per)
+    vc = vc + v * COS(phase) / (0.5_dp * n_per)
+    is = is + current * SIN(phase) / (0.5_dp * n_per)
+    ic = ic + current * COS(phase) / (0.5_dp * n_per)
   END IF
 
   ! For sinusoidal steady state <W> = L I_peak^2/4 = Q/(2 omega).
@@ -44,11 +51,14 @@ SUBROUTINE CheckEnergy(Model, Solver, dt, Transient)
   circuit_w = 0.5_dp * (vc*is - vs*ic) / (4._dp*omega_bdf)
   CALL ListAddConstReal(Model % Simulation, 'res: Mean Stored Energy', ew)
   CALL ListAddConstReal(Model % Simulation, 'res: Circuit Stored Energy', circuit_w)
-  IF (step == 80) THEN
+  IF (step == n_steps) THEN
     err = ABS(ew-circuit_w) / ABS(circuit_w)
     WRITE(Message,'(A,4ES22.12)') 'Final energy, mean energy, circuit energy, relative error: ', &
         w, ew, circuit_w, err
     CALL Info('CheckEnergy', Message, Level=1)
-    IF (.NOT. (err <= 1.e-5_dp)) CALL Fatal('CheckEnergy', 'Stored energy does not match circuit reactive power')
+    ! What is left of the start transient in the last cycle sets the tolerance.
+    tol = GetConstReal(Solver % Values, 'Energy Check Tolerance', Found)
+    IF (.NOT. Found) tol = 1.e-5_dp
+    IF (.NOT. (err <= tol)) CALL Fatal('CheckEnergy', 'Stored energy does not match circuit reactive power')
   END IF
 END SUBROUTINE CheckEnergy
