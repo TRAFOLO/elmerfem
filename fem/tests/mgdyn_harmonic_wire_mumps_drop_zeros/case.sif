@@ -1,0 +1,252 @@
+! mgdyn_harmonic_wire_mumps_regularization with "Mumps Drop Zeros": the matrix given to MUMPS
+! leaves out the entries that are exactly zero, here the edge-potential couplings in the air,
+! where the conductivity is zero, and the couplings of the Dirichlet edges: a third of the
+! entries. The factors have 16.1e6 entries instead of 21.9e6 on one rank (15.0e6 instead of
+! 18.9e6 on two), and their computation 36 % fewer flops.
+! The results equal those of mgdyn_harmonic_wire_mumps_regularization.
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "wire"
+End
+
+Simulation
+  Max Output Level = 5
+
+  Coordinate System = "Cartesian"
+  Simulation Type = Steady
+  Output Intervals(1) = 1
+  Steady State Max Iterations = 1
+
+  Coordinate Scaling = 1.0e-3
+
+  $ w = 1.0e5
+  Angular Frequency = Real $w
+End
+
+Body 1
+  Name = "Wire"
+  Equation = 1
+  Material = 1
+End
+
+Body 2
+  Name = "Air"
+  Equation = 1
+  Material = 2
+End
+
+Material 1
+  Name = "Cu"
+  Relative Permittivity = 1
+  Relative Permeability = 1
+  Electric Conductivity = 58e6
+End
+
+Material 2
+  Name = "Air"
+  Relative Permittivity = 1.0
+  Relative Permeability = 1.0
+  Electric Conductivity = 0.0
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+
+Solver 1
+  Equation = "MGDynamics"
+
+  Variable = "AV[AV re:1 AV im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+
+  Linear System Solver = "Direct"
+  Linear System Direct Method = "MUMPS"
+  Use Tree Gauge = Logical False
+  Mumps Diagonal Regularization = Real 1.0e-6
+  Mumps Drop Zeros = Logical True
+End
+
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Linear System Symmetric = True
+
+  Potential Variable = String "AV"
+
+  Calculate Current Density = Logical True
+  Calculate Electric Field = Logical True
+  Calculate Magnetic Field Strength = Logical True
+  Calculate Joule Heating = True
+
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 0
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-8
+
+  Calculate Nodal Fields = Logical False
+  Impose Body Force Potential = Logical True
+  Impose Body Force Current = Logical True
+
+  Discontinuous Bodies = True
+  calculate harmonic peak power = logical true
+End
+
+
+Solver 3
+  Exec Solver = after all
+  Equation = "SaveLine"
+  Procedure = "SaveData" "SaveLine"
+
+  FileName = f.dat
+  ! Have small offset to make the the choice of elements unique.
+  Polyline Coordinates(2,3) = -5.0e-3 1.0e-6 5.1e-3 5.0e-3 1.0e-6 5.1e-3
+  Polyline Divisions(1) = 200
+
+! The Joule heating
+  Show Norm Index = Integer 33
+End
+
+Solver 4
+  Exec Solver = after all
+  Equation = "SaveScalars"
+  Procedure = "SaveData" "SaveScalars"
+
+  FileName = s.dat
+
+! Components of the complex total current
+  Variable 1 = Current Density Im e 3
+  Operator 1 = boundary int
+  Variable 2 = Current Density Re e 3
+  Operator 2 = boundary int
+
+! Components of the complex voltage
+  Variable 3 = AV Re
+  Operator 3 = boundary int mean
+  Variable 4 = AV Im
+  Operator 4 = boundary int mean
+
+! This is just to create a testable norm
+  Show norm index = 5
+  Parallel Reduce = Logical True
+End
+
+! One value each for the reference checks: imaginary and real coil current
+Solver 5
+  Exec Solver = after all
+  Equation = "CurrentIm"
+  Procedure = "SaveData" "SaveScalars"
+  Parallel Reduce = Logical True
+  FileName = i_im.dat
+  Variable 1 = Current Density Im e 3
+  Operator 1 = boundary int
+  Show norm index = 1
+End
+
+Solver 6
+  Exec Solver = after all
+  Equation = "CurrentRe"
+  Procedure = "SaveData" "SaveScalars"
+  Parallel Reduce = Logical True
+  FileName = i_re.dat
+  Variable 1 = Current Density Re e 3
+  Operator 1 = boundary int
+  Show norm index = 1
+End
+
+
+Boundary Condition 1
+  Name = "WireStart"
+  Target Boundaries(1) = 1
+
+  Coil Start = Logical True
+
+  AV re {e} 1 = Real 0.0
+  AV re {e} 2 = Real 0.0
+  AV re = Real 0.0
+
+  AV im {e} 1 = Real 0.0
+  AV im {e} 2 = Real 0.0
+  AV im = Real 0.0
+End
+
+Boundary Condition 2
+  Name = "WireSurface"
+  Target Boundaries(1) = 2
+End
+
+Boundary Condition 3
+  Name = "WireEnd"
+  Target Boundaries(1) = 3
+
+  Coil End = Logical True
+
+  AV re {e} 1 = Real 0.0
+  AV re {e} 2 = Real 0.0
+  AV re = Real 5.542e-5
+
+  AV im {e} 1 = Real 0.0
+  AV im {e} 2 = Real 0.0
+  AV im = Real 0.0
+
+  Save Scalars = True
+End
+
+Boundary Condition 4
+  Name = "AirStart"
+  Target Boundaries(1) = 4
+
+  AV re {e} 1 = Real 0.0
+  AV re {e} 2 = Real 0.0
+
+  AV im {e} 1 = Real 0.0
+  AV im {e} 2 = Real 0.0
+End
+
+
+Boundary Condition 5
+  Name = "AirSurface"
+  Target Boundaries(1) = 5
+
+  AV re {e} 1 = Real 0.0
+  AV re {e} 2 = Real 0.0
+
+  AV im {e} 1 = Real 0.0
+  AV im {e} 2 = Real 0.0
+End
+
+Boundary Condition 6
+  Name = "AirEnd"
+  Target Boundaries(1) = 6
+
+  AV re {e} 1 = Real 0.0
+  AV re {e} 2 = Real 0.0
+
+  AV im {e} 1 = Real 0.0
+  AV im {e} 2 = Real 0.0
+End
+
+
+! Joule heating, eddy current power and the coil current components: the iterative solver of
+! mgdyn_harmonic_wire converged to 1e-14 gives 1.57903428E+03, 1.51582277E-06, 0.14723836 and
+! -2.7351547E-02 (its 1e-8 stops 2.3e-4 off). The norm of the potential depends on the gauge
+! (4.62e-6 on one rank, 4.73e-6 on two): it shows that the shifted factorization leaves no large
+! gauge component (without the shift MUMPS returns a norm of 5.2e-5).
+Solver 1 :: Reference Norm = 4.6222758E-06
+Solver 1 :: Reference Norm Tolerance = 0.05
+Solver 3 :: Reference Norm = 1.57903429E+03
+Solver 3 :: Reference Norm Tolerance = 1e-6
+Solver 4 :: Reference Norm = 1.51582277E-06
+Solver 4 :: Reference Norm Tolerance = 1e-6
+Solver 5 :: Reference Norm = 0.14723836
+Solver 5 :: Reference Norm Tolerance = 1e-6
+! the norm of a saved scalar is its modulus
+Solver 6 :: Reference Norm = 2.7351548E-02
+Solver 6 :: Reference Norm Tolerance = 1e-6
