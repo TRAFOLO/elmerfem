@@ -202,6 +202,15 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   ordered by AMF the factors can grow. Tests: `mgdyn_harmonic_wire_mumps_drop_zeros` (with
   `Mumps Diagonal Regularization`), `VectorHelmholtzWaveguideMumpsDropZeros` (PEC walls), both on
   1 and 2 ranks.
+- `Mumps Ordering` (`amd`, `amf`, `scotch`, `pord`, `metis`, `qamd` or `auto`; `DirectSolve`, real
+  and complex, DEV-1564) selects the fill-reducing ordering of the MUMPS analysis (`ICNTL(7)`).
+  Unset keeps MUMPS's automatic choice, which on systems with quasi-dense rows such as circuit
+  equations can pick QAMD and much larger factors: in `circuits_harmonic_foilsheet_mumps_ordering`
+  the automatic choice is QAMD with 4.96e6 entries in the factors and 2.6e9 flops, METIS gives
+  3.20e6 and 9.0e8, and both give the reference solution. An unknown value stops the run. An
+  ordering the MUMPS build lacks (the shipped MUMPS 4.10.0 has no SCOTCH and no PORD) falls back
+  to MUMPS's own choice; the ordering used (`INFOG(7)`) is logged. Tests:
+  `circuits_harmonic_foilsheet_mumps_ordering` (complex), `WinkelBmPoissonMumpsOrdering` (real).
 - Failures a caller can see (DEV-1560). A missing solver procedure and a MATC error in the SIF
   exit with status 1 instead of 0 (`Load.c`), and the MATC message no longer prints the
   unterminated Fortran buffer. `Fatal` aborts all MPI ranks (`MPI_Abort`, logged as
