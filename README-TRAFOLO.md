@@ -97,20 +97,50 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   | `Diode Off Resistance = Real` | Roff | `1.0e5` | Keep <= ~1e6 to protect conditioning. |
   | `Diode Smoothing Voltage = Real` | Vs | `0.1` | Must be > 0. |
 
-  Solve control is Picard only — `R` is frozen at the previous iterate, there is no `dR/dV`
-  Newton term — so a stiff diode needs `Steady State Max Iterations > 1` and typically
-  `Circuit Variable Relaxation Factor < 1`. The validated recipe for
-  `Ron/Roff/Vs = 0.1/1e5/0.1` is a relaxation factor of `0.10` with
-  `Steady State Max Iterations = 100` and `Steady State Min Iterations = 3` (both are
-  **Simulation**-section keywords), a direct linear solve, and
-  `Steady State Convergence Absolute = True`; that converges every timestep of the
-  reference rectifier case in a median of 7 (max 30) coupled iterations. Undamped Picard
-  diverges, and the measured stability limit is a relaxation factor between 0.15 and 0.20.
+  Solve control: the diode row is **Newton**-linearized by default about the relaxed latest
+  coupled iterate (`Diode Newton Linearization = Logical True`, analytic `dR/dV`);
+  `False` restores the original Picard row (resistance frozen at the previous iterate)
+  bit-for-bit. A diode always needs `Steady State Max Iterations > 1` (a **Simulation**-section
+  keyword, like `Steady State Min Iterations`). Measured relaxation factors: single-element
+  cases converge with `0.7`–`1.0` under Newton, the two-element combo case needs `0.3`; the
+  original Picard recipe for `Ron/Roff/Vs = 0.1/1e5/0.1` was `0.10` with
+  `Steady State Max/Min Iterations = 100/3` (its stability limit lies between 0.15 and 0.20).
   Diodes are **transient-only**: `CircuitsAndDynamicsHarmonic` aborts with a Fatal if one
   is present. Tests: `fem/tests/circuits2D_transient_diode_component_{rectifier,blocking}`
   (component) and `circuits2D_transient_diode_{rectifier,blocking}` (the equivalent model
   built from `Component Type = Resistor` plus a MATC expression, which covers the generic
   Picard mechanism).
+
+  **Zener / TVS.** `Diode Breakdown Voltage = Real Vz` (optional) adds a reverse knee,
+  `R(V) = Ron + 0.25*(Roff - Ron)*(1 - tanh((V - Vf)/Vs))*(1 + tanh((V + Vz)/Vs))`, so the
+  element conducts at `Ron` beyond `-Vz` (same `Ron` and `Vs` for both knees). The smoothed
+  clamp settles about `0.5*Vs*ln(Roff/R)` beyond `Vz` (−5.46 V for `Vz = 5`, `Vs = 0.1`).
+  Without the keyword the single-knee law is evaluated unchanged. Test:
+  `circuits2D_transient_zener_clamp`.
+
+  **PWM switch.** `Component Type = String Switch` is a time-driven lumped element: closed
+  iff `MODULO(t*f - phase/360, 1) < duty` with `t` the end time of the step, `R = Ron` closed
+  and `Roff` open. Keywords: `Switch Frequency` (Hz, required, > 0), `Switch Duty Cycle`
+  (required, strictly between 0 and 1), `Switch Phase` (degrees, default 0),
+  `Switch On Resistance` (required), `Switch Off Resistance` (default `1.0e5`). It needs no
+  coupled iterations; edges are quantized to the timestep grid, so resolve the switching
+  period (`dt <= Tsw/50` recommended). Transient-only. Tests:
+  `circuits2D_transient_switch_pwm`, `circuits2D_transient_switch_diode_freewheel` (buck cell)
+  and `circuits2D_transient_nonlinear_combo` (switch + diode + zener clamp).
+
+  **Circuit residual gate.** `Nonlinear Circuit Residual Tolerance = Real tol` on the circuits
+  solver (opt-in) lets the coupled loop exit only when every diode satisfies
+  `|R(V)*I - V| / (|V| + |R*I|) <= tol`, published through the circuits solver's
+  steady-state flag (it also sets `Skip Compute Steady State Change` on that solver and needs
+  `Exec Solver = Always`). Because the circuits solver runs before the field solver, the gate
+  judges the previous iterate; so that the accepted solution is a judged one, an iterate that
+  passes becomes the next linearization point (no relaxation), and the first call of each
+  timestep never passes. Without the gate the field solver's steady-state norm, which
+  includes the circuit dofs, is the only guard, and a saturated diode can stop at a
+  non-fixed point (measured on the freewheel case). In iterative 3D field solves the gate
+  pushes blocking-phase iterations into the solver's noise floor, which is why the TRAFOLO
+  app does not emit it. Tests: the freewheel, zener-clamp and combo cases above, and
+  `circuits2D_transient_zener_gate_reversal` (polarity reversal under relaxation).
 - `Coil Type = flat wire` — rectangular (flat) wire windings as a block of turn cells
   (`CircuitsAndDynamics`, 3D, transient and harmonic). The block is split by the normalized
   `Alpha`/`Beta` direction fields into one cell per turn along `Stacking Direction = beta|alpha`

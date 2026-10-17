@@ -1,0 +1,153 @@
+! The circuit-residual gate must judge the solution the coupled loop ACCEPTS.
+!
+! Circuit: ideal source, 1 ohm Resistor component and a zener (Diode component
+! with Diode Breakdown Voltage) in series; no FEM component, so the field stays
+! zero and only the circuit residual gate guards the coupled loop.
+!
+! The source reverses from +100 V (timestep 1) to -100 V (timestep 2). In both
+! states the zener conducts at Ron (forward, then in breakdown), so the exact
+! loop current is I = V/(1 + 0.1) at both timesteps:
+!   timestep 2:  I = -100/1.1 = -90.909090909... A
+! (In breakdown the knee factor 1 + TANH((V+Vz)/Vs) underflows to exactly 0 in
+! double precision at V = -9.09 V, so R(V) = Ron exactly and the value is exact.)
+!
+! The trap: with Circuit Variable Relaxation Factor < 1 the stamp linearizes
+! about a RELAXED blend of the latest iterate and the previous linearization
+! point. After the reversal, the raw iterates are already correct from coupled
+! iteration 1, but the relaxed point still travels from +9.09 V towards -9.09 V
+! and crosses the zener's blocking window (-Vz < V < Vf) at iteration 3. The
+! solve made about that point gives I ~ -0.00092 A (blocking). The circuits
+! solver runs BEFORE the field solver, so the gate only ever sees the PREVIOUS
+! iterate; without a guard the loop accepted this blocking solution after
+! iteration 3 because the gate had passed iteration 2's correct one.
+! (Reported by an external Codex review of the residual gate, reproduced here.)
+!
+! Based on circuits2D_transient_nonlinear_resistor_picard.
+Check Keywords "Warn"
+INCLUDE sif/zener_gate_reversal_circuit.definitions
+INCLUDE 1381/mesh.names
+Header 1
+   Mesh DB "." "1381"
+End
+$ stepsize = 1
+Simulation 1
+   Max Output Level = 5
+   Coordinate System = Axi symmetric
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+   Timestep Sizes(1) = $ stepsize
+   Timestep Intervals(1) = 2
+   Steady State Min Iterations = 3
+   Steady State Max Iterations = 100
+End
+Solver 1
+   Exec Solver = Always
+   Equation = Circuits
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+   Circuit Variable Relaxation Factor = Real 0.3
+   Nonlinear Circuit Residual Tolerance = Real 1e-8
+End
+Solver 2
+   Equation = "Mag"
+   Variable = A
+   Procedure = "MagnetoDynamics2D" "MagnetoDynamics2D"
+   NonLinear System Relaxation Factor=1
+   Export Lagrange Multiplier = Logical True
+   Linear System Solver = Direct
+   Linear System Direct Method = UMFPack
+!  Deliberately NO 'Steady State Convergence Tolerance': the field solver then
+!  never blocks the coupled loop, so the circuit residual gate is the ONLY
+!  criterion and this test checks the gate on its own. (With a field criterion
+!  the field solver's steady-state norm, which ComputeChange takes over the
+!  constraint dofs too, happens to see the circuit jump and masks the bug.)
+End
+Solver 3
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 4
+   Exec Solver = After Timestep
+   Equation = "sv"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/zener_gate_reversal.dat
+!  The zener current; a MAGNITUDE is compared (SaveScalars norms are absolute).
+   Show Norm Name = String "res: i_component(2)"
+End
+Equation 1
+   Active Solvers(1) = 2
+End
+Equation 2
+   Active Solvers(2) = 1 2
+End
+Material 1
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+End
+Material 2
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+End
+Material 3
+   Name = aluminium
+   Relative Permeability = 1
+   Electric Conductivity = 1e7
+End
+Body 1
+   Name = Core
+   Target Bodies(6) = 1 2 3 4 5 6
+   Equation = 1
+   Material = 1
+End
+Body 2
+   Name = air
+   Target Bodies(2) = 9 7
+   Equation = 1
+   Material = 2
+End
+Body 3
+   Name = test 1
+   Target Bodies = 8
+   Equation = 2
+   Material = 3
+End
+Component 1
+   Name = String series resistor
+   Component Type = String Resistor
+   Resistance = Real 1.0
+End
+Component 2
+   Name = String zener
+   Component Type = String Diode
+   Diode Forward Voltage = Real 0.7
+   Diode Breakdown Voltage = Real 5.0
+   Diode On Resistance = Real 0.1
+   Diode Off Resistance = Real 1.0e5
+   Diode Smoothing Voltage = Real 0.1
+End
+Body Force 1
+   Name = "Circuit"
+   testsource = Variable time
+     Real MATC "if (tx < 1.5) {100} else {-100}"
+End
+Boundary Condition 1
+   Target Boundaries(4) = $ center0 center1 center2 center3
+   A = Real 0
+End
+Boundary Condition 2
+   Target Boundaries(2) = 4 6
+   Name = "Air Gap"
+   Air Gap = logical True
+   Air Gap Length = Real 0.0001
+   Air Gap Relative Permeability = Real 1
+End
+Boundary Condition 3
+   Target Boundaries(7) = 10 13 14 17 18 19 27
+   Infinity BC = Logical True
+End
+
+Solver 4 :: Reference Norm = 90.909090909090909
+Solver 4 :: Reference Norm Tolerance = Real 1E-06

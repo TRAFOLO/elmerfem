@@ -893,6 +893,11 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   ! TRAFOLO: circuit-residual convergence check state.
   REAL(KIND=dp) :: CrtResTol, CrtRes
   LOGICAL :: CrtResCheck
+  ! TRAFOLO: CrtResFresh - no iterate of the CURRENT timestep exists yet (the
+  ! Lagrange values still hold the previous step's solution); CrtResPassed - the
+  ! gate passed on this call; CrtResPublished - the gate was evaluated on this
+  ! call. See PublishCircuitResidual.
+  LOGICAL :: CrtResFresh, CrtResPassed, CrtResPublished
   TYPE(Variable_t), POINTER :: LagrangeVar
   INTEGER :: Tstep=-1
   LOGICAL :: Parallel
@@ -903,7 +908,7 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   CHARACTER(*), PARAMETER :: Caller = 'CircuitsAndDynamics'
 
   SAVE First, Tstep, Parallel, Crt, CrtIter, CrtExp, CrtRaw, CrtRelax, MultName
-  SAVE CrtResTol, CrtRes, CrtResCheck
+  SAVE CrtResTol, CrtRes, CrtResCheck, CrtResFresh
   
 !------------------------------------------------------------------------------
   
@@ -1031,6 +1036,7 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     ! execution, i.e. it silently wins over a user-set
     ! 'Skip Compute Steady State Change = False' on the circuits solver.
     CrtRes = 0._dp
+    CrtResFresh = .TRUE.
     CrtResTol = ListGetConstReal( Solver % Values,'Nonlinear Circuit Residual Tolerance', CrtResCheck )
     IF( CrtResCheck ) THEN
       IF( CrtResTol <= 0.0_dp ) CALL Fatal(Caller, &
@@ -1102,6 +1108,11 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
     CALL Circuits_ToMeshVariable(Solver,crt)
     ! TRAFOLO: the relaxation history starts from the previous-timestep values.
     IF( ALLOCATED(CrtExp) ) CrtExp = Crt
+    ! TRAFOLO: a new timestep has no iterate of its own yet, so the circuit
+    ! residual gate must not pass on the previous step's (converged) solution.
+    ! Before: the first coupled iteration of a step judged that stale solution
+    ! and reported converged. See PublishCircuitResidual.
+    CrtResFresh = .TRUE.
   END IF
 
   ! TRAFOLO: refresh the exported circuit variables ("crt i"/"crt v") from the
@@ -1136,6 +1147,8 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   ! Limitation: CrtExp holds the RELAXED iterate, i.e. what a keyword-driven
   ! component would have seen; internal readers therefore inherit the same
   ! relaxation, which is intended (it is what makes the Picard loop contract).
+  CrtResPassed = .FALSE.
+  CrtResPublished = .FALSE.
   LagrangeVar => VariableGet( Solver % Mesh % Variables, MultName )
   IF( ASSOCIATED(LagrangeVar) ) THEN
     IF( SIZE(LagrangeVar % Values) >= Model % Circuit_tot_n ) THEN
@@ -1145,16 +1158,44 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
       ! combination -- the residual check needs the true (unrelaxed) iterate the
       ! coupled loop is about to accept, not the point the stamp linearizes
       ! about. Copied only when that check is on: it is dead weight otherwise.
-      IF( CrtResCheck ) CrtRaw = CrtIter
-      IF( CrtRelax /= 1.0_dp ) CrtIter = CrtRelax * CrtIter + (1.0_dp - CrtRelax) * CrtExp
+      ! (3) TRAFOLO: gate the coupled loop on the circuit residual when asked.
+      ! Evaluated BEFORE the relaxation below, because its verdict decides
+      ! whether to relax at all, and BEFORE the early RETURN on an unassociated
+      ! circuit matrix further down.
+      IF( CrtResCheck ) THEN
+        CrtRaw = CrtIter
+        CALL PublishCircuitResidual()
+        CrtResPublished = .TRUE.
+      END IF
+      ! TRAFOLO: once the raw iterate passes the circuit residual gate it is a
+      ! fixed point to tolerance, so the next stamp linearizes about IT and not
+      ! about the relaxed blend. Why: the circuits solver runs BEFORE the field
+      ! solver, so the solve that follows this call produces the iterate the
+      ! loop finally accepts, and the gate never sees it. With w < 1 the relaxed
+      ! point can still be travelling between operating points (e.g. through a
+      ! zener's blocking window after a polarity reversal) and that solve then
+      ! lands far from the fixed point the gate just passed -- reported by an
+      ! external review, reproduced in
+      ! fem/tests/circuits2D_transient_zener_gate_reversal (9.2e-4 A accepted
+      ! instead of 90.9 A). Linearized about a fixed point, the solve reproduces
+      ! it. Before: relaxation was applied unconditionally. Limitation: only
+      ! with 'Nonlinear Circuit Residual Tolerance' (without the gate there is
+      ! no verdict to act on; the field solver's steady-state norm, which
+      ! ComputeChange takes over the constraint dofs too, is then the guard).
+      IF( CrtRelax /= 1.0_dp .AND. .NOT. CrtResPassed ) &
+          CrtIter = CrtRelax * CrtIter + (1.0_dp - CrtRelax) * CrtExp
       CrtExp = CrtIter
       ! (2) export only if the user asked for it (checked inside the callee)
       CALL Circuits_ToMeshVariable(Solver,CrtIter)
-      ! (3) TRAFOLO: gate the coupled loop on the circuit residual when asked.
-      ! Placed here so it sees the freshly read raw iterate, and BEFORE the
-      ! early RETURN on an unassociated circuit matrix below.
-      IF( CrtResCheck ) CALL PublishCircuitResidual()
     END IF
+  END IF
+  ! TRAFOLO: no Lagrange values yet (first execution, before the field solver
+  ! has created them) means there is no iterate to judge, so the gate stays
+  ! closed. Before: the flag kept its initial "done" value on that call. The
+  ! next call already sees an iterate of this step, hence CrtResFresh is cleared.
+  IF( CrtResCheck .AND. .NOT. CrtResPublished ) THEN
+    IF( ASSOCIATED(Solver % Variable) ) Solver % Variable % SteadyConverged = 0
+    CrtResFresh = .FALSE.
   END IF
 
   max_element_dofs = Model % Mesh % MaxElementDOFs
@@ -1328,17 +1369,24 @@ CONTAINS
 !>    about at initialization.
 !>  * The residual is that of the PREVIOUS coupled iterate: the circuits solver
 !>    runs before the field solver, so the Lagrange values it reads are the ones
-!>    the field solver last produced. The loop therefore accepts one iterate
-!>    beyond the one whose residual passed. That is conservative (the extra
-!>    iterate is a further Newton step from an already-converged point), but it
-!>    means the reported residual is one iteration stale.
+!>    the field solver last produced, and the solve that follows this call -- the
+!>    one whose result the loop accepts -- is never judged by the gate. This is
+!>    NOT conservative by itself: with relaxation the next stamp could linearize
+!>    about a point still travelling between operating points and land far from
+!>    the passed fixed point (reproduced: 9.2e-4 A accepted instead of 90.9 A,
+!>    fem/tests/circuits2D_transient_zener_gate_reversal). Two guards make the
+!>    accepted iterate the judged one: once the gate passes, the next stamp
+!>    linearizes about the passed iterate itself (no relaxation, see the caller),
+!>    so that solve reproduces it; and the first call of each timestep never
+!>    passes (CrtResFresh), since its values are the previous step's solution.
 !>  * 'Steady State Min Iterations' still applies and still wins: while
 !>    i < CoupledMinIter the loop does not test convergence at all.
-!>  * No parallel reduction is done here; the residual is rank-local over the
-!>    components this rank owns. That is correct for the exit decision (MainUtils
-!>    does ParallelAllReduceAnd over DoneThis, so any rank that is not converged
-!>    blocks everyone) but the PUBLISHED number is local. The diode is a
-!>    serial-only element in practice anyway.
+!>  * No parallel reduction is done here; the residual is evaluated on the rank
+!>    that owns the diode's voltage dof (every rank holds every circuit dof:
+!>    CircMatInitMod makes all ranks neighbours of each circuit row). That is
+!>    correct for the exit decision (MainUtils does ParallelAllReduceAnd over
+!>    DoneThis, so any rank that is not converged blocks everyone) but the
+!>    PUBLISHED number is that rank's; the other ranks publish 0.
 !>  * Only the diode is covered. A future solution-dependent lumped type must be
 !>    added here as well as to IsLumpedComponent.
 !------------------------------------------------------------------------------
@@ -1378,12 +1426,23 @@ CONTAINS
        END DO
      END DO
 
+     ! TRAFOLO: the first call of a timestep reads the PREVIOUS step's solution
+     ! (no solve of this step has run yet), which satisfies the diode law but is
+     ! not a candidate for this step -- never pass on it. Before: it passed, so
+     ! the gate contributed nothing to the first coupled iteration of a step.
+     IF (CrtResFresh) THEN
+       CrtResPassed = .FALSE.
+       CrtResFresh = .FALSE.
+     ELSE
+       CrtResPassed = (CrtRes <= CrtResTol)
+     END IF
+
      IF (ASSOCIATED(Solver % Variable)) THEN
        Solver % Variable % SteadyChange = CrtRes
-       IF (CrtRes > CrtResTol) THEN
-         Solver % Variable % SteadyConverged = 0
-       ELSE
+       IF (CrtResPassed) THEN
          Solver % Variable % SteadyConverged = 1
+       ELSE
+         Solver % Variable % SteadyConverged = 0
        END IF
      END IF
 
@@ -1582,8 +1641,11 @@ CONTAINS
         ! linearization is chosen (Newton by default, Picard with
         ! 'Diode Newton Linearization = False'; see the stamps below).
         ! Transient only (the harmonic solver rejects diodes).
-        ! Serial only in practice: CrtExp is read at the component's global dof
-        ! index, which is exercised for serial runs only.
+        ! Parallel: CrtExp is read at the component's global dof index, which is
+        ! valid on every rank because CircMatInitMod makes all ranks neighbours of
+        ! each circuit row (a component's i and v dofs also share one owner, the
+        ! circuit index decides it). Was documented as "serial only in practice";
+        ! 3D runs on 4 MPI ranks matched serial (2026-08).
         ELSE IF (Comp % ComponentType == 'diode') THEN
             ! TRAFOLO: the keyword reads, their defaults and their validation all
             ! moved into GetDiodeParams, and the resistance law itself into
