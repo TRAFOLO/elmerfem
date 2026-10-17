@@ -1,0 +1,12 @@
+! ----- names for bodies -----
+$ coil = 1
+$ air = 2
+! ----- names for boundaries -----
+$ coil_left = 101
+$ coil_right = 102
+$ coil_bottom = 103
+$ coil_top = 104
+$ coil_inner = 105
+$ coil_outer = 106
+$ sym = 201
+$ outer = 202

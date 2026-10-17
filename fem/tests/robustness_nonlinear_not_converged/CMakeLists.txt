@@ -1,0 +1,13 @@
+IF(HAVE_UMFPACK OR HAVE_MUMPS)
+  INCLUDE(test_macros)
+  INCLUDE_DIRECTORIES(${CMAKE_BINARY_DIR}/fem/src)
+  # The mesh and circuits of circuits_harmonic_massive, with the nonlinear settings mutated.
+  SET(_base ${CMAKE_CURRENT_SOURCE_DIR}/../circuits_harmonic_massive)
+  CONFIGURE_FILE(sif/max2.sif sif/max2.sif COPYONLY)
+  CONFIGURE_FILE(sif/single.sif sif/single.sif COPYONLY)
+  CONFIGURE_FILE(sif/relaxed.sif sif/relaxed.sif COPYONLY)
+  file(COPY ELMERSOLVER_STARTINFO DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+  file(COPY ${_base}/sif/1962-circuits.definitions DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/sif")
+  file(COPY ${_base}/1962/mesh.boundary ${_base}/1962/mesh.header ${_base}/1962/mesh.nodes ${_base}/1962/mesh.elements ${_base}/1962/mesh.names DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/1962")
+  ADD_ELMER_TEST(robustness_nonlinear_not_converged LABELS robustness)
+ENDIF()

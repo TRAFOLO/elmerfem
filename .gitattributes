@@ -1,0 +1,10 @@
+# The build scripts run in the MSYS2 bash, which rejects carriage returns.
+/build_msys2.sh text eol=lf
+/deploy_msys2.sh text eol=lf
+/prune_install.sh text eol=lf
+/build_all.sh text eol=lf
+/license_audit.sh text eol=lf
+/run_gates.sh text eol=lf
+/package_bundle.sh text eol=lf
+# License texts ship byte for byte (their SHA-256 is recorded in trafolo_bundle/licenses/README.md).
+/trafolo_bundle/licenses/*.txt -text

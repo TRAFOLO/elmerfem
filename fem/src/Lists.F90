@@ -10716,7 +10716,28 @@ END SUBROUTINE ElmerEvalLuaS
 #endif
 
 
-   
+!------------------------------------------------------------------------------
+!> The name messages give a solver: its Equation, else its variable, else its
+!> index, so that a user can find it in the SIF.
+!------------------------------------------------------------------------------
+   FUNCTION SolverDisplayName( Solver ) RESULT( Name )
+!------------------------------------------------------------------------------
+     TYPE(Solver_t) :: Solver
+     CHARACTER(:), ALLOCATABLE :: Name
+     LOGICAL :: Found
+
+     Found = .FALSE.
+     IF( ASSOCIATED( Solver % Values ) ) &
+         Name = ListGetString( Solver % Values,'Equation',Found )
+     IF( Found ) RETURN
+     IF( ASSOCIATED( Solver % Variable ) ) THEN
+       Name = TRIM( Solver % Variable % Name )
+     ELSE
+       Name = 'solver '//I2S( Solver % SolverId )
+     END IF
+!------------------------------------------------------------------------------
+   END FUNCTION SolverDisplayName
+!------------------------------------------------------------------------------
 
 END MODULE Lists
 

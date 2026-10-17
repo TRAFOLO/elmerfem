@@ -1,0 +1,306 @@
+! DEV-1548: the skin ladder of a stranded coil with Transient Homogenization has
+! a memory. A DC current must see the DC resistance K/G0 at every step size, K
+! the integral of N_j^2 |w|^2 of the circuit row and G0 = y0 + alpha. The ladder
+! is the one of the Hybrid Foil-Litz template, on which the conductivity of the
+! step alone, G_skin(dt) = y0 + alpha/(1 + sigma/dt), gave 2.9x (0.2 us) and
+! 1.4x (1 us) of K/G0. The proximity ladder has no memory here (alpha = 0) and
+! the core no conductivity, so from the second step on the field is static and
+! the coil voltage is resistive.
+Check Keywords "Warn"
+INCLUDE sif/2241-circuits.definitions
+INCLUDE 2241/mesh.names
+! BDF order and step of this run, and the expected diagonal K/Gskin
+INCLUDE sif/case.params
+! K/G0: K = 1.0758464565e7 1/m is r_component(1)*y0 of the same coil with
+! alpha = 0 and y0 = 9e7 S/m (circuits_transient_stranded_homogenization_coupled
+! before DEV-1548), G0 = 2.0838e5 + 1.1611e7 S/m. Kf = 5.2529053551e6 1/m is the
+! same integral as MagnetoDynamicsCalcFields takes it (unit w, half model).
+$ Rdc = 9.1023933276E-01
+$ PJdc = 4.4443154845E-01
+Header 1
+   Mesh DB "." "2241"
+End
+Constants 1
+   Permittivity of Vacuum = 8.8542e-12
+End
+Initial Condition 1
+   A {e} = Real 0
+End
+Simulation 1
+   Max Output Level = 3
+   Coordinate System = Cartesian 3D
+   Coordinate Mapping(3) = 1 2 3
+   Coordinate Scaling = 0.001
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = $Order
+   Timestep intervals = 12
+   Timestep Sizes = $dt
+   Steady State Max Iterations = 1
+   Output Intervals = 1
+End
+Solver 1
+   Exec Solver = Before all
+   Procedure = "DirectionSolver" "DirectionSolver"
+   Linear System Solver = Iterative
+   Linear System Iterative Method = BiCGStab
+   Linear System Max Iterations = 5000
+   Linear System Convergence Tolerance = 1.0e-10
+   Linear System Abort Not Converged = True
+   Linear System Residual Output = 1000
+   Equation = Direction Alpha
+   Variable =  Alpha
+End
+Solver 2
+   Exec Solver = Before all
+   Procedure = "DirectionSolver" "DirectionSolver"
+   Linear System Solver = Iterative
+   Linear System Iterative Method = BiCGStab
+   Linear System Max Iterations = 5000
+   Linear System Convergence Tolerance = 1.0e-10
+   Linear System Abort Not Converged = True
+   Linear System Residual Output = 1000
+   Equation = Direction Beta
+   Variable =  Beta
+End
+Solver 3
+   Exec Solver = Before All
+   Equation = Transformation matrix
+   Procedure = "CoordinateTransform" "RotMSolver"
+   Variable = -nooutput Dummy
+   Optimize Bandwidth = False
+   Polar Decomposition Determinant Tolerance = Real 1.0e-9
+   Polar Decomposition Max Iterations = Integer 100
+   Exported Variable 1 = -nooutput RotM E[RotM E:9]
+   Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+   Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+   Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+   Discontinuous Galerkin = True
+End
+Solver 4 !-- WpotentialSolver - Wsolve
+   Exec Solver = Before All
+   Procedure = "WPotentialSolver" "Wsolve"
+   Equation = "Wire direction"
+   Variable = W
+   Linear System Solver = Iterative
+   Linear System Iterative Method = CG
+   Linear System Max Iterations = 10000
+   Linear System Convergence Tolerance = 1.0e-10
+   Linear System Abort Not Converged = True
+   Linear System Residual Output = 1000
+End
+Solver 5 !-- CircuitsAndDynamics - CircuitsAndDynamicsHarmonic
+   Exec Solver = Always
+   Equation = Circuits
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+End
+Solver 6  !---- MagnetoDynamics, WhitneyAVSolver
+   Exec Solver = Always
+   Equation = "MGDynamics"
+   Variable = "A"
+   Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+   NonLinear System Relaxation Factor=1
+   Export Lagrange Multiplier = Logical True
+   Exported Variable 1 = -elem Xi Alpha
+   Exported Variable 2 = -elem Xi Beta
+   Exported Variable 3 = -elem Proximity Loss
+   ! GCR, not BiCGStab(l): from the second step on the correction of a step
+   ! lives in the coil voltage alone, BiCGStab(l) meets it exactly in its first
+   ! inner step and then divides 0 by 0.
+   Linear System Solver = Iterative
+   Linear System Iterative Method = GCR
+   Linear System GCR Restart = 200
+   Linear System preconditioning = none
+   Linear System Convergence Tolerance = 1.e-11
+   Linear System Max Iterations = 3000
+   Linear System Residual Output = 1000
+   Steady State Convergence Tolerance = 1e-08
+End
+Solver 7
+   Exec Solver = Always
+   Equation = "MGDynamicsCalc"
+   Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+   Linear System Symmetric = True
+   Potential Variable = String "A"
+   Calculate Current Density = Logical True
+   Calculate Joule Heating = Logical True
+   Calculate Nodal Fields = Logical False
+   Loss Estimation = Logical True
+   Steady State Convergence Tolerance = 0
+   Linear System Solver = "Iterative"
+   Linear System Preconditioning = None
+   Linear System Residual Output = 1000
+   Linear System Max Iterations = 5000
+   Linear System Iterative Method = CG
+   Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 8
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 9
+   ! The coil voltage at 1 A: the DC resistance K/G0.
+   Exec Solver = After timestep
+   Equation = "sv"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/dc.dat
+   Variable 1 = String "Joule Heating E"
+   Operator 1 = String "int"
+   Show Norm Name = String "res: v_component(1)"
+End
+Solver 10
+   ! The conduction heat of the step from the circuit, K [R0 I^2 + A (I - chi)^2].
+   Exec Solver = After timestep
+   Equation = "sv heat"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/heat.dat
+   Show Norm Name = String "res: p_skin_component(1)"
+End
+Solver 11
+   ! The same heat spread over the winding by MagnetoDynamicsCalcFields.
+   Exec Solver = After timestep
+   Equation = "sv field"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/field.dat
+   Variable 1 = String "Joule Heating E"
+   Operator 1 = String "int"
+   Show Norm Index = Integer 1
+End
+Solver 12
+   ! r_component stays the diagonal of the step, K/Gskin, which TRAFOLO rescales.
+   Exec Solver = After timestep
+   Equation = "sv diagonal"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 2241/dat/diagonal.dat
+   Show Norm Name = String "res: r_component(1)"
+End
+Equation 1
+   Active Solvers(2) = 6 7
+End
+Equation 2
+   Active Solvers(7) = 1 2 3 4 5 6 7
+End
+Material 1
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+   Relative Permittivity = 1e100
+End
+Material 2
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+   Relative Permittivity = 1
+End
+Material 3
+   Name = metal
+   Relative Permeability = 1
+   Relative Permittivity = 1e100
+   Electric Conductivity = 1e7
+End
+Body 1
+   Name = core
+   Target Bodies(1) = $ core
+   Equation = 1
+   Material = 1
+   Initial Condition = 1
+End
+Body 2
+   Name = air
+   Target Bodies(1) = $ air
+   Equation = 1
+   Material = 2
+   Initial Condition = 1
+End
+Body 3
+   Name = airgap_1_limb_2
+   Target Bodies(1) = $ airgap_1_limb_2
+   Equation = 1
+   Material = 2
+   Initial Condition = 1
+End
+Body 4
+   Name = wp1
+   Target Bodies(1) = $ wp1
+   Equation = 2
+   Material = 3
+   Initial Condition = 1
+   Body Force = 1
+   Alpha reference (3) = Real 1 0 0
+   Beta reference (3) = Real 0 1 0
+End
+Component 1
+   Name = String wp1
+   Body = Integer 4
+   Coil Type = String stranded
+   Homogenization Model = Logical True
+   Transient Homogenization = Logical True
+   Homogenization Ladder Order = Integer 1
+   Nu 11 y0 = Real 7.95774715e5
+   Nu 11 alpha = Real 0.0
+   Nu 11 Sigma(1,1) = Real 1.0e-3
+   Nu 22 y0 = Real 7.95774715e5
+   Nu 22 alpha = Real 0.0
+   Nu 22 Sigma(1,1) = Real 1.0e-3
+   ! The Sigma 33 ladder of the Hybrid Foil-Litz template.
+   Sigma 33 y0 = Real 2.0838e5
+   Sigma 33 alpha = Real 1.1611e7
+   Sigma 33 Sigma(1,1) = Real 3.981e-7
+   Number of Turns = Real 144
+   Electrode Area = Real 0.000185614878383
+   Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
+End
+Body Force 1
+   Name = "Circuit"
+   ! i_component(1) = -S = 1 A from the first step on.
+   S = Real -1.0
+End
+Boundary Condition 1
+   Name = BCn Flux Parallel
+   Target Boundaries(2) = $ coreface_xy xy0
+   A {e} = Real 0
+End
+Boundary Condition 2
+   Name = Alpha0
+   Target Boundaries = $ wp1_alpha0
+   Body 4: Alpha = Real 0
+End
+Boundary Condition 3
+   Name = Alpha1
+   Target Boundaries = $ wp1_alpha1
+   Body 4: Alpha = Real 1
+End
+Boundary Condition 4
+   Name = ground
+   Target Boundaries = $ wp1_gamma1
+   W = Real 0
+   A {e} = Real 0
+End
+Boundary Condition 5
+   Name = current in foil winding
+   Target Boundaries = $ wp1_gamma0
+   W = Real 1
+   A {e} = Real 0
+End
+Boundary Condition 6
+   Name = Beta1
+   Target Boundaries = $ wp1_beta1
+   Body 4: Beta = Real 1
+End
+Boundary Condition 7
+   Name = Beta0
+   Target Boundaries = $ wp1_beta0
+   Body 4: Beta = Real 0
+End
+
+Solver 9 :: Reference Norm = Real $Rdc
+Solver 9 :: Reference Norm Tolerance = Real 1E-06
+Solver 10 :: Reference Norm = Real $Rdc
+Solver 10 :: Reference Norm Tolerance = Real 1E-06
+Solver 11 :: Reference Norm = Real $PJdc
+Solver 11 :: Reference Norm Tolerance = Real 1E-06
+Solver 12 :: Reference Norm = Real $Rdiag
+Solver 12 :: Reference Norm Tolerance = Real 1E-08
+$fprintf( stderr, "TEST CASE 1\n");
+RUN

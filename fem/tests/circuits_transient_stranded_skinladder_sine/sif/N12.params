@@ -1,0 +1,10 @@
+! Implicit Euler, 12 points per period of 2 MHz, two periods
+$ Nsteps = 24
+$ dt = 1/(2.0e6*12)
+$ Tper = 5.0e-7
+$ SSIter = 1
+! Discrete values of the implicit Euler ladder (heat of the 2nd period,
+! last step of the circuit), and the bound of the error to the harmonic value
+$ Pavg = 3.1163893239E-01
+$ Plast = 7.5455846034E-01
+$ Tlim = 2.083333E-02

@@ -48,7 +48,7 @@ SUBROUTINE WhitneyAVHarmonicSolver_Init0(Model,Solver,dt,Transient)
   LOGICAL :: Transient
 !------------------------------------------------------------------------------
   TYPE(ValueList_t), POINTER :: SolverParams
-  LOGICAL :: Found, PiolaVersion, SecondOrder, SecondFamily
+  LOGICAL :: Found, PiolaVersion, SecondOrder, SecondFamily, Capacitive
   CHARACTER(:), ALLOCATABLE :: ElemType
 
   TYPE(Solver_t), POINTER :: Solvers(:)
@@ -75,6 +75,15 @@ SUBROUTINE WhitneyAVHarmonicSolver_Init0(Model,Solver,dt,Transient)
   END IF
 
   CALL ListAddNewLogical( SolverParams, 'Linear System Complex', .TRUE. )
+  ! The shifted edge dofs remove the gauge freedom. With the electrodynamics or Darwin
+  ! model the scalar potential also carries the capacitive part of the field, which a
+  ! shift of its rows next to a conductor would disturb, so the potential must then be
+  ! fixed somewhere (a boundary value, an electrode). Without them the potential exists
+  ! in conductors only, and the shift of its rows also fixes the potential constant of a
+  ! floating conductor.
+  Capacitive = ListGetLogical( SolverParams, 'Electrodynamics Model', Found )
+  IF ( .NOT. Capacitive ) Capacitive = ListGetLogical( SolverParams, 'Darwin Model', Found )
+  CALL ListAddNewLogical( SolverParams, 'Mumps Regularize Nodal Dofs', .NOT. Capacitive )
 
 ! This is for internal communication with the saving routines
   CALL ListAddLogical( SolverParams,'Hcurl Basis',.TRUE.)
@@ -209,7 +218,9 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   LOGICAL :: Stat, TG, Jfix, JfixSolve, LaminateStack, CoilBody, EdgeBasis,LFact,LFactFound
   LOGICAL :: PiolaVersion, SecondOrder, GotHbCurveVar, HasTensorReluctivity
   LOGICAL :: ExtNewton, StrandedHomogenization
+  LOGICAL :: LamLayerHasNormal, LamSheet
   LOGICAL, ALLOCATABLE, SAVE :: TreeEdges(:)
+  LOGICAL, SAVE :: CircuitGaugeWarned = .FALSE., ElectroDynamicsGaugeWarned = .FALSE.
 
   INTEGER :: n,nb,nd,t,istat,i,j,k,l,nNodes,Active,FluxCount=0
   INTEGER :: NoIterationsMin, NoIterationsMax
@@ -228,6 +239,10 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   REAL(KIND=dp), POINTER :: Cwrk(:,:,:), Cwrk_im(:,:,:), LamThick(:)
   REAL(KIND=dp), POINTER :: sValues(:), fixpot(:)
   REAL(KIND=dp) :: NewtonTol
+  ! 'layered' laminate stack model of the current body
+  REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
+  REAL(KIND=dp), ALLOCATABLE :: SheetLamThick(:)
+  COMPLEX(KIND=dp), ALLOCATABLE :: SheetCond(:)
   
   CHARACTER(LEN=MAX_NAME_LEN):: LaminateStackModel, CoilType, HbCurveVarName
 
@@ -247,7 +262,8 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
 
   
   SAVE MASS, STIFF, LOAD, ReLOAD, FORCE, Tcoef, JFixVec, JFixFORCE, Acoef, Acoef_t, &
-     Cwrk, Cwrk_im, LamCond, LamThick, AllocationsDone, RotM, GapLength, MuParameter, SkinCond
+     Cwrk, Cwrk_im, LamCond, LamThick, AllocationsDone, RotM, GapLength, MuParameter, SkinCond, &
+     SheetLamThick, SheetCond
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN
 
@@ -315,7 +331,7 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
      ALLOCATE( FORCE(N), LOAD(7,N), ReLOAD(3,N), STIFF(N,N), MASS(n,n), &
           JFixVec(3,N),JFixFORCE(n), Tcoef(3,3,N), RotM(3,3,N), &
           GapLength(N), MuParameter(N), SkinCond(N), Acoef(N), LamCond(N), &
-          LamThick(N), STAT=istat )
+          LamThick(N), SheetLamThick(N), SheetCond(N), STAT=istat )
      IF ( istat /= 0 ) THEN
         CALL Fatal( 'WhitneyAVHarmonicSolver', 'Memory allocation error.' )
      END IF
@@ -487,7 +503,7 @@ CONTAINS
               END IF
            CASE ('massive')
               CoilBody = .TRUE.
-           CASE ('foil winding')
+           CASE ('foil winding','flat wire','foil sheet')
               CoilBody = .TRUE.
               CALL GetElementRotM(Element, RotM, n)
            CASE DEFAULT
@@ -545,6 +561,27 @@ CONTAINS
            IF (.NOT. Found) CALL Fatal('WhitneyAVHarmonicSolver', 'Laminate Stack Conductivity not found!')
            LamCond(1:n) = CMPLX( REAL(LamCond(1:n)), &
                   GetReal( Material, 'Electric Conductivity im',  Found), KIND=dp)
+         CASE('layered')
+           ! Anisotropic complex reluctivity of insulated laminations. The net
+           ! currents of the laminations are carried by 'Thin Sheet Laminate
+           ! Thickness' boundaries on their mid-surfaces, so this body itself
+           ! should be given zero conductivity.
+           IF (ListCheckPresent(Material, 'H-B Curve') .OR. HasTensorReluctivity) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'The layered laminate stack model needs a scalar linear permeability!')
+           ! the lamination sheets take a real permeability, and the sheet
+           ! correction holds only for the same mu in body and sheets
+           IF (ANY(ABS(AIMAG(Acoef(1:n))) > AEPS * ABS(Acoef(1:n)))) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'The layered laminate stack model needs a real permeability!')
+           IF (ANY(ABS(Tcoef(:,:,1:n)) > AEPS)) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'A layered laminate stack body must have zero Electric Conductivity!')
+           IF (CoilBody) &
+             CALL Fatal('WhitneyAVHarmonicSolver', &
+                 'A layered laminate stack body cannot be a coil component!')
+           CALL GetLaminateLayeredParameters(Material, LamLayerThick, LamLayerCond, &
+               LamLayerFill, LamLayerNormal, LamLayerHasNormal)
          CASE DEFAULT
            CALL WARN('WhitneyAVHarmonicSolver', 'Nonexistent Laminate Stack Model chosen!')
          END SELECT
@@ -653,14 +690,32 @@ CONTAINS
            CALL LocalMatrixSkinBC(MASS,STIFF,FORCE,SkinCond,MuParameter,Element,CircuitDrivenBC,n,nd)
          ELSE         
            GapLength = GetConstReal( BC, 'Thin Sheet Thickness', Found)
-           IF (Found) THEN
+           SheetLamThick = GetConstReal( BC, 'Thin Sheet Laminate Thickness', LamSheet)
+           IF (Found .OR. LamSheet) THEN
              MuParameter=GetConstReal( BC, 'Thin Sheet Relative Permeability', Found)
              IF (.NOT. Found) MuParameter = 1.0_dp ! if not found default to "air" property
              ! Technically, there is no skin but why create yet another conductivity variable?
              SkinCond = GetConstReal( BC, 'Thin Sheet Electric Conductivity', Found)
              IF (.NOT. Found) SkinCond = 1.0_dp ! if not found default to "air" property
-             CALL LocalMatrixThinSheet( MASS, STIFF, FORCE, LOAD, GapLength, MuParameter, &
-                                            SkinCond, Element, n, nd )
+             IF (LamSheet) THEN
+               ! One insulated lamination of a 'layered' stack: the sheet on its
+               ! mid-surface carries its net current. The stack body holds the
+               ! lamination's magnetic energy, so there is no magnetic term here
+               ! and the conductance factor compensates the part of the
+               ! net-current impedance the body already holds.
+               Omega = GetAngularFrequency(Found=Found)
+               DO i = 1, n
+                 SheetCond(i) = SkinCond(i) * LaminateSheetFactor(Omega, &
+                     CMPLX(VacuumPermeability() * MuParameter(i), 0.0_dp, KIND=dp), &
+                     SkinCond(i), SheetLamThick(i))
+               END DO
+               CALL LocalMatrixThinSheet( MASS, STIFF, FORCE, LOAD, SheetLamThick, MuParameter, &
+                                              SheetCond, .FALSE., Element, n, nd )
+             ELSE
+               SheetCond(1:n) = SkinCond(1:n)
+               CALL LocalMatrixThinSheet( MASS, STIFF, FORCE, LOAD, GapLength, MuParameter, &
+                                              SheetCond, .TRUE., Element, n, nd )
+             END IF
            ELSE
              CALL LocalMatrixBC(MASS,STIFF,FORCE,LOAD,Acoef,Element,n,nd )
            END IF
@@ -679,8 +734,26 @@ CONTAINS
     ! Check for tree gauge, if requested or using direct solver:
     ! ------------------------------------------------------------
     TG=GetLogical(SolverParams, 'Use tree gauge', Found)
-    IF (.NOT. Found) TG=GetString(GetSolverParams(), &
-        'Linear System Solver',Found)=='direct'
+    IF (.NOT. Found) THEN
+      TG=GetString(GetSolverParams(),'Linear System Solver',Found)=='direct'
+      ! Wrong without an error with circuit coils (the gauge removes edge dofs they couple to;
+      ! circuits_harmonic_massive with MUMPS: 5x off in energy) and with the electrodynamics
+      ! model (TRAFOLO spiral at 9 GHz: wrong rows in the first iteration, over-constrained tree).
+      IF (TG .AND. .NOT. CircuitGaugeWarned .AND. ASSOCIATED(CurrentModel % Circuit_tot_n)) THEN
+        IF (CurrentModel % Circuit_tot_n > 0) THEN
+          CALL Warn('WhitneyAVHarmonicSolver', &
+              'The direct solver switches the tree gauge on by itself, which breaks circuit coils. '// &
+              'Set "Use Tree Gauge = False" and "Mumps Null Pivot Detection = True".')
+          CircuitGaugeWarned = .TRUE.
+        END IF
+      END IF
+      IF (TG .AND. ElectroDynamics .AND. .NOT. ElectroDynamicsGaugeWarned) THEN
+        CALL Warn('WhitneyAVHarmonicSolver', &
+            'The direct solver switches the tree gauge on by itself, which gave wrong results with the '// &
+            'electrodynamics model. Set "Use Tree Gauge = False".')
+        ElectroDynamicsGaugeWarned = .TRUE.
+      END IF
+    END IF
 
     !
     ! Dirichlet BCs in terms of vector potential A:
@@ -730,7 +803,7 @@ BLOCK
       IF (.NOT. ASSOCIATED(CompParams)) CYCLE
 
       CoilType = GetString(CompParams, 'Coil Type', Found)
-      IF(CoilType/='massive' .AND. CoilType/='foil winding') CYCLE
+      IF(CoilType/='massive' .AND. CoilType/='foil winding' .AND. CoilType/='flat wire') CYCLE
 
       ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found )
       IF( .NOT. ConstraintActive ) CYCLE
@@ -745,6 +818,10 @@ BLOCK
 
       IF(ASSOCIATED(Electrodes)) THEN
         IF(ALL(Electrodes/=Element % BoundaryInfo % Constraint)) CYCLE
+      ELSE IF(GetLogical(CompParams,'Coil Closed',Found)) THEN
+        ! A closed coil has no electrodes, so without the list this
+        ! would pin the whole coil surface. One node is pinned below instead.
+        CYCLE
       END IF
 
       DO i=1,Element % Type % NumberOfNodes
@@ -752,6 +829,65 @@ BLOCK
         A % ConstrainedDOF(j:j+1) = .TRUE.
       END DO
     END DO
+
+    ! Fix the constant of the nodal potential of every closed coil at
+    ! exactly one node. The smallest global node index of the coil's bodies is
+    ! the same choice on every partition; all partitions holding it constrain
+    ! it, so the shared row stays consistent.
+    BLOCK
+      INTEGER, PARAMETER :: NoNode = HUGE(1)
+      INTEGER :: c, e, ni, gnode, MinGNode
+      TYPE(Element_t), POINTER :: BulkElement
+      LOGICAL :: Parallel
+
+      Parallel = ( ParEnv % PEs > 1 )
+      IF(Parallel) Parallel = ASSOCIATED(Mesh % ParallelInfo % GlobalDOFs)
+
+      DO c=1,Model % NumberOfComponents
+        CompParams => Model % Components(c) % Values
+        IF(.NOT.ASSOCIATED(CompParams)) CYCLE
+        IF(.NOT.GetLogical(CompParams,'Coil Closed',Found)) CYCLE
+        IF(.NOT.GetLogical(CompParams,'Activate Constraint',Found)) CYCLE
+        ! The closed massive coil is driven only through its cut potential,
+        ! which the nodal constraint cancels: the solution would be zero.
+        IF(GetString(CompParams,'Coil Type',Found) == 'massive') CALL Fatal('WhitneyAVHarmonicSolver', &
+            'Component '//I2S(c)//': "Activate Constraint" is not supported for a closed massive coil.')
+        AutomaticBC = GetLogical(CompParams,'Automatic electrode BC',Found)
+        IF(.NOT.Found) AutomaticBC = .TRUE.
+        IF(.NOT.AutomaticBC) CYCLE
+        Electrodes => ListGetIntegerArray(CompParams,'Electrode Boundaries',Found)
+        IF(ASSOCIATED(Electrodes)) CYCLE
+
+        MinGNode = NoNode
+        DO e=1,GetNOFActive()
+          BulkElement => GetActiveElement(e)
+          IF(.NOT.ASSOCIATED(GetComponentParams(BulkElement),CompParams)) CYCLE
+          DO i=1,BulkElement % TYPE % NumberOfNodes
+            ni = BulkElement % NodeIndexes(i)
+            IF(Solver % Variable % Perm(ni) == 0) CYCLE
+            gnode = ni
+            IF(Parallel) gnode = Mesh % ParallelInfo % GlobalDOFs(ni)
+            MinGNode = MIN(MinGNode,gnode)
+          END DO
+        END DO
+
+        IF(ParEnv % PEs > 1) MinGNode = NINT(ParallelReduction(1._dp*MinGNode,1))
+        IF(MinGNode >= NoNode) CYCLE
+
+        DO ni=1,Mesh % NumberOfNodes
+          IF(Solver % Variable % Perm(ni) == 0) CYCLE
+          gnode = ni
+          IF(Parallel) gnode = Mesh % ParallelInfo % GlobalDOFs(ni)
+          IF(gnode /= MinGNode) CYCLE
+          j = 2*(Solver % Variable % Perm(ni)-1)+1
+          A % ConstrainedDOF(j:j+1) = .TRUE.
+          EXIT
+        END DO
+
+        CALL Info('WhitneyAVHarmonicSolver','Closed coil component '//I2S(c)//&
+            ': nodal potential pinned at global node '//I2S(MinGNode),Level=6)
+      END DO
+    END BLOCK
 END BLOCK
 
     CALL DefaultDirichletBCs()
@@ -1328,7 +1464,13 @@ END BLOCK
     StrandedHomogenization = .FALSE.
     UseRotM = .FALSE.
     IF(CoilBody) THEN
-      IF (CoilType == 'stranded') THEN 
+      ! 'foil sheet' uses the same homogenized complex reluctivity as
+      ! 'stranded': 1/mu0 on the stacking normal, the complex stack reluctivity
+      ! on the two components in the turn plane. Which tensor component is which
+      ! follows 'Stacking Direction' and is decided where the keywords are
+      ! written, in SetFoilSheetHarmonicMaterial, so nothing is direction aware
+      ! here.
+      IF (CoilType == 'stranded' .OR. CoilType == 'foil sheet') THEN
         CompParams => GetComponentParams( Element )
         StrandedHomogenization = GetLogical(CompParams, 'Homogenization Model', Found)
 
@@ -1356,7 +1498,8 @@ END BLOCK
 
           UseRotM = .TRUE.
         END IF
-      ELSE IF( CoilType == 'foil winding') THEN
+        IF (CoilType == 'foil sheet') UseRotM = .TRUE.
+      ELSE IF( CoilType == 'foil winding' .OR. CoilType == 'flat wire') THEN
         UseRotM = .TRUE.
       END IF
     END IF
@@ -1443,7 +1586,10 @@ END BLOCK
          END SELECT
        END IF
 
-       IF (HasTensorReluctivity) THEN
+       IF (LaminateStack .AND. LaminateStackModel == 'layered') THEN
+         Nu = LaminateLayeredReluctivity(Omega, mu, LamLayerCond, LamLayerThick, &
+             LamLayerFill, LamLayerNormal, LamLayerHasNormal)
+       ELSE IF (HasTensorReluctivity) THEN
          IF (SIZE(Acoef_t,2) == 1) THEN
            Nu = CMPLX(0._dp, 0._dp, kind=dp)
            DO i = 1,3
@@ -1589,7 +1735,8 @@ END BLOCK
               SUM(MATMUL(Nu, RotWBasis(j,:))*RotWBasis(i,:))*detJ*IP%s(t)
 
            ! Compute the conductivity term <j * omega * C A,eta> 
-           ! for stiffness matrix (anisotropy taken into account)
+           ! for stiffness matrix (anisotropy taken into account). C is zero for
+           ! a foil sheet, which carries no volumetric eddy current either.
            ! ----------------------------------------------------
            IF (CoilType /= 'stranded') DAMP(p,q) = DAMP(p,q) + &
                 SUM(MATMUL(C, WBasis(j,:))*WBasis(i,:))*detJ*IP % s(t)
@@ -1830,18 +1977,21 @@ END BLOCK
 
 !------------------------------------------------------------------------------
   SUBROUTINE LocalMatrixThinSheet(MASS, STIFF, FORCE, LOAD, Thickness, Permeability, &
-                                          Conductivity, Element, n, nd )
+                                          Conductivity, MagneticTerm, Element, n, nd )
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     COMPLEX(KIND=dp) :: LOAD(:,:)
     COMPLEX(KIND=dp) :: MASS(:,:), STIFF(:,:), FORCE(:)
+    COMPLEX(KIND=dp) :: Conductivity(:)
+    LOGICAL :: MagneticTerm
     INTEGER :: n, nd
     TYPE(Element_t), POINTER :: Element, Parent, Edge
 !------------------------------------------------------------------------------
     REAL(KIND=dp) :: Basis(n),dBasisdx(n,3),DetJ
     REAL(KIND=dp) :: WBasis(nd,3), RotWBasis(nd,3)
-    REAL(KIND=dp) :: Thickness(:), Permeability(:), Conductivity(:)
-    REAL(KIND=dp) :: sheetThickness, mu, muVacuum, C
+    REAL(KIND=dp) :: Thickness(:), Permeability(:)
+    REAL(KIND=dp) :: sheetThickness, mu, muVacuum
+    COMPLEX(KIND=dp) :: C
 
     COMPLEX(KIND=dp) :: DAMP(nd,nd)
     
@@ -1915,8 +2065,10 @@ END BLOCK
            q = j+np
            ! Magnetic energy term due to the magnetic flux density 
            ! ----------------------------------------------------
-           STIFF(p,q) = STIFF(p,q) + sheetThickness / (mu*muVacuum) * &
-              SUM(RotWBasis(i,:)*RotWBasis(j,:))*detJ*IP%s(t)
+           IF (MagneticTerm) THEN
+             STIFF(p,q) = STIFF(p,q) + sheetThickness / (mu*muVacuum) * &
+                SUM(RotWBasis(i,:)*RotWBasis(j,:))*detJ*IP%s(t)
+           END IF
 
            ! Compute the conductivity term <j * omega * C A x n,eta x n> 
            ! for stiffness matrix (without anisotropy taken into account)

@@ -21,6 +21,19 @@ SUBROUTINE mpi_finalize(ierr)
   ierr = 0
 END SUBROUTINE mpi_finalize
 
+SUBROUTINE mpi_finalized(fin, ierr)
+  LOGICAL :: fin
+  INTEGER :: ierr
+  fin = .FALSE.
+  ierr = 0
+END SUBROUTINE mpi_finalized
+
+SUBROUTINE mpi_abort(comm, errorcode, ierr)
+  INTEGER :: comm, errorcode, ierr
+  ierr = 0
+  STOP 1
+END SUBROUTINE mpi_abort
+
 SUBROUTINE mpi_comm_size(comm, csize, ierr)
   INTEGER :: comm, csize, ierr
   ierr = 0

@@ -1,0 +1,24 @@
+! y0 = 0, DC 1 A, implicit Euler, 1e-06 s steps
+$ y0 = 0
+$ alpha = 11819380
+$ sigma = 3.981e-07
+$ Order = 1
+$ Nsteps = 12
+$ function dtfun(t) { _dtfun = 1e-06 }
+$ f0 = 2000000
+$ function isrc(t) { _isrc = 1 }
+$ Tavg = 0
+! Discrete values of the ladder (DEV-1549 predictions): heat average, ladder voltage,
+! coil voltage, circuit heat, field heat and diagonal of the last step
+$ Pavg = 4.4443154845e-01
+$ Vskin = 9.1023933277e-01
+$ Vcomp = 9.1023933277e-01
+$ Plast = 9.1023933277e-01
+$ PJlast = 4.4443154845e-01
+$ Rdiag = 1.2726056112e+00
+$ VcompTol = 1.000e-03
+! Analytic references and their tolerances (SaveScalars norms are absolute values)
+$ Pref = 4.4443154845e-01
+$ PrefTol = 1.000e-06
+$ Vref = 9.1023933277e-01
+$ VrefTol = 1.000e-06

@@ -1,0 +1,7 @@
+! 6.6 kHz, t/delta = 0.450: one layer per turn.
+! Explicit one layer 6.652110806466E-03 W, explicit three 6.689058446850E-03 W.
+! expect: foil sheet: 15 cells x 1 sub-layers x 40 segments
+! expect: Sheet Cells = 15, Sheet Segments = 40 (406 block elements)
+Simulation 1 :: Frequency = Real 6600
+Solver 9 :: Reference Norm = Real 6.652110806466E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-6

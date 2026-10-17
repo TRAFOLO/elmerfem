@@ -1,0 +1,9 @@
+! case edge
+$ BDF = 1
+$ Nsteps = 40
+$ dt = 2.5e-4
+! the trapezoid: 0.5 ms edges, 4.5 ms flat, period 10 ms, +-1 A
+$ function trapezoid(t) { s = t - 0.01*floor(t/0.01); if (s < 5.0e-4) _trapezoid = s/5.0e-4; else if (s < 5.0e-3) _trapezoid = 1; else if (s < 5.5e-3) _trapezoid = 1 - 2*(s - 5.0e-3)/5.0e-4; else if (s < 0.0095) _trapezoid = -1; else _trapezoid = -1 + (s - 0.0095)/5.0e-4; }
+$ function current(t) { _current = trapezoid(t); }
+$ Pref = 1.135016438E-02
+$ Ptol = 1e-5

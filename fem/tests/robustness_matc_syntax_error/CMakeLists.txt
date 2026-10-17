@@ -1,0 +1,11 @@
+IF(HAVE_UMFPACK OR HAVE_MUMPS)
+  INCLUDE(test_macros)
+  INCLUDE_DIRECTORIES(${CMAKE_BINARY_DIR}/fem/src)
+  # The mesh and circuits of circuits_harmonic_massive, with one input mutated.
+  SET(_base ${CMAKE_CURRENT_SOURCE_DIR}/../circuits_harmonic_massive)
+  CONFIGURE_FILE(sif/1962.sif sif/1962.sif COPYONLY)
+  file(COPY ELMERSOLVER_STARTINFO DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+  file(COPY ${_base}/sif/1962-circuits.definitions DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/sif")
+  file(COPY ${_base}/1962/mesh.boundary ${_base}/1962/mesh.header ${_base}/1962/mesh.nodes ${_base}/1962/mesh.elements ${_base}/1962/mesh.names DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/1962")
+  ADD_ELMER_TEST(robustness_matc_syntax_error LABELS robustness)
+ENDIF()

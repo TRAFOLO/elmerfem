@@ -1,0 +1,3 @@
+! Both ladders: the in-plane reluctivity ladder and the strand skin ladder
+$ nsteps = 48
+$ ref_energy = 1.484045444e-5

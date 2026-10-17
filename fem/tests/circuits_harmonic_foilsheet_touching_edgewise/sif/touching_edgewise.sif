@@ -1,0 +1,267 @@
+! Edgewise flat wire version of circuits_harmonic_foilsheet_touching_build
+! (DEV-1541): the same two windings with 'Stacking Direction = String beta',
+! 10 turns stacked axially in each (1 mm pitch, 0.8 mm copper), 10 cells x 4
+! segments, currents in the same sense. The chain numbered Beta (0 / 1 / 2) is
+! the stacking coordinate here, and Alpha, which the two windings give
+! different values on the shared face (up to 1/6), the across coordinate; each
+! body keeps its own Alpha in the elemental copy 'Alpha Direction'. Read from
+! the nodal field (one value per node) r_component(2) would be +0.08 %.
+!
+! The same geometry with a 0.1 mm air gap (upper ring at z 10.1..20.1, the
+! same grid lines) gives the same r_component(2) and an eddy current power of
+! 6.0023E-03 W (-0.11 % here).
+!
+! Pins r_component(2), the DC resistance of the upper winding, and the eddy
+! current power of the half model; the same numbers with 1 and 4 partitions.
+Check Keywords "Warn"
+INCLUDE sif/touching_edgewise-circuits.definitions
+INCLUDE rings/mesh.names
+Header
+  Mesh DB "." "rings"
+End
+Constants
+  Permittivity of Vacuum = 8.8542e-12
+End
+Simulation
+  Max Output Level = 3
+  Coordinate System = Cartesian 3D
+  Coordinate Scaling = 0.001
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+  Frequency = Real 10000
+End
+Solver 1  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Alpha
+  Variable = Alpha
+  Direction Method = String "distance"
+End
+Solver 2  !---- DirectionSolver, DirectionSolver
+  Exec Solver = Before all
+  Procedure = "DirectionSolver" "DirectionSolver"
+  Equation = Direction Beta
+  Variable = Beta
+  Direction Method = String "distance"
+End
+Solver 3  !---- CoordinateTransform, RotMSolver
+  Exec Solver = Before All
+  Equation = Transformation matrix
+  Procedure = "CoordinateTransform" "RotMSolver"
+  Variable = -nooutput Dummy
+  Optimize Bandwidth = False
+  Polar Decomposition Determinant Tolerance = Real 1.0e-9
+  Polar Decomposition Max Iterations = Integer 100
+  Exported Variable 1 = -nooutput RotM E[RotM E:9]
+  Exported Variable 2 = -nooutput Alpha Vector E[Alpha Vector E:3]
+  Exported Variable 3 = -nooutput Beta Vector E[Beta Vector E:3]
+  Exported Variable 4 = -nooutput Gamma Vector E[Gamma Vector E:3]
+  Discontinuous Galerkin = True
+End
+Solver 4  !---- WPotentialSolver, Wsolve
+  Exec Solver = Before All
+  Procedure = "WPotentialSolver" "Wsolve"
+  Equation = "Wire direction"
+  Variable = W
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Max Iterations = 500
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Preconditioning = None
+  Linear System Abort Not Converged = True
+  Linear System Residual Output = 1000
+End
+Solver 5  !---- CircuitsAndDynamics, CircuitsAndDynamicsHarmonic
+  Exec Solver = Always
+  Equation = Circuits
+  Variable = X
+  No Matrix = Logical True
+  Procedure = "CircuitsAndDynamics" "CircuitsAndDynamicsHarmonic"
+End
+Solver 6  !---- MagnetoDynamics, WhitneyAVHarmonicSolver
+  Exec Solver = Always
+  Equation = "MGDynamics"
+  Variable = "A[A re:1 A im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Export Lagrange Multiplier = Logical True
+  Linear System Symmetric = Logical True
+  Linear System Complex = Logical True
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BicgstabL
+  BicgStabL Polynomial Degree = 4
+  Linear System Preconditioning = Circuit
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Abort Not Converged = False
+  Linear System Max Iterations = 5000
+  Linear System Residual Output = 1000
+  Steady State Convergence Tolerance = 1e-09
+End
+Solver 7  !---- MagnetoDynamics, MagnetoDynamicsCalcFields
+  Exec Solver = Always
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "A"
+  Linear System Symmetric = True
+  Calculate Current Density = Logical True
+  Calculate Homogenization Loss = Logical True
+  Calculate Nodal Fields = Logical False
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 1000
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+Solver 8  !---- CircuitsAndDynamics, CircuitsOutput
+  Exec Solver = Always
+  Equation = Circuits Output
+  Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 9  !---- SaveData, SaveScalars: the DC resistance of the upper winding
+  Exec Solver = Always
+  Equation = "sv rdc"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = rings/dat/rdc.dat
+  Show Norm Name = String "res: r_component(2)"
+End
+Solver 10  !---- SaveData, SaveScalars: the 10 kHz loss of the half model
+  Exec Solver = Always
+  Equation = "sv loss"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = rings/dat/loss.dat
+  Show Norm Name = String "res: eddy current power"
+End
+Equation 1
+  Active Solvers(2) = 6 7
+End
+Equation 2
+  Active Solvers(10) = 1 2 3 4 5 6 7 8 9 10
+End
+Material 1  !---- air
+  Name = air
+  Relative Permeability = 1
+  Electric Conductivity = 0
+End
+Material 2  !---- the winding blocks, copper
+  Name = copper
+  Relative Permeability = 1
+  Electric Conductivity = 58e6
+End
+Body 1
+  Name = lower
+  Target Bodies(1) = $ lower
+  Equation = 2
+  Material = 2
+  Body Force = 1
+  Alpha Reference (3) = Real 1 0 0
+  Beta Reference (3) = Real 0 1 0
+End
+Body 2
+  Name = upper
+  Target Bodies(1) = $ upper
+  Equation = 2
+  Material = 2
+  Body Force = 1
+  Alpha Reference (3) = Real 1 0 0
+  Beta Reference (3) = Real 0 1 0
+End
+Body 3
+  Name = air
+  Target Bodies(1) = $ air
+  Equation = 1
+  Material = 1
+End
+Component 1  !---- lower winding
+  Name = String lower
+  Master Bodies(1) = Integer 1
+  Coil Type = String foil sheet
+  Stacking Direction = String beta
+  Number of Turns = Real 10
+  Foil Thickness = Real 0.0008
+  Fill Factor = Real 0.8
+  Sheet Conductivity = Real 58e6
+  Sheet Cells = Integer 10
+  Sheet Segments = Integer 4
+  Sheet Sublayers = Integer 1
+  Electrode Boundaries(2) = Integer 2 3
+  Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
+  Homogenization Model = Logical True
+End
+Component 2  !---- upper winding
+  Name = String upper
+  Master Bodies(1) = Integer 2
+  Coil Type = String foil sheet
+  Stacking Direction = String beta
+  Number of Turns = Real 10
+  Foil Thickness = Real 0.0008
+  Fill Factor = Real 0.8
+  Sheet Conductivity = Real 58e6
+  Sheet Cells = Integer 10
+  Sheet Segments = Integer 4
+  Sheet Sublayers = Integer 1
+  Electrode Boundaries(2) = Integer 4 5
+  Circuit Equation Voltage Factor = Real 0.5 !symmetry (half of the problem is solved)
+  Homogenization Model = Logical True
+End
+Body Force 1  !---- Circuit: 1 A in each winding
+  Name = "Circuit"
+  S1 Re = Real 1
+  S1 Im = Real 0
+  S2 Re = Real 1
+  S2 Im = Real 0
+End
+Boundary Condition 1  !---- outer box and symmetry plane: flux parallel
+  Target Boundaries(2) = $ box sym
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 2  !---- lower winding electrode, x > 0
+  Target Boundaries(1) = $ lower_xpos
+  W = Real 1
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 3  !---- lower winding electrode, x < 0
+  Target Boundaries(1) = $ lower_xneg
+  W = Real 0
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 4  !---- upper winding electrode, x > 0
+  Target Boundaries(1) = $ upper_xpos
+  W = Real 1
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 5  !---- upper winding electrode, x < 0
+  Target Boundaries(1) = $ upper_xneg
+  W = Real 0
+  A re {e} = Real 0
+  A im {e} = Real 0
+End
+Boundary Condition 6  !---- Alpha 1
+  Target Boundaries(2) = $ lower_vin upper_vin
+  Alpha = Real 1
+End
+Boundary Condition 7  !---- Alpha 0
+  Target Boundaries(2) = $ lower_vout upper_vout
+  Alpha = Real 0
+End
+Boundary Condition 8  !---- Beta 0
+  Target Boundaries(1) = $ lower_bottom
+  Beta = Real 0
+End
+Boundary Condition 9  !---- Beta 1
+  Target Boundaries(2) = $ shared upper_bottom
+  Beta = Real 1
+End
+Boundary Condition 10  !---- Beta 2
+  Target Boundaries(1) = $ upper_top
+  Beta = Real 2
+End
+Solver 9 :: Reference Norm = Real 2.087104833765E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-8
+Solver 10 :: Reference Norm = Real 5.995606529440E-03
+Solver 10 :: Reference Norm Tolerance = Real 1E-6

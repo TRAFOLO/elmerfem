@@ -475,10 +475,9 @@ CONTAINS
       CALL umf4sym( n,n, Rows, Cols, Values, Symbolic, Control, iInfo )
     END IF
 
-    IF (iInfo(1)<0) THEN
-      PRINT *, 'Error occurred in umf4sym: ', iInfo(1)
-      STOP EXIT_ERROR
-    END IF
+    IF (iInfo(1)<0) CALL Fatal('UMFPack_SolveSystem','Symbolic factorization of "'// &
+        SolverDisplayName(Solver)//'" failed with UMFPACK status '//I2S(NINT(iInfo(1)))// &
+        ' (-1: out of memory)')
 
     IF ( BigMode ) THEN
       CALL umf4_l_num(LRows, LCols, Values, Symbolic, A % UMFPack_Numeric, Control, iInfo )
@@ -486,10 +485,14 @@ CONTAINS
       CALL umf4num( Rows, Cols, Values, Symbolic, A % UMFPack_Numeric, Control, iInfo )
     END IF
 
-    IF (iinfo(1)<0) THEN
-      PRINT*, 'Error occurred in umf4num: ', iinfo(1)
-      STOP EXIT_ERROR
-    ENDIF
+    IF (iinfo(1)<0) CALL Fatal('UMFPack_SolveSystem','Numeric factorization of "'// &
+        SolverDisplayName(Solver)//'" failed with UMFPACK status '//I2S(NINT(iinfo(1)))// &
+        ' (-1: out of memory)')
+    ! Status 1 is a singular matrix. UMFPACK still returns a factorization, and
+    ! the solution then holds Inf or NaN, which the norm check reports.
+    IF (NINT(iinfo(1)) == 1) CALL Warn('UMFPack_SolveSystem','Matrix of "'// &
+        SolverDisplayName(Solver)//'" is singular: check that every region has a '// &
+        'reference (a Dirichlet condition, a ground or a gauge) and that circuits are connected')
 
     IF ( BigMode ) THEN
       DEALLOCATE( LRows, LCols )
@@ -509,10 +512,8 @@ CONTAINS
     CALL umf4sol( sys, x, b, A % UMFPack_Numeric, Control, iInfo )
   END IF
 
-  IF (iinfo(1)<0) THEN
-    PRINT*, 'Error occurred in umf4sol: ', iinfo(1)
-    STOP EXIT_ERROR
-  END IF
+  IF (iinfo(1)<0) CALL Fatal('UMFPack_SolveSystem','Solve with "'// &
+      SolverDisplayName(Solver)//'" failed with UMFPACK status '//I2S(NINT(iinfo(1))))
  
   FreeFactorize = ListGetLogical( Solver % Values, &
       'Linear System Free Factorization', stat )
@@ -706,6 +707,302 @@ CONTAINS
   END SUBROUTINE SPQR_SolveSystem
 !------------------------------------------------------------------------------
 
+
+!------------------------------------------------------------------------------
+!> Stops the run with a readable message when a MUMPS call failed (status < 0) and reports
+!> warnings (status > 0). Pass INFOG(1) and INFOG(2) for a parallel MUMPS instance: they are
+!> identical on all ranks of its communicator, so all ranks take the same branch and no rank is
+!> left waiting in a collective call. Pass INFO(1) and INFO(2) for an instance on one rank only.
+!------------------------------------------------------------------------------
+  SUBROUTINE CheckMumpsStatus(Caller, Phase, Label, Status, Detail)
+!------------------------------------------------------------------------------
+    CHARACTER(LEN=*), INTENT(IN) :: Caller, Phase, Label
+    INTEGER, INTENT(IN) :: Status, Detail
+    CHARACTER(LEN=160) :: Hint
+!------------------------------------------------------------------------------
+    IF (Status > 0) THEN
+      WRITE(Message, '(5A,I0,3A,I0)') 'MUMPS ', Phase, ' finished with a warning: ', Label, '(1) = ', Status, &
+          ', ', Label, '(2) = ', Detail
+      CALL Info(Caller, Message, Level=4)
+    END IF
+    IF (Status >= 0) RETURN
+
+    SELECT CASE (Status)
+    CASE (-5, -7, -13)
+      Hint = 'memory allocation failed (out of memory)'
+    CASE (-8, -9, -11, -12, -14, -15, -17, -19, -20)
+      Hint = 'internal workspace too small, which a singular matrix can also cause; check the model or ' // &
+          'increase "Mumps Percentage Increase Working Space"'
+    CASE (-10)
+      Hint = 'numerically singular matrix, check the boundary conditions or use "Mumps Diagonal Regularization"'
+    CASE (-6)
+      Hint = 'structurally singular matrix'
+    CASE DEFAULT
+      Hint = 'see the MUMPS users'' guide'
+    END SELECT
+    WRITE(Message, '(5A,I0,3A,I0,2A)') 'MUMPS ', Phase, ' failed: ', Label, '(1) = ', Status, &
+        ', ', Label, '(2) = ', Detail, ': ', TRIM(Hint)
+    CALL Fatal(Caller, Message)
+!------------------------------------------------------------------------------
+  END SUBROUTINE CheckMumpsStatus
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Diagnostic, switched on with 'Mumps Residual Check = True'. Computes r = b - A x for the system handed to
+!> MUMPS, summed over all ranks in the same way as MUMPS sums the distributed entries. For the rows of the
+!> solver's own matrix (field) and for the rows appended to it (constraints, e.g. circuit equations) it
+!> reports separately: max|r_i|, max|b_i| (the right-hand side of the current, possibly linearized, system),
+!> the largest row activity max_i (|A||x|)_i, the normwise residual max|r| / (max|A||x| + max|b|) and a
+!> residual indicator max_i |r_i| / (|A||x| + |b|)_i. The warning compares the normwise residual: on 156
+!> TRAFOLO A-V runs it stayed at or below 1.7e-10 for correct solutions, while the indicator reached 0.9.
+!> Neither ratio is the exact backward error of the assembled system: on rows shared by ranks, |A| sums the
+!> moduli of the rank-local partial entries, which can exceed the modulus of the assembled entry when partial
+!> entries cancel, so both ratios can understate the residual; on one rank this effect vanishes. Rows below
+!> 1e-12 of the largest activity in their block are measured against that floor (their number is reported).
+!> Before the solve, x is the current iterate, so r is the nonlinear residual of that iterate; after the
+!> solve, r is the residual of the linear solve. Works on the real form of complex systems.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsResidualCheck(Solver, A, x, b, Comm, What, Level, WarnAbove)
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPI_MODULE)
+    USE mpi
+#  endif
+#endif
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t) :: A
+    REAL(KIND=dp) :: x(*), b(*)
+    INTEGER :: Comm
+    CHARACTER(LEN=*) :: What
+    !> Info level of the report (default 4); normwise residual above which to warn.
+    INTEGER, OPTIONAL :: Level
+    REAL(KIND=dp), OPTIONAL :: WarnAbove
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPIF_HEADER)
+    INCLUDE 'mpif.h'
+#  endif
+    INTEGER :: i, j, k, l, n, nfield, ng, nloc, ierr
+    REAL(KIND=dp), ALLOCATABLE :: xg(:), cnt(:), rg(:), ag(:), bg(:), cg(:), buf(:)
+    REAL(KIND=dp) :: s, t, den, rmax(2), bmax(2), amax(2), dmax(2), dfloor(2), wmax(2), nrel(2)
+    INTEGER :: nfloor(2)
+    LOGICAL :: GotName
+
+    n = A % NumberOfRows
+    nfield = n
+    IF (ASSOCIATED(Solver % Matrix)) nfield = MIN(n, Solver % Matrix % NumberOfRows)
+    nloc = MAXVAL(A % Gorder(1:n))
+    CALL MPI_ALLREDUCE(nloc, ng, 1, MPI_INTEGER, MPI_MAX, Comm, ierr)
+    ALLOCATE(xg(ng), cnt(ng), rg(ng), ag(ng), bg(ng), cg(ng), buf(ng))
+    xg = 0.0_dp; cnt = 0.0_dp; rg = 0.0_dp; ag = 0.0_dp; bg = 0.0_dp; cg = 0.0_dp
+    DO i = 1, n
+      k = A % Gorder(i)
+      xg(k) = x(i)
+      cnt(k) = 1.0_dp
+      IF (i > nfield) cg(k) = 1.0_dp
+    END DO
+    ! shared rows carry the same solution value on every rank: average the sum
+    buf = xg
+    CALL MPI_ALLREDUCE(buf, xg, ng, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr)
+    buf = cnt
+    CALL MPI_ALLREDUCE(buf, cnt, ng, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr)
+    buf = cg
+    CALL MPI_ALLREDUCE(buf, cg, ng, MPI_DOUBLE_PRECISION, MPI_MAX, Comm, ierr)
+    WHERE (cnt > 0.0_dp) xg = xg / cnt
+    DO i = 1, n
+      s = 0.0_dp
+      t = 0.0_dp
+      DO j = A % Rows(i), A % Rows(i+1) - 1
+        s = s + A % Values(j) * xg(A % Gorder(A % Cols(j)))
+        t = t + ABS(A % Values(j)) * ABS(xg(A % Gorder(A % Cols(j))))
+      END DO
+      k = A % Gorder(i)
+      rg(k) = rg(k) + b(i) - s
+      ag(k) = ag(k) + t
+      bg(k) = bg(k) + b(i)
+    END DO
+    buf = rg
+    CALL MPI_ALLREDUCE(buf, rg, ng, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr)
+    buf = ag
+    CALL MPI_ALLREDUCE(buf, ag, ng, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr)
+    buf = bg
+    CALL MPI_ALLREDUCE(buf, bg, ng, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr)
+    ! ag holds (|A||x|)_i; on rows shared by ranks it sums the moduli of the partial entries (an upper bound)
+    rmax = 0.0_dp; bmax = 0.0_dp; amax = 0.0_dp; dmax = 0.0_dp; wmax = 0.0_dp; nfloor = 0
+    DO k = 1, ng
+      IF (cnt(k) <= 0.0_dp) CYCLE
+      l = 1
+      IF (cg(k) > 0.5_dp) l = 2
+      rmax(l) = MAX(rmax(l), ABS(rg(k)))
+      bmax(l) = MAX(bmax(l), ABS(bg(k)))
+      amax(l) = MAX(amax(l), ag(k))
+      dmax(l) = MAX(dmax(l), ag(k) + ABS(bg(k)))
+    END DO
+    dfloor = 1.0e-12_dp * dmax
+    DO k = 1, ng
+      IF (cnt(k) <= 0.0_dp) CYCLE
+      l = 1
+      IF (cg(k) > 0.5_dp) l = 2
+      den = ag(k) + ABS(bg(k))
+      IF (den < dfloor(l)) THEN
+        nfloor(l) = nfloor(l) + 1
+        den = dfloor(l)
+      END IF
+      IF (den > 0.0_dp) wmax(l) = MAX(wmax(l), ABS(rg(k)) / den)
+    END DO
+    nrel = 0.0_dp
+    DO l = 1, 2
+      IF (amax(l) + bmax(l) > 0.0_dp) nrel(l) = rmax(l) / (amax(l) + bmax(l))
+    END DO
+    WRITE(Message, '(2A,2(A,5(ES10.3,A),I0,A),A,I0,A)') 'MUMPS residual check ', What, &
+        ': field rows: max|r| ', rmax(1), ', max|b| ', bmax(1), ', max|A||x| ', amax(1), &
+        ', normwise ', nrel(1), ', indicator ', wmax(1), ' (', nfloor(1), ' floored)', &
+        '; constraint rows: max|r| ', rmax(2), ', max|b| ', bmax(2), ', max|A||x| ', amax(2), &
+        ', normwise ', nrel(2), ', indicator ', wmax(2), ' (', nfloor(2), ' floored)', &
+        '; ', NINT(SUM(cg)), ' constraint rows'
+    IF (PRESENT(Level)) THEN
+      CALL Info('MumpsResidualCheck', Message, Level=Level)
+    ELSE
+      CALL Info('MumpsResidualCheck', Message, Level=4)
+    END IF
+    ! MUMPS reports success on a singular system it factorized without null
+    ! pivot detection; only the residual shows that the solution is wrong.
+    IF (PRESENT(WarnAbove)) THEN
+      IF (MAXVAL(nrel) > WarnAbove) THEN
+        WRITE(Message, '(A,ES10.3,A,ES10.3,A)') 'NOT CONVERGED: direct solver="'// &
+            ListGetString(Solver % Values,'Equation',GotName)//'" MUMPS normwise residual=', MAXVAL(nrel), &
+            ' tolerance=', WarnAbove, ': the solution does not satisfy the linear system. '// &
+            'A singular system needs "Mumps Diagonal Regularization"; the A-V solvers with '// &
+            'circuit coils also need "Use Tree Gauge = False".'
+        CALL Warn('MumpsResidualCheck', Message)
+      END IF
+    END IF
+    DEALLOCATE(xg, cnt, rg, ag, bg, cg, buf)
+#endif
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsResidualCheck
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> The residual of every MUMPS solution, unless 'Mumps Residual Check = False':
+!> reported at info level 4 when the check was asked for, at level 6
+!> otherwise, and a warning when the normwise residual exceeds 'Mumps Residual
+!> Tolerance' (default 1e-8). Collective over Comm, so every rank calls it.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsCheckSolution(Solver, A, x, b, Comm)
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t) :: A
+    REAL(KIND=dp) :: x(*), b(*)
+    INTEGER :: Comm
+
+    ! Correct TRAFOLO A-V solutions stayed at or below 1.7e-10; failed solves reached 5e-2.
+    REAL(KIND=dp), PARAMETER :: DefaultResidualTolerance = 1.0e-8_dp
+    REAL(KIND=dp) :: Tol
+    LOGICAL :: Check, Asked, GotTol
+
+    Check = ListGetLogical(Solver % Values, 'Mumps Residual Check', Asked)
+    IF (.NOT. Asked) Check = .TRUE.
+    IF (.NOT. Check) RETURN
+    Tol = ListGetConstReal(Solver % Values, 'Mumps Residual Tolerance', GotTol)
+    IF (.NOT. GotTol) Tol = DefaultResidualTolerance
+    IF (Asked) THEN
+      CALL MumpsResidualCheck(Solver, A, x, b, Comm, 'after the solve', Level=4, WarnAbove=Tol)
+    ELSE
+      CALL MumpsResidualCheck(Solver, A, x, b, Comm, 'after the solve', Level=6, WarnAbove=Tol)
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsCheckSolution
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> 'Mumps Drop Zeros': leaves the off-diagonal entries that are exactly zero out
+!> of the complex matrix given to MUMPS. The couplings of Dirichlet dofs are
+!> zeroed but stay in the sparsity pattern, where they enter the ordering and
+!> the fill of the factors. The equations do not change; the ordering does, and
+!> with it the rounding and, for a singular system factorized with null-pivot
+!> detection, the null-space part of the solution. Collective over the MUMPS
+!> communicator.
+!------------------------------------------------------------------------------
+  SUBROUTINE ZMumpsDropZeros( A )
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPI_MODULE)
+    USE mpi
+#  endif
+#endif
+    TYPE(Matrix_t) :: A
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPIF_HEADER)
+    INCLUDE 'mpif.h'
+#  endif
+    INTEGER :: i, n, ierr
+    REAL(KIND=dp) :: counts(2), total(2)
+
+    n = 0
+    DO i=1,A % ZMumpsID % nz_loc
+      IF ( A % ZMumpsID % a_loc(i) == (0.0_dp, 0.0_dp) .AND. &
+          A % ZMumpsID % irn_loc(i) /= A % ZMumpsID % jcn_loc(i) ) CYCLE
+      n = n + 1
+      A % ZMumpsID % irn_loc(n) = A % ZMumpsID % irn_loc(i)
+      A % ZMumpsID % jcn_loc(n) = A % ZMumpsID % jcn_loc(i)
+      A % ZMumpsID % a_loc(n) = A % ZMumpsID % a_loc(i)
+    END DO
+    ! counted in double precision: the global sums can exceed the default integer range
+    counts = [REAL(A % ZMumpsID % nz_loc - n, dp), REAL(A % ZMumpsID % nz_loc, dp)]
+    A % ZMumpsID % nz_loc = n
+    CALL MPI_ALLREDUCE( counts, total, 2, MPI_DOUBLE_PRECISION, MPI_SUM, A % ZMumpsID % Comm, ierr )
+    WRITE(Message, '(A,I0,A,I0,A)') 'MUMPS drop zeros: ', NINT(total(1), KIND=8), ' of ', &
+        NINT(total(2), KIND=8), ' entries left out'
+    CALL Info('ZMumps_SolveSystem', Message, Level=5)
+#endif
+!------------------------------------------------------------------------------
+  END SUBROUTINE ZMumpsDropZeros
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> 'Mumps Ordering' (amd, amf, scotch, pord, metis, qamd or auto): the
+!> fill-reducing ordering of the MUMPS analysis, ICNTL(7). Unset keeps MUMPS's
+!> automatic choice, which on systems with quasi-dense rows (e.g. circuit
+!> equations) can pick QAMD and much larger factors than METIS. An ordering
+!> the MUMPS build lacks falls back to MUMPS's own choice; the ordering used
+!> (INFOG(7)) is logged.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsOrdering( Solver, icntl7 )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    INTEGER :: icntl7
+!------------------------------------------------------------------------------
+    CHARACTER(:), ALLOCATABLE :: Ordering
+    LOGICAL :: Found
+
+    Ordering = ListGetString( Solver % Values, 'Mumps Ordering', Found )
+    IF ( .NOT. Found ) RETURN
+    SELECT CASE( Ordering )
+    CASE( 'amd' )
+      icntl7 = 0
+    CASE( 'amf' )
+      icntl7 = 2
+    CASE( 'scotch' )
+      icntl7 = 3
+    CASE( 'pord' )
+      icntl7 = 4
+    CASE( 'metis' )
+      icntl7 = 5
+    CASE( 'qamd' )
+      icntl7 = 6
+    CASE( 'auto' )
+      icntl7 = 7
+    CASE DEFAULT
+      CALL Fatal( 'MumpsOrdering', 'Unknown "Mumps Ordering": '//TRIM(Ordering)// &
+          ' (amd, amf, scotch, pord, metis, qamd or auto)' )
+    END SELECT
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsOrdering
+!------------------------------------------------------------------------------
+
 !------------------------------------------------------------------------------
  SUBROUTINE FreeMumpsFactorizations(A)
 !------------------------------------------------------------------------------
@@ -802,6 +1099,7 @@ CONTAINS
 
   INTEGER, ALLOCATABLE :: Owner(:)
   INTEGER :: i,j,n,ip,ierr,icntlft,nzloc
+  REAL(KIND=dp) :: nullpivtol
   LOGICAL :: Factorize, FreeFactorize, stat, matsym, matspd, scaled
 
   INTEGER, ALLOCATABLE :: memb(:)
@@ -843,6 +1141,8 @@ CONTAINS
     END IF
 
     CALL SMumps(A % SMumpsID)
+    CALL CheckMumpsStatus('SMumps_SolveSystem', 'initialization', 'INFOG', &
+        A % SMumpsID % infog(1), A % SMumpsID % infog(2))
 
     IF(ASSOCIATED(A % Gorder)) DEALLOCATE(A % Gorder)
 
@@ -929,12 +1229,31 @@ CONTAINS
     IF (stat) THEN
        A % SMumpsID % icntl(14) = icntlft
     END IF
+    IF (ListGetLogical(Solver % Values, 'mumps null pivot detection', stat)) THEN
+       A % SMumpsID % icntl(24) = 1
+       CALL Info('SMumps_SolveSystem', 'MUMPS null pivot detection enabled', Level=5)
+    END IF
+    ! CNTL(3) null-pivot threshold: >0 CNTL(3)*||A||inf, <0 |CNTL(3)|, 0 MUMPS default
+    ! (4.10.0: 1e-5*eps*||A||inf; 5.4.0 and later: sqrt(pivots on critical path)*eps*||A||inf). Used: DKEEP(1).
+    nullpivtol = ListGetConstReal(Solver % Values, 'mumps null pivot tolerance', stat)
+    IF (stat) THEN
+       A % SMumpsID % cntl(3) = nullpivtol
+    END IF
+    IF (ListGetLogical(Solver % Values, 'mumps sequential root', stat)) THEN
+       A % SMumpsID % icntl(13) = 1
+       CALL Info('SMumps_SolveSystem', 'MUMPS sequential root node (no ScaLAPACK) enabled', Level=5)
+    END IF
     A % SMumpsID % icntl(18) = 3 ! 'distributed' matrix 
     A % SMumpsID % icntl(21) = 1 ! 'distributed' solution phase
 
     A % SMumpsID % job = 4
     CALL SMumps(A % SMumpsID)
     CALL Flush(6)
+    CALL CheckMumpsStatus('SMumps_SolveSystem', 'analysis and factorization', 'INFOG', &
+        A % SMumpsID % infog(1), A % SMumpsID % infog(2))
+    IF (A % SMumpsID % icntl(24) == 1) THEN
+       CALL Info('SMumps_SolveSystem', 'MUMPS null pivots detected: '//I2S(A % SMumpsID % infog(28)), Level=5)
+    END IF
 
     A % SMumpsID % lsol_loc = A % Smumpsid % info(23)
     ALLOCATE(A % SMumpsID % sol_loc(A % SMumpsId % lsol_loc))
@@ -958,6 +1277,8 @@ CONTAINS
  ! ---------
   A % SMumpsID % job = 3
   CALL SMumps(A % SMumpsID)
+  CALL CheckMumpsStatus('SMumps_SolveSystem', 'solve', 'INFOG', &
+      A % SMumpsID % infog(1), A % SMumpsID % infog(2))
 
  ! Distribute the solution to all:
  ! -------------------------------
@@ -1013,6 +1334,7 @@ CONTAINS
 
   INTEGER, ALLOCATABLE :: Owner(:)
   INTEGER :: i,j,n,ip,ierr,icntlft,nzloc
+  REAL(KIND=dp) :: nullpivtol
   LOGICAL :: Factorize, FreeFactorize, stat, matsym, matspd, scaled
 
   INTEGER, ALLOCATABLE :: memb(:)
@@ -1057,6 +1379,8 @@ CONTAINS
      A % CMumpsID % sym = 0
 
     CALL CMumps(A % CMumpsID)
+    CALL CheckMumpsStatus('CMumps_SolveSystem', 'initialization', 'INFOG', &
+        A % CMumpsID % infog(1), A % CMumpsID % infog(2))
 
     IF(ASSOCIATED(A % Gorder)) DEALLOCATE(A % Gorder)
 
@@ -1142,12 +1466,31 @@ CONTAINS
     IF (stat) THEN
        A % CMumpsID % icntl(14) = icntlft
     END IF
+    IF (ListGetLogical(Solver % Values, 'mumps null pivot detection', stat)) THEN
+       A % CMumpsID % icntl(24) = 1
+       CALL Info('CMumps_SolveSystem', 'MUMPS null pivot detection enabled', Level=5)
+    END IF
+    ! CNTL(3) null-pivot threshold: >0 CNTL(3)*||A||inf, <0 |CNTL(3)|, 0 MUMPS default
+    ! (4.10.0: 1e-5*eps*||A||inf; 5.4.0 and later: sqrt(pivots on critical path)*eps*||A||inf). Used: DKEEP(1).
+    nullpivtol = ListGetConstReal(Solver % Values, 'mumps null pivot tolerance', stat)
+    IF (stat) THEN
+       A % CMumpsID % cntl(3) = nullpivtol
+    END IF
+    IF (ListGetLogical(Solver % Values, 'mumps sequential root', stat)) THEN
+       A % CMumpsID % icntl(13) = 1
+       CALL Info('CMumps_SolveSystem', 'MUMPS sequential root node (no ScaLAPACK) enabled', Level=5)
+    END IF
     A % CMumpsID % icntl(18) = 3 ! 'distributed' matrix 
     A % CMumpsID % icntl(21) = 1 ! 'distributed' solution phase
 
     A % CMumpsID % job = 4
     CALL CMumps(A % CMumpsID)
     CALL Flush(6)
+    CALL CheckMumpsStatus('CMumps_SolveSystem', 'analysis and factorization', 'INFOG', &
+        A % CMumpsID % infog(1), A % CMumpsID % infog(2))
+    IF (A % CMumpsID % icntl(24) == 1) THEN
+       CALL Info('CMumps_SolveSystem', 'MUMPS null pivots detected: '//I2S(A % CMumpsID % infog(28)), Level=5)
+    END IF
 
     A % CMumpsID % lsol_loc = A % CMumpsid % info(23)
     ALLOCATE(A % CMumpsID % sol_loc(A % CMumpsId % lsol_loc))
@@ -1172,6 +1515,8 @@ CONTAINS
  ! ---------
   A % CMumpsID % job = 3
   CALL CMumps(A % CMumpsID)
+  CALL CheckMumpsStatus('CMumps_SolveSystem', 'solve', 'INFOG', &
+      A % CMumpsID % infog(1), A % CMumpsID % infog(2))
 
  ! Distribute the solution to all:
  ! -------------------------------
@@ -1226,8 +1571,10 @@ CONTAINS
 #  endif
 
   INTEGER, ALLOCATABLE :: Owner(:)
-  INTEGER :: i,j,n,ip,ierr,icntlft,nzloc
-  LOGICAL :: Factorize, FreeFactorize, stat, matsym, matspd, scaled
+  INTEGER :: i,j,n,ip,ierr,icntlft,nzloc,nshift
+  REAL(KIND=dp) :: nullpivtol, regul
+  LOGICAL :: Factorize, FreeFactorize, stat, matsym, matspd, scaled, Refine
+  LOGICAL, ALLOCATABLE :: Unshifted(:)
 
   INTEGER, ALLOCATABLE :: memb(:)
   INTEGER :: Comm_active, Group_active, Group_world
@@ -1237,6 +1584,15 @@ CONTAINS
 
   Factorize = ListGetLogical( Solver % Values, 'Linear System Refactorize', stat )
   IF ( .NOT. stat ) Factorize = .TRUE.
+
+  ! A singular but consistent system (a potential fixed nowhere) leaves MUMPS with
+  ! zero pivots. The factorization then gets a small diagonal shift and the iterative
+  ! refinement against the unshifted matrix removes its effect.
+  regul = ListGetConstReal( Solver % Values, 'Mumps Diagonal Regularization', stat )
+  IF ( .NOT. stat .OR. regul < 0.0_dp ) regul = 0.0_dp
+  Refine = ListGetLogical( Solver % Values, 'Mumps Iterative Refinement', stat )
+  IF ( .NOT. stat ) Refine = regul > 0.0_dp
+  nshift = 0
 
   IF ( Factorize .OR. .NOT.ASSOCIATED(A % MumpsID) ) THEN
     CALL FreeMumpsFactorizations(A)
@@ -1269,6 +1625,8 @@ CONTAINS
     END IF
 
     CALL DMumps(A % MumpsID)
+    CALL CheckMumpsStatus('Mumps_SolveSystem', 'initialization', 'INFOG', &
+        A % MumpsID % infog(1), A % MumpsID % infog(2))
 
     IF(ASSOCIATED(A % Gorder)) DEALLOCATE(A % Gorder)
 
@@ -1307,7 +1665,24 @@ CONTAINS
       DO i=1,A % MumpsID % nz_loc
         A % MumpsID % jcn_loc(i) = A % Gorder(A % Cols(i))
       END DO
-      A % MumpsID % a_loc   => A % values
+      IF ( regul > 0.0_dp ) THEN
+        ! a copy: the refinement needs the unshifted values
+        ALLOCATE( A % MumpsID % a_loc(A % MumpsId % nz_loc), Unshifted(A % NumberOfRows) )
+        CALL MumpsUnshiftedRows( Solver, regul, Unshifted )
+        A % MumpsID % a_loc = A % Values(1:A % MumpsID % nz_loc)
+        DO i=1,A % NumberOfRows
+          IF ( Unshifted(i) ) CYCLE
+          DO j=A % Rows(i),A % Rows(i+1)-1
+            IF ( A % Cols(j) == i ) THEN
+              A % MumpsID % a_loc(j) = A % MumpsID % a_loc(j) + regul * ABS(A % MumpsID % a_loc(j))
+              nshift = nshift + 1
+            END IF
+          END DO
+        END DO
+        DEALLOCATE( Unshifted )
+      ELSE
+        A % MumpsID % a_loc   => A % values
+      END IF
     ELSE
       ! Set matrix for Mumps (symmetric case)
       nzloc = 0
@@ -1325,6 +1700,8 @@ CONTAINS
       ALLOCATE( A % MumpsID % A_loc(A % MumpsId % nz_loc) )
 
       nzloc = 0
+      ALLOCATE( Unshifted(A % NumberOfRows) )
+      CALL MumpsUnshiftedRows( Solver, regul, Unshifted )
       DO i=1,A % NumberOfRows
         ! Only output lower triangular part to Mumps
         DO j=A % Rows(i),A % Diag(i)
@@ -1332,8 +1709,19 @@ CONTAINS
           A % mumpsID % IRN_loc(nzloc) = A % Gorder(i)
           A % mumpsID % A_loc(nzloc) = A % Values(j)
           A % mumpsID % JCN_loc(nzloc) = A % Gorder(A % Cols(j))
+          IF ( regul > 0.0_dp .AND. A % Cols(j) == i .AND. .NOT. Unshifted(i) ) THEN
+            A % mumpsID % A_loc(nzloc) = A % mumpsID % A_loc(nzloc) + regul * ABS(A % mumpsID % A_loc(nzloc))
+            nshift = nshift + 1
+          END IF
         END DO
       END DO
+      DEALLOCATE( Unshifted )
+    END IF
+    IF ( regul > 0.0_dp ) THEN
+      CALL MPI_ALLREDUCE( nshift, i, 1, MPI_INTEGER, MPI_SUM, A % MumpsID % Comm, ierr )
+      WRITE(Message, '(A,ES10.3,A,I0,A)') 'MUMPS diagonal regularization ', regul, &
+          ' on ', i, ' diagonal entries'
+      CALL Info('Mumps_SolveSystem', Message, Level=5)
     END IF
 
 
@@ -1353,12 +1741,36 @@ CONTAINS
     IF (stat) THEN
        A % MumpsID % icntl(14) = icntlft
     END IF
+    IF (ListGetLogical(Solver % Values, 'mumps null pivot detection', stat)) THEN
+       A % MumpsID % icntl(24) = 1
+       CALL Info('Mumps_SolveSystem', 'MUMPS null pivot detection enabled', Level=5)
+    END IF
+    ! CNTL(3) null-pivot threshold: >0 CNTL(3)*||A||inf, <0 |CNTL(3)|, 0 MUMPS default
+    ! (4.10.0: 1e-5*eps*||A||inf; 5.4.0 and later: sqrt(pivots on critical path)*eps*||A||inf). Used: DKEEP(1).
+    nullpivtol = ListGetConstReal(Solver % Values, 'mumps null pivot tolerance', stat)
+    IF (stat) THEN
+       A % MumpsID % cntl(3) = nullpivtol
+    END IF
+    IF (ListGetLogical(Solver % Values, 'mumps sequential root', stat)) THEN
+       A % MumpsID % icntl(13) = 1
+       CALL Info('Mumps_SolveSystem', 'MUMPS sequential root node (no ScaLAPACK) enabled', Level=5)
+    END IF
     A % MumpsID % icntl(18) = 3 ! 'distributed' matrix 
     A % MumpsID % icntl(21) = 1 ! 'distributed' solution phase
 
+    CALL MumpsOrdering( Solver, A % MumpsID % icntl(7) )
     A % MumpsID % job = 4
     CALL DMumps(A % MumpsID)
     CALL Flush(6)
+    CALL CheckMumpsStatus('Mumps_SolveSystem', 'analysis and factorization', 'INFOG', &
+        A % MumpsID % infog(1), A % MumpsID % infog(2))
+    IF (A % MumpsID % icntl(24) == 1) THEN
+       CALL Info('Mumps_SolveSystem', 'MUMPS null pivots detected: '//I2S(A % MumpsID % infog(28)), Level=5)
+    END IF
+    WRITE(Message, '(A,I0,A,I0,A,ES10.3,A,ES10.3)') 'MUMPS ordering used (INFOG(7)): ', A % MumpsID % infog(7), &
+        ', entries in factors (INFOG(29)): ', A % MumpsID % infog(29), ', flops (RINFOG(3)): ', A % MumpsID % rinfog(3), &
+        ', null-pivot threshold (DKEEP(1)): ', A % MumpsID % dkeep(1)
+    CALL Info('Mumps_SolveSystem', Message, Level=5)
 
     A % MumpsID % lsol_loc = A % mumpsid % info(23)
     ALLOCATE(A % MumpsID % sol_loc(A % MumpsId % lsol_loc))
@@ -1380,8 +1792,12 @@ CONTAINS
 
  ! Solution:
  ! ---------
+  IF (ListGetLogical(Solver % Values, 'Mumps Residual Check', stat)) &
+      CALL MumpsResidualCheck(Solver, A, x, b, A % MumpsID % Comm, 'before the solve')
   A % MumpsID % job = 3
   CALL DMumps(A % MumpsID)
+  CALL CheckMumpsStatus('Mumps_SolveSystem', 'solve', 'INFOG', &
+      A % MumpsID % infog(1), A % MumpsID % infog(2))
 
  ! Distribute the solution to all:
  ! -------------------------------
@@ -1401,6 +1817,8 @@ CONTAINS
     ip = A % Gorder(i)
     x(i) = A % MumpsId % RHS(ip)
   END DO
+  IF ( Refine ) CALL MumpsRefineSolution( Solver, A, x, b )
+  CALL MumpsCheckSolution(Solver, A, x, b, A % MumpsID % Comm)
 
   FreeFactorize = ListGetLogical( Solver % Values, 'Linear System Free Factorization', stat )
   IF ( .NOT. stat ) FreeFactorize = .TRUE.
@@ -1411,6 +1829,355 @@ CONTAINS
 #endif
 !------------------------------------------------------------------------------
   END SUBROUTINE Mumps_SolveSystem
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> The rows that 'Mumps Diagonal Regularization' leaves unshifted: with
+!> 'Mumps Regularize Nodal Dofs = False' the rows of the dofs of the variable's
+!> mesh nodes (the scalar potential of the A-V solvers, whose gauge freedom the
+!> shifted edge dofs already remove), otherwise none.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsUnshiftedRows( Solver, regul, Unshifted )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    REAL(KIND=dp) :: regul
+    LOGICAL :: Unshifted(:)
+!------------------------------------------------------------------------------
+    INTEGER :: k, l, dof, dofs, row
+    LOGICAL :: Found, Nodal
+
+    Unshifted = .FALSE.
+    IF ( regul <= 0.0_dp ) RETURN
+    Nodal = ListGetLogical( Solver % Values, 'Mumps Regularize Nodal Dofs', Found )
+    IF ( Nodal .OR. .NOT. Found ) RETURN
+    IF ( .NOT. ASSOCIATED(Solver % Variable) .OR. .NOT. ASSOCIATED(Solver % Mesh) ) RETURN
+    IF ( .NOT. ASSOCIATED(Solver % Variable % Perm) ) RETURN
+    dofs = Solver % Variable % DOFs
+    ! the nodal slots come first, Mesh % MaxNDOFs of them for every node
+    DO k=1,MIN( Solver % Mesh % MaxNDOFs * Solver % Mesh % NumberOfNodes, SIZE(Solver % Variable % Perm) )
+      l = Solver % Variable % Perm(k)
+      IF ( l <= 0 ) CYCLE
+      DO dof=1,dofs
+        row = dofs*(l-1) + dof
+        IF ( row <= SIZE(Unshifted) ) Unshifted(row) = .TRUE.
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsUnshiftedRows
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> ZMumpsResidual for a real system: the residual r = b - A x in the global
+!> numbering of Mumps_SolveSystem and the row activity |A||x| + |b| on every
+!> rank. Collective over Comm.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsResidual( A, x, b, Comm, r, Activity )
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPI_MODULE)
+    USE mpi
+#  endif
+#endif
+    TYPE(Matrix_t) :: A
+    REAL(KIND=dp) :: x(*), b(*)
+    INTEGER :: Comm
+    REAL(KIND=dp) :: r(:), Activity(:)
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPIF_HEADER)
+    INCLUDE 'mpif.h'
+#  endif
+    INTEGER :: i, j, ip, n, ierr
+    REAL(KIND=dp), ALLOCATABLE :: xg(:), bg(:), cnt(:), buf(:)
+    REAL(KIND=dp) :: s, t
+
+    n = SIZE(r)
+    ALLOCATE( xg(n), bg(n), cnt(n), buf(n) )
+    xg = 0; cnt = 0
+    DO i=1,A % NumberOfRows
+      ip = A % Gorder(i)
+      xg(ip) = x(i)
+      cnt(ip) = 1
+    END DO
+    ! shared rows carry the same solution value on every rank: average the sum
+    buf = xg
+    CALL MPI_ALLREDUCE( buf, xg, n, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr )
+    buf = cnt
+    CALL MPI_ALLREDUCE( buf, cnt, n, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr )
+    WHERE( cnt > 0 ) xg = xg / cnt
+
+    r = 0; bg = 0; Activity = 0
+    DO i=1,A % NumberOfRows
+      ip = A % Gorder(i)
+      s = 0; t = 0
+      DO j=A % Rows(i), A % Rows(i+1)-1
+        s = s + A % Values(j) * xg(A % Gorder(A % Cols(j)))
+        t = t + ABS(A % Values(j)) * ABS(xg(A % Gorder(A % Cols(j))))
+      END DO
+      r(ip) = r(ip) + b(i) - s
+      bg(ip) = bg(ip) + b(i)
+      Activity(ip) = Activity(ip) + t
+    END DO
+    buf = r
+    CALL MPI_ALLREDUCE( buf, r, n, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr )
+    buf = bg
+    CALL MPI_ALLREDUCE( buf, bg, n, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr )
+    buf = Activity
+    CALL MPI_ALLREDUCE( buf, Activity, n, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr )
+    Activity = Activity + ABS(bg)
+    DEALLOCATE( xg, bg, cnt, buf )
+#endif
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsResidual
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> ZMumpsRefineSolution for a real system (Mumps_SolveSystem).
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsRefineSolution( Solver, A, x, b )
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPI_MODULE)
+    USE mpi
+#  endif
+#endif
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t) :: A
+    REAL(KIND=dp) :: x(*), b(*)
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPIF_HEADER)
+    INCLUDE 'mpif.h'
+#  endif
+    INTEGER :: i, n, nrows, it, maxit, ierr
+    REAL(KIND=dp) :: tol, omega, omega0, omegaprev
+    REAL(KIND=dp), ALLOCATABLE :: r(:), dbuf(:), xsave(:), Activity(:), Scale(:)
+    INTEGER, ALLOCATABLE :: Block(:), GBlock(:), ibuf(:)
+    CHARACTER(LEN=20) :: Reason
+    LOGICAL :: stat, Revert
+
+    maxit = ListGetInteger( Solver % Values, 'Mumps Refinement Max Iterations', stat )
+    IF ( .NOT. stat ) maxit = 10
+    tol = ListGetConstReal( Solver % Values, 'Mumps Refinement Tolerance', stat )
+    IF ( .NOT. stat ) tol = 1.0e-11_dp
+
+    n = A % MumpsID % n
+    nrows = A % NumberOfRows
+    ALLOCATE( r(n), dbuf(n), xsave(nrows), Activity(n), Scale(n), Block(nrows), GBlock(n), ibuf(n) )
+    CALL MumpsRowBlocks( Solver, A, Block )
+    ibuf = 0
+    DO i=1,nrows
+      ibuf(A % Gorder(i)) = Block(i)
+    END DO
+    CALL MPI_ALLREDUCE( ibuf, GBlock, n, MPI_INTEGER, MPI_MAX, A % MumpsID % Comm, ierr )
+
+    CALL MumpsResidual( A, x, b, A % MumpsID % Comm, r, Activity )
+    IF ( MumpsRowScale( Activity, GBlock, Scale ) ) THEN
+      omega = MumpsBackwardError( ABS(r), Scale )
+      omega0 = omega
+      it = 0
+      Reason = 'iteration limit'
+      DO WHILE( it < maxit )
+        A % MumpsID % RHS = r
+        A % MumpsID % job = 3
+        CALL DMumps(A % MumpsID)
+        CALL CheckMumpsStatus('MumpsRefineSolution', 'solve', 'INFOG', &
+            A % MumpsID % infog(1), A % MumpsID % infog(2))
+        dbuf = 0
+        DO i=1,A % MumpsID % lsol_loc
+          dbuf(A % MumpsID % isol_loc(i)) = A % MumpsID % sol_loc(i)
+        END DO
+        CALL MPI_ALLREDUCE( dbuf, r, n, MPI_DOUBLE_PRECISION, MPI_SUM, A % MumpsID % Comm, ierr )
+
+        xsave = x(1:nrows)
+        DO i=1,nrows
+          x(i) = x(i) + r(A % Gorder(i))
+        END DO
+        omegaprev = omega
+        CALL MumpsResidual( A, x, b, A % MumpsID % Comm, r, Activity )
+        omega = MumpsBackwardError( ABS(r), Scale )
+        IF ( MumpsRefinementStop( it, omega, omegaprev, tol, Reason, Revert ) ) THEN
+          IF ( Revert ) THEN
+            x(1:nrows) = xsave
+            omega = omegaprev
+          END IF
+          EXIT
+        END IF
+      END DO
+      CALL MumpsRefinementReport( 'MumpsRefineSolution', it, omega0, omega, tol, Reason )
+    ELSE
+      CALL Warn( 'MumpsRefineSolution', 'MUMPS solution not finite: no iterative refinement' )
+    END IF
+    DEALLOCATE( r, dbuf, xsave, Activity, Scale, Block, GBlock, ibuf )
+#endif
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsRefineSolution
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> The blocks of rows whose scales differ: 1 the field rows that the diagonal
+!> regularization shifts, 2 the field rows it leaves unshifted (the scalar
+!> potential with 'Mumps Regularize Nodal Dofs = False'), 3 the rows appended
+!> to the solver's matrix (constraints, e.g. circuit equations).
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsRowBlocks( Solver, A, Block )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t) :: A
+    INTEGER :: Block(:)
+!------------------------------------------------------------------------------
+    INTEGER :: nfield
+    LOGICAL, ALLOCATABLE :: Unshifted(:)
+    REAL(KIND=dp) :: regul
+    LOGICAL :: Found
+
+    nfield = A % NumberOfRows
+    IF ( ASSOCIATED(Solver % Matrix) ) nfield = MIN( nfield, Solver % Matrix % NumberOfRows )
+    regul = ListGetConstReal( Solver % Values, 'Mumps Diagonal Regularization', Found )
+    ALLOCATE( Unshifted(A % NumberOfRows) )
+    CALL MumpsUnshiftedRows( Solver, regul, Unshifted )
+    Block = 1
+    WHERE( Unshifted ) Block = 2
+    Block(nfield+1:) = 3
+    DEALLOCATE( Unshifted )
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsRowBlocks
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> The fixed scale of every global row for the refinement: its activity
+!> |A||x| + |b| at the first solution. A row whose activity is below 1e-12 of
+!> the largest one of its block (MumpsRowBlocks) is measured against that
+!> largest activity instead (a block-relative fallback after the normwise part
+!> of Arioli, Demmel and Duff's sparse backward error): there the residual can
+!> be rounding noise in a part of the solution that is zero for practical
+!> purposes (e.g. a circuit branch without current), and it is accepted up to
+!> the tolerance times the block's largest activity. False when an activity is
+!> not finite.
+!------------------------------------------------------------------------------
+  FUNCTION MumpsRowScale( Activity, GBlock, Scale ) RESULT( Valid )
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: Activity(:), Scale(:)
+    INTEGER :: GBlock(:)
+    LOGICAL :: Valid
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: amax(3)
+    INTEGER :: i, k
+
+    Valid = ALL( Activity <= HUGE(amax) )
+    IF ( .NOT. Valid ) RETURN
+    amax = 0.0_dp
+    DO i=1,SIZE(Activity)
+      k = MAX( 1, MIN( 3, GBlock(i) ) )
+      amax(k) = MAX( amax(k), Activity(i) )
+    END DO
+    DO i=1,SIZE(Activity)
+      k = MAX( 1, MIN( 3, GBlock(i) ) )
+      IF ( Activity(i) >= 1.0e-12_dp * amax(k) ) THEN
+        Scale(i) = Activity(i)
+      ELSE
+        Scale(i) = amax(k)
+      END IF
+    END DO
+!------------------------------------------------------------------------------
+  END FUNCTION MumpsRowScale
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> The componentwise backward error max_i |r_i| / Scale_i of a residual with
+!> fixed row scales (MumpsRowScale). The residual is blind to the null space of
+!> a singular system, and the fixed scales let every iterate be compared on one
+!> measure. HUGE when a residual entry is not finite or a nonzero residual
+!> meets a zero scale.
+!------------------------------------------------------------------------------
+  FUNCTION MumpsBackwardError( rabs, Scale ) RESULT( omega )
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: rabs(:), Scale(:)
+    REAL(KIND=dp) :: omega
+!------------------------------------------------------------------------------
+    INTEGER :: i
+
+    omega = 0.0_dp
+    DO i=1,SIZE(rabs)
+      IF ( .NOT. rabs(i) <= HUGE(omega) ) THEN
+        omega = HUGE(omega)
+        RETURN
+      END IF
+      IF ( rabs(i) <= 0.0_dp ) CYCLE
+      IF ( Scale(i) <= 0.0_dp ) THEN
+        omega = HUGE(omega)
+        RETURN
+      END IF
+      omega = MAX( omega, rabs(i) / Scale(i) )
+    END DO
+!------------------------------------------------------------------------------
+  END FUNCTION MumpsBackwardError
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Decides after a refinement correction, from the backward error before
+!> (omegaprev) and after (omega) it; it counts the accepted corrections. A
+!> correction that raises the error tenfold, or gives a NaN, is taken back
+!> (Revert, "diverging"), and so is a later one that raises it above tol: the
+!> first may raise it, as it removes the shift error that the residual of the
+!> first solution does not show. At least two corrections, then on while each
+!> halves the error; a stop above tol is "stagnated". Below tol a rise is a
+!> rounding fluctuation.
+!------------------------------------------------------------------------------
+  FUNCTION MumpsRefinementStop( it, omega, omegaprev, tol, Reason, Revert ) RESULT( Stop )
+!------------------------------------------------------------------------------
+    INTEGER :: it
+    REAL(KIND=dp) :: omega, omegaprev, tol
+    CHARACTER(LEN=*) :: Reason
+    LOGICAL :: Revert, Stop
+!------------------------------------------------------------------------------
+    Stop = .TRUE.
+    Revert = .NOT. ( omega <= 10.0_dp * omegaprev .AND. omega < HUGE(omega) )
+    IF ( .NOT. Revert .AND. it >= 1 ) Revert = omega > omegaprev .AND. omega > tol
+    IF ( Revert ) THEN
+      Reason = 'diverging'
+      RETURN
+    END IF
+    it = it + 1
+    Stop = it >= 2 .AND. .NOT. omega < 0.5_dp * omegaprev
+    IF ( Stop ) THEN
+      Reason = 'converged'
+      IF ( omega > tol ) Reason = 'stagnated'
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION MumpsRefinementStop
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Reports the iterative refinement of a MUMPS solution and warns when it did
+!> not reach 'Mumps Refinement Tolerance'.
+!------------------------------------------------------------------------------
+  SUBROUTINE MumpsRefinementReport( Caller, it, omega0, omega, tol, Reason )
+!------------------------------------------------------------------------------
+    CHARACTER(LEN=*) :: Caller, Reason
+    INTEGER :: it
+    REAL(KIND=dp) :: omega0, omega, tol
+!------------------------------------------------------------------------------
+    WRITE(Message, '(A,I0,A,ES10.3,A,ES10.3,3A)') 'MUMPS iterative refinement: ', it, &
+        ' corrections, componentwise backward error ', omega0, ' -> ', omega, ' (', TRIM(Reason), ')'
+    CALL Info(Caller, Message, Level=5)
+    IF ( Reason /= 'converged' ) THEN
+      WRITE(Message, '(3A,ES10.3,A,ES10.3,A)') 'MUMPS iterative refinement ', TRIM(Reason), &
+          ' at a componentwise backward error of ', omega, ' ("Mumps Refinement Tolerance" ', tol, &
+          '): the solution may be inaccurate. The system may be inconsistent, e.g. a coil current that '// &
+          'is not divergence free, or close to singular'
+      CALL Warn(Caller, Message)
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE MumpsRefinementReport
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
@@ -1435,8 +2202,10 @@ CONTAINS
 #  endif
 
   INTEGER, ALLOCATABLE :: Owner(:)
-  INTEGER :: i,j,k,l,n,ip,ierr,icntlft,nzloc
-  LOGICAL :: Factorize, FreeFactorize, stat, matsym, matspd, scaled
+  INTEGER :: i,j,k,l,n,ip,ierr,icntlft,nzloc,nshift
+  REAL(KIND=dp) :: nullpivtol, regul
+  LOGICAL :: Factorize, FreeFactorize, stat, matsym, matspd, scaled, Refine
+  LOGICAL, ALLOCATABLE :: Unshifted(:)
 
   INTEGER, ALLOCATABLE :: memb(:)
   INTEGER :: Comm_active, Group_active, Group_world
@@ -1445,6 +2214,14 @@ CONTAINS
 
   Factorize = ListGetLogical( Solver % Values, 'Linear System Refactorize', stat )
   IF ( .NOT. stat ) Factorize = .TRUE.
+
+  ! A singular but consistent system (the A-V system without a gauge) leaves MUMPS
+  ! with zero pivots. The factorization then gets a small diagonal shift and the
+  ! iterative refinement against the unshifted matrix removes its effect.
+  regul = ListGetConstReal( Solver % Values, 'Mumps Diagonal Regularization', stat )
+  IF ( .NOT. stat .OR. regul < 0.0_dp ) regul = 0.0_dp
+  Refine = ListGetLogical( Solver % Values, 'Mumps Iterative Refinement', stat )
+  IF ( .NOT. stat ) Refine = regul > 0.0_dp
 
   IF ( Factorize .OR. .NOT.ASSOCIATED(A % ZMumpsID) ) THEN
     CALL FreeMumpsFactorizations(A)
@@ -1481,6 +2258,8 @@ CONTAINS
 !   END IF
 
     CALL ZMumps(A % ZMumpsID)
+    CALL CheckMumpsStatus('ZMumps_SolveSystem', 'initialization', 'INFOG', &
+        A % ZMumpsID % infog(1), A % ZMumpsID % infog(2))
 
     IF(ASSOCIATED(A % Gorder)) DEALLOCATE(A % Gorder)
 
@@ -1508,6 +2287,9 @@ CONTAINS
       ALLOCATE( A % ZMumpsID % a_loc(A % ZMumpsId % nz_loc) )
 
       nzloc = 0
+      nshift = 0
+      ALLOCATE( Unshifted(A % NumberOfRows) )
+      CALL MumpsUnshiftedRows( Solver, regul, Unshifted )
       DO i=1,A % NumberOfRows,2
         ip = (A % Gorder(i)-1)/2 + 1
         DO j=A % Rows(i), A % Rows(i+1)-1,2
@@ -1515,8 +2297,23 @@ CONTAINS
           A % ZMumpsID % irn_loc(nzloc) = ip
           A % ZMumpsID % jcn_loc(nzloc) = (A % Gorder(A % Cols(j))-1)/2+1
           A % ZMumpsID % a_loc(nzloc)   = CMPLX( A % Values(j), -A % Values(j+1), KIND=dp)
+          ! A real positive shift on the edge dofs removes the gauge freedom of the
+          ! A-V system: the gauge block of the shifted matrix is then G^T diag(shift) G,
+          ! regular up to a potential constant over the whole mesh.
+          IF ( regul > 0.0_dp .AND. A % Cols(j) == i .AND. .NOT. Unshifted(i) ) THEN
+            A % ZMumpsID % a_loc(nzloc) = A % ZMumpsID % a_loc(nzloc) + &
+                regul * ABS(A % ZMumpsID % a_loc(nzloc))
+            nshift = nshift + 1
+          END IF
         END DO
       END DO
+      DEALLOCATE( Unshifted )
+      IF ( regul > 0.0_dp ) THEN
+        CALL MPI_ALLREDUCE( nshift, i, 1, MPI_INTEGER, MPI_SUM, A % ZMumpsID % Comm, ierr )
+        WRITE(Message, '(A,ES10.3,A,I0,A)') 'MUMPS diagonal regularization ', regul, &
+            ' on ', i, ' diagonal entries'
+        CALL Info('ZMumps_SolveSystem', Message, Level=5)
+      END IF
     ELSE
       ! Set matrix for Mumps (symmetric case)
       nzloc = 0
@@ -1544,6 +2341,7 @@ CONTAINS
         END DO
       END DO
     END IF
+    IF ( ListGetLogical( Solver % Values, 'Mumps Drop Zeros', stat ) ) CALL ZMumpsDropZeros( A )
 
     ALLOCATE(A % ZMumpsID % rhs(A % ZMumpsId % n))
 
@@ -1560,12 +2358,36 @@ CONTAINS
     IF (stat) THEN
        A % ZMumpsID % icntl(14) = icntlft
     END IF
+    IF (ListGetLogical(Solver % Values, 'mumps null pivot detection', stat)) THEN
+       A % ZMumpsID % icntl(24) = 1
+       CALL Info('ZMumps_SolveSystem', 'MUMPS null pivot detection enabled', Level=5)
+    END IF
+    ! CNTL(3) null-pivot threshold: >0 CNTL(3)*||A||inf, <0 |CNTL(3)|, 0 MUMPS default
+    ! (4.10.0: 1e-5*eps*||A||inf; 5.4.0 and later: sqrt(pivots on critical path)*eps*||A||inf). Used: DKEEP(1).
+    nullpivtol = ListGetConstReal(Solver % Values, 'mumps null pivot tolerance', stat)
+    IF (stat) THEN
+       A % ZMumpsID % cntl(3) = nullpivtol
+    END IF
+    IF (ListGetLogical(Solver % Values, 'mumps sequential root', stat)) THEN
+       A % ZMumpsID % icntl(13) = 1
+       CALL Info('ZMumps_SolveSystem', 'MUMPS sequential root node (no ScaLAPACK) enabled', Level=5)
+    END IF
     A % ZMumpsID % icntl(18) = 3 ! 'distributed' matrix 
     A % ZMumpsID % icntl(21) = 1 ! 'distributed' solution phase
 
+    CALL MumpsOrdering( Solver, A % ZMumpsID % icntl(7) )
     A % ZMumpsID % job = 4
     CALL ZMumps(A % ZMumpsID)
     CALL Flush(6)
+    CALL CheckMumpsStatus('ZMumps_SolveSystem', 'analysis and factorization', 'INFOG', &
+        A % ZMumpsID % infog(1), A % ZMumpsID % infog(2))
+    IF (A % ZMumpsID % icntl(24) == 1) THEN
+       CALL Info('ZMumps_SolveSystem', 'MUMPS null pivots detected: '//I2S(A % ZMumpsID % infog(28)), Level=5)
+    END IF
+    WRITE(Message, '(A,I0,A,I0,A,ES10.3,A,ES10.3)') 'MUMPS ordering used (INFOG(7)): ', A % ZMumpsID % infog(7), &
+        ', entries in factors (INFOG(29)): ', A % ZMumpsID % infog(29), ', flops (RINFOG(3)): ', A % ZMumpsID % rinfog(3), &
+        ', null-pivot threshold (DKEEP(1)): ', A % ZMumpsID % dkeep(1)
+    CALL Info('ZMumps_SolveSystem', Message, Level=5)
 
     A % ZMumpsID % lsol_loc = A % Zmumpsid % info(23)
     ALLOCATE(A % ZMumpsID % sol_loc(A % ZMumpsId % lsol_loc))
@@ -1587,8 +2409,12 @@ CONTAINS
 
  ! Solution:
  ! ---------
+  IF (ListGetLogical(Solver % Values, 'Mumps Residual Check', stat)) &
+      CALL MumpsResidualCheck(Solver, A, x, b, A % ZMumpsID % Comm, 'before the solve')
   A % ZMumpsID % job = 3
   CALL ZMumps(A % ZMumpsID)
+  CALL CheckMumpsStatus('ZMumps_SolveSystem', 'solve', 'INFOG', &
+      A % ZMumpsID % infog(1), A % ZMumpsID % infog(2))
 
  ! Distribute the solution to all:
  ! -------------------------------
@@ -1609,6 +2435,8 @@ CONTAINS
     x(i)   = REAL( A % ZMumpsId % RHS(ip) )
     x(i+1) = AIMAG( A % ZMumpsId % RHS(ip) )
   END DO
+  IF ( Refine ) CALL ZMumpsRefineSolution( Solver, A, x, b )
+  CALL MumpsCheckSolution(Solver, A, x, b, A % ZMumpsID % Comm)
 
   FreeFactorize = ListGetLogical( Solver % Values, 'Linear System Free Factorization', stat )
   IF ( .NOT. stat ) FreeFactorize = .TRUE.
@@ -1618,6 +2446,176 @@ CONTAINS
 #endif
 !------------------------------------------------------------------------------
   END SUBROUTINE ZMumps_SolveSystem
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> The residual r = b - A x of a complex system in the global numbering of
+!> ZMumps_SolveSystem, summed over all ranks as MUMPS sums the distributed
+!> entries, and the row activity |A||x| + |b|. Every rank gets both vectors.
+!> Collective over Comm.
+!------------------------------------------------------------------------------
+  SUBROUTINE ZMumpsResidual( A, x, b, Comm, r, Activity )
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPI_MODULE)
+    USE mpi
+#  endif
+#endif
+    TYPE(Matrix_t) :: A
+    REAL(KIND=dp) :: x(*), b(*)
+    INTEGER :: Comm
+    COMPLEX(KIND=dp) :: r(:)
+    REAL(KIND=dp) :: Activity(:)
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPIF_HEADER)
+    INCLUDE 'mpif.h'
+#  endif
+    INTEGER :: i, j, ip, jp, n, ierr
+    COMPLEX(KIND=dp), ALLOCATABLE :: xg(:), bg(:), cbuf(:)
+    REAL(KIND=dp), ALLOCATABLE :: cnt(:), rbuf(:)
+    COMPLEX(KIND=dp) :: s, aij
+    REAL(KIND=dp) :: t
+
+    n = SIZE(r)
+    ALLOCATE( xg(n), bg(n), cbuf(n), cnt(n), rbuf(n) )
+    xg = 0; cnt = 0
+    DO i=1,A % NumberOfRows,2
+      ip = (A % Gorder(i)-1)/2+1
+      xg(ip) = CMPLX( x(i), x(i+1), KIND=dp )
+      cnt(ip) = 1
+    END DO
+    ! shared rows carry the same solution value on every rank: average the sum
+    cbuf = xg
+    CALL MPI_ALLREDUCE( cbuf, xg, n, MPI_DOUBLE_COMPLEX, MPI_SUM, Comm, ierr )
+    rbuf = cnt
+    CALL MPI_ALLREDUCE( rbuf, cnt, n, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr )
+    WHERE( cnt > 0 ) xg = xg / cnt
+
+    r = 0; bg = 0; Activity = 0
+    DO i=1,A % NumberOfRows,2
+      ip = (A % Gorder(i)-1)/2+1
+      s = 0; t = 0
+      DO j=A % Rows(i), A % Rows(i+1)-1,2
+        jp = (A % Gorder(A % Cols(j))-1)/2+1
+        aij = CMPLX( A % Values(j), -A % Values(j+1), KIND=dp )
+        s = s + aij * xg(jp)
+        t = t + ABS(aij) * ABS(xg(jp))
+      END DO
+      r(ip) = r(ip) + CMPLX( b(i), b(i+1), KIND=dp ) - s
+      bg(ip) = bg(ip) + CMPLX( b(i), b(i+1), KIND=dp )
+      Activity(ip) = Activity(ip) + t
+    END DO
+    cbuf = r
+    CALL MPI_ALLREDUCE( cbuf, r, n, MPI_DOUBLE_COMPLEX, MPI_SUM, Comm, ierr )
+    cbuf = bg
+    CALL MPI_ALLREDUCE( cbuf, bg, n, MPI_DOUBLE_COMPLEX, MPI_SUM, Comm, ierr )
+    rbuf = Activity
+    CALL MPI_ALLREDUCE( rbuf, Activity, n, MPI_DOUBLE_PRECISION, MPI_SUM, Comm, ierr )
+    Activity = Activity + ABS(bg)
+    DEALLOCATE( xg, bg, cbuf, cnt, rbuf )
+#endif
+!------------------------------------------------------------------------------
+  END SUBROUTINE ZMumpsResidual
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Iterative refinement of a ZMumps_SolveSystem solution against the assembled
+!> matrix: x <- x + F^-1 (b - A x), F the factorization in A % ZMumpsID (with
+!> 'Mumps Diagonal Regularization' that of A plus a diagonal shift). Every
+!> iterate is measured by its componentwise backward error with the row scales
+!> of the first solution (MumpsRowScale, MumpsBackwardError); MumpsRefinementStop
+!> decides, at most 'Mumps Refinement Max Iterations' (default 10) corrections;
+!> MumpsRefinementReport warns when the error stays above 'Mumps Refinement
+!> Tolerance' (default 1e-11, well above the rounding level that a consistent
+!> system reaches; an inconsistent one levels off at its inconsistency). The size
+!> of the corrections is no measure: on a singular system their null-space part
+!> is rounding noise amplified by the inverse shift. Collective over the MUMPS
+!> communicator.
+!------------------------------------------------------------------------------
+  SUBROUTINE ZMumpsRefineSolution( Solver, A, x, b )
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPI_MODULE)
+    USE mpi
+#  endif
+#endif
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t) :: A
+    REAL(KIND=dp) :: x(*), b(*)
+!------------------------------------------------------------------------------
+#ifdef HAVE_MUMPS
+#  if defined(ELMER_HAVE_MPIF_HEADER)
+    INCLUDE 'mpif.h'
+#  endif
+    INTEGER :: i, ip, n, nrows, it, maxit, ierr
+    REAL(KIND=dp) :: tol, omega, omega0, omegaprev
+    REAL(KIND=dp), ALLOCATABLE :: xsave(:), Activity(:), Scale(:)
+    INTEGER, ALLOCATABLE :: Block(:), GBlock(:), ibuf(:)
+    COMPLEX(KIND=dp), ALLOCATABLE :: r(:), dbuf(:)
+    CHARACTER(LEN=20) :: Reason
+    LOGICAL :: stat, Revert
+
+    maxit = ListGetInteger( Solver % Values, 'Mumps Refinement Max Iterations', stat )
+    IF ( .NOT. stat ) maxit = 10
+    tol = ListGetConstReal( Solver % Values, 'Mumps Refinement Tolerance', stat )
+    IF ( .NOT. stat ) tol = 1.0e-11_dp
+
+    n = A % ZMumpsID % n
+    nrows = A % NumberOfRows
+    ALLOCATE( r(n), dbuf(n), xsave(nrows), Activity(n), Scale(n), Block(nrows), GBlock(n), ibuf(n) )
+    CALL MumpsRowBlocks( Solver, A, Block )
+    ibuf = 0
+    DO i=1,nrows,2
+      ibuf((A % Gorder(i)-1)/2+1) = Block(i)
+    END DO
+    CALL MPI_ALLREDUCE( ibuf, GBlock, n, MPI_INTEGER, MPI_MAX, A % ZMumpsID % Comm, ierr )
+
+    CALL ZMumpsResidual( A, x, b, A % ZMumpsID % Comm, r, Activity )
+    IF ( MumpsRowScale( Activity, GBlock, Scale ) ) THEN
+      omega = MumpsBackwardError( ABS(r), Scale )
+      omega0 = omega
+      it = 0
+      Reason = 'iteration limit'
+      DO WHILE( it < maxit )
+        A % ZMumpsID % RHS = r
+        A % ZMumpsID % job = 3
+        CALL ZMumps(A % ZMumpsID)
+        CALL CheckMumpsStatus('ZMumpsRefineSolution', 'solve', 'INFOG', &
+            A % ZMumpsID % infog(1), A % ZMumpsID % infog(2))
+        dbuf = 0
+        DO i=1,A % ZMumpsID % lsol_loc
+          dbuf(A % ZMumpsID % isol_loc(i)) = A % ZMumpsID % sol_loc(i)
+        END DO
+        CALL MPI_ALLREDUCE( dbuf, r, n, MPI_DOUBLE_COMPLEX, MPI_SUM, A % ZMumpsID % Comm, ierr )
+
+        xsave = x(1:nrows)
+        DO i=1,nrows,2
+          ip = (A % Gorder(i)-1)/2+1
+          x(i)   = x(i)   + REAL( r(ip) )
+          x(i+1) = x(i+1) + AIMAG( r(ip) )
+        END DO
+        omegaprev = omega
+        CALL ZMumpsResidual( A, x, b, A % ZMumpsID % Comm, r, Activity )
+        omega = MumpsBackwardError( ABS(r), Scale )
+        IF ( MumpsRefinementStop( it, omega, omegaprev, tol, Reason, Revert ) ) THEN
+          IF ( Revert ) THEN
+            x(1:nrows) = xsave
+            omega = omegaprev
+          END IF
+          EXIT
+        END IF
+      END DO
+      CALL MumpsRefinementReport( 'ZMumpsRefineSolution', it, omega0, omega, tol, Reason )
+    ELSE
+      CALL Warn( 'ZMumpsRefineSolution', 'MUMPS solution not finite: no iterative refinement' )
+    END IF
+    DEALLOCATE( r, dbuf, xsave, Activity, Scale, Block, GBlock, ibuf )
+#endif
+!------------------------------------------------------------------------------
+  END SUBROUTINE ZMumpsRefineSolution
 !------------------------------------------------------------------------------
 
 
@@ -1667,6 +2665,8 @@ CONTAINS
      ! SOLUTION PHASE
      A % mumpsIDL % job = 3
      CALL DMumps(A % mumpsIDL)
+     CALL CheckMumpsStatus('MumpsLocal_SolveSystem', 'solve', 'INFO', &
+         A % mumpsIDL % info(1), A % mumpsIDL % info(2))
 
      ! TODO: If solution is not local, redistribute the solution vector here
 
@@ -1736,6 +2736,8 @@ CONTAINS
      ! SOLUTION PHASE
      A % ZmumpsIDL % job = 3
      CALL ZMumps(A % ZmumpsIDL)
+     CALL CheckMumpsStatus('ZMumpsLocal_SolveSystem', 'solve', 'INFO', &
+         A % ZmumpsIDL % info(1), A % ZmumpsIDL % info(2))
 
      ! TODO: If solution is not local, redistribute the solution vector here
 
@@ -1817,6 +2819,8 @@ CONTAINS
     END IF
     A % mumpsIDL % JOB  = -1 ! Initialize
     CALL DMumps(A % mumpsIDL)
+    CALL CheckMumpsStatus('MumpsLocal_Factorize', 'initialization', 'INFO', &
+        A % mumpsIDL % INFO(1), A % mumpsIDL % INFO(2))
 
     ! FACTORIZE PHASE
 
@@ -1995,6 +2999,8 @@ CONTAINS
 
     A % ZmumpsIDL % JOB  = -1 ! Initialize
     CALL ZMumps(A % ZmumpsIDL)
+    CALL CheckMumpsStatus('ZMumpsLocal_Factorize', 'initialization', 'INFO', &
+        A % ZmumpsIDL % INFO(1), A % ZmumpsIDL % INFO(2))
 
     ! FACTORIZE PHASE
 

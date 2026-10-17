@@ -1,0 +1,20 @@
+! The same two windings with the component numbers swapped: outer (10 turns) first, inner (100 turns)
+! second. The same layout per winding and the same power as order_ab, whichever winding is initialized first.
+! expect: Component 1 foil sheet: 10 cells x 1 sub-layers x 5 segments
+! expect: Component 2 foil sheet: 100 cells x 1 sub-layers x 4 segments
+Simulation 1 :: Frequency = Real 50
+Boundary Condition 7 :: Beta = Real 0.5
+Component 1 :: Master Bodies(1) = Integer 2
+Component 1 :: Electrode Boundaries(2) = Integer 4 5
+Component 1 :: Number of Turns = Real 10
+Component 1 :: Foil Thickness = Real 0.0008
+Component 1 :: Sheet Cells = Integer 0
+Component 1 :: Sheet Segments = Integer 0
+Component 2 :: Master Bodies(1) = Integer 1
+Component 2 :: Electrode Boundaries(2) = Integer 2 3
+Component 2 :: Number of Turns = Real 100
+Component 2 :: Foil Thickness = Real 0.00008
+Component 2 :: Sheet Cells = Integer 0
+Component 2 :: Sheet Segments = Integer 0
+Solver 10 :: Reference Norm = Real 6.26685414E-02
+Solver 10 :: Reference Norm Tolerance = Real 1E-6

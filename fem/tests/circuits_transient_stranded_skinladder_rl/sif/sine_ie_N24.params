@@ -1,0 +1,24 @@
+! y0 = 0, sine 2 MHz, implicit Euler, 24 points per period, average of the 2nd period
+$ y0 = 0
+$ alpha = 11819380
+$ sigma = 3.981e-07
+$ Order = 1
+$ Nsteps = 48
+$ function dtfun(t) { _dtfun = 2.0833333333e-08 }
+$ f0 = 2000000
+$ function isrc(t) { _isrc = sin(2*pi*2000000*t+pi/4) }
+$ Tavg = 5e-07
+! Discrete values of the ladder (DEV-1549 predictions): heat average, ladder voltage,
+! coil voltage, circuit heat, field heat and diagonal of the last step
+$ Pavg = 2.2221577422e-01
+$ Vskin = 4.2459650539e+00
+$ Vcomp = 3.8759092401e+04
+$ Plast = 4.5511966639e-01
+$ PJlast = 2.2221577422e-01
+$ Rdiag = 1.8303820695e+01
+$ VcompTol = 1.000e-03
+! Analytic references and their tolerances (SaveScalars norms are absolute values)
+$ Pref = 2.2221577422e-01
+$ PrefTol = 1.000e-06
+$ Vref = 3.8635383158e+00
+$ VrefTol = 1.300e-01

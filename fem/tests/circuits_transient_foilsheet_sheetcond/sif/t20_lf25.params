@@ -1,0 +1,4 @@
+! Winding at 20 C with loss factor 2.5
+$ Tcoil = 20
+$ LFcoil = 2.5
+$ Pref = 0.000504608

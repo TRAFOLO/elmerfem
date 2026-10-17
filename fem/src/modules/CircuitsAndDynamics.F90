@@ -41,15 +41,11 @@
 ! *****************************************************************************/
  
 !------------------------------------------------------------------------------
-!> Slice 2: per-Component state for the transient-homogenization skin-effect
-!> ladder (Gyselinck / Sabariego). Stored in a small module so both
-!> CircuitsAndDynamics (assembles the circuit matrix) and CircuitsOutput
-!> (updates xi_S after the A-V solve converges) can share it.
-!>
-!> Hardcoded for n_ladder = 1 (single scalar xi_S per Component). For n > 1
-!> these arrays would become (max_n_ladder, n_components) and the BDF-1
-!> Schur reduction would need a full M_sigma factorization per Component
-!> per timestep — same pattern as the proximity-side ladder in WhitneyAVSolver.
+!> State of the transient homogenization ladders that sit in the circuit
+!> equations: the skin ladder of a homogenized stranded coil and the strand
+!> skin ladder of a foil sheet. Kept in a small module so that
+!> CircuitsAndDynamics (assembly) and CircuitsOutput (state advance once the
+!> A-V solve has converged, loss scalars) share it.
 !------------------------------------------------------------------------------
 MODULE TransientHomogCircuitState
   USE Types
@@ -58,53 +54,532 @@ MODULE TransientHomogCircuitState
   IMPLICIT NONE
   PUBLIC
 
-  ! Per-Component fit triplet (read once at init from each Component).
-  REAL(KIND=dp), ALLOCATABLE, SAVE :: y0_sigma(:), alpha_sigma(:), sigma_sigma(:)
+  !----------------------------------------------------------------------------
+  ! Stranded coil skin ladder.
+  !
+  ! The SIF gives the strand conductivity of a stranded coil with 'Transient
+  ! Homogenization' as an n = 1 ladder, 'Sigma 33 y0', 'Sigma 33 alpha' and
+  ! 'Sigma 33 Sigma(1,1)':
+  !     y(s) = y0 + alpha/(1 + s sigma),   G0 = y(0) = y0 + alpha.
+  ! The coil carries one current I, so its resistive voltage is K I/y(s), K the
+  ! integral of N_j^2 |w|^2 with the depth and voltage factor of the circuit
+  ! row. The impedance is again of first order, with coefficients that stay
+  ! finite down to y0 = 0,
+  !     1/y(s) = R0 + L s/(1 + s tau),
+  !     R0 = 1/G0,  L = sigma alpha/G0^2,  tau = sigma y0/G0,
+  ! a resistor R0 in series with an inductor L that a resistor A = L/tau =
+  ! 1/y0 - 1/G0 shunts. One state per component carries the memory,
+  !     tau dq/dt + q = dI/dt,   v_R = K (R0 I + L q),
+  ! q = dchi/dt for the inductor current chi = I - tau q. With the BDF weights
+  ! bdfw of the step (TransientLadderBDF), c = bdfw(1)/dt and
+  ! hx = (bdfw(2) chi^{n-1} + bdfw(3) chi^{n-2})/dt, the state is
+  ! q^n = (c I^n + hx)/(1 + c tau), so that
+  !     v_R = K [ I^n/y(c) + L hx/(1 + c tau) ]:
+  ! the diagonal is the conductivity at s = c, Gskin = y(c), and the history
+  ! goes to the right hand side. A constant current gives K I/G0 at any step.
+  ! The heat is
+  !     P = K [ R0 I^2 + L tau q^2 ],
+  ! the rest of I v_R being the energy K L chi^2/2 stored in the inductor.
+  ! y0 = 0 is the limit tau = 0, chi = I: the resistor K/G0 in series with the
+  ! inductance K sigma/G0, heat K R0 I^2. alpha = 0 gives L = 0: a resistor
+  ! K/y0 without memory.
+  !----------------------------------------------------------------------------
+  TYPE StrandedSkin_t
+    LOGICAL :: Active = .FALSE.
+    ! The SIF triplet and the impedance form derived from it.
+    REAL(KIND=dp) :: y0 = 0._dp, alpha = 0._dp, sigma = 0._dp
+    REAL(KIND=dp) :: G0 = 0._dp, R0 = 0._dp, L = 0._dp, Tau = 0._dp
+    ! Factors of the step: the diagonal conductance Gskin = y(c), the state
+    ! q^n = Gain I^n + QHist, and the history voltage per unit K,
+    ! VHist = L QHist. Until a step is prepared, the DC values.
+    REAL(KIND=dp) :: Gskin = 0._dp, Gain = 0._dp, QHist = 0._dp, VHist = 0._dp
+    ! q and chi are the latest iterate of the step, chio and chioo the inductor
+    ! currents of the two previous steps, which PrepareStrandedSkinStep commits
+    ! once per step. AdvanceStrandedSkin starts from them, so a second call
+    ! within a timestep redoes the step instead of taking another one.
+    REAL(KIND=dp) :: q = 0._dp, chi = 0._dp, chio = 0._dp, chioo = 0._dp
+    ! K of the last assembly, reduced over the partitions.
+    REAL(KIND=dp) :: K = 0._dp
+    ! Step count (sskin_step) at the last AdvanceStrandedSkin.
+    INTEGER :: AdvancedStep = 0
+  END TYPE StrandedSkin_t
 
-  ! Per-Component BDF-1 derived quantities, recomputed when dt changes.
-  REAL(KIND=dp), ALLOCATABLE, SAVE :: G_skin(:)        ! y0 + alpha * mk_inv
-  REAL(KIND=dp), ALLOCATABLE, SAVE :: v_hist_coeff(:)  ! alpha * mk_inv * (sigma/dt)
+  TYPE(StrandedSkin_t), ALLOCATABLE, SAVE :: SSkin(:)
+  LOGICAL, SAVE :: sskin_allocated = .FALSE.
+  ! Number of timesteps PrepareStrandedSkinStep has started.
+  INTEGER, SAVE :: sskin_step = 0
 
-  ! Per-Component auxiliary ladder state xi_S^n (scalar, n_ladder = 1).
-  REAL(KIND=dp), ALLOCATABLE, SAVE :: xi_S(:)
+  !----------------------------------------------------------------------------
+  ! Foil sheet strand skin ladder.
+  !
+  ! The strand impedance is R_dc * u coth u with u^2 = s tau0, tau0 = mu0 sigma
+  ! t^2 / 4. Its exact partial fraction expansion is
+  !     u coth u = 1 + sum_{n>=1} 2 s tau_n / (1 + s tau_n),  tau_n = tau0/(n pi)^2
+  ! so each term is one first order state per strand,
+  !     tau_n dx_n/dt + x_n = y      and      2 s tau_n/(1+s tau_n) y = 2 (y - x_n).
+  ! The series is truncated at N and the remainder, which behaves like
+  ! s * 2 tau0/pi^2 * sum_{n>N} 1/n^2, is kept as a series inductance L_tail.
+  ! Without it the imaginary part is ~14 % low at N = 4; with it N = 4 matches
+  ! u coth u to 0.05 % in the real part and 0.00 % in the imaginary part at
+  ! 100 kHz for a 0.5 mm foil.
+  !
+  ! Discretely, with the BDF weights bdfw of the step (TransientLadderBDF),
+  ! c = bdfw(1)/dt, a_n = c tau_n and M_n = 1 + a_n, the Schur elimination of the
+  ! states gives a diagonal factor and a history term that only involve stored
+  ! quantities:
+  !     Gdiag = 1 + sum_n 2 a_n/M_n + c L_tail
+  !     hist  = sum_n 2 hx_n/M_n + hy
+  ! with hx_n and hy the BDF history of x_n and y.
+  !----------------------------------------------------------------------------
+  TYPE FoilSkin_t
+    ! Alloc says the per strand state exists, Active says the ladder maths is
+    ! switched on. The loss bookkeeping needs the first, not the second.
+    LOGICAL :: Active = .FALSE., Alloc = .FALSE.
+    INTEGER :: N = 0, nStrand = 0, nCells = 0, nSegments = 0
+    REAL(KIND=dp) :: Ltail = 0._dp, Gdiag = 1._dp
+    ! BDF weights of the current step, set with the Schur factors.
+    REAL(KIND=dp) :: bdfw(3) = [1._dp, -1._dp, 0._dp]
+    ! Similarity transform of the strand dof, transient only. The AV<-y and
+    ! y<-a border blocks differ by SigmaRef*dt/a1 (~600 at 1 kHz), which makes
+    ! the bordered system violently non-symmetric. Solving for y' = DofScale*y
+    ! with the R1 row scaled by DofScale makes both blocks equal; D is invariant.
+    REAL(KIND=dp) :: DofScale = 1._dp
+    REAL(KIND=dp), ALLOCATABLE :: tau(:), Minv(:)
+    ! x and y are the latest iterate of the step, x_n^{n+1} and y^{n+1}; xo, yo
+    ! and xoo, yoo are the states of the two previous steps, which
+    ! PrepareFoilSkinStep commits once per step. AdvanceFoilSkin starts from the
+    ! committed states, so a second call within a timestep (coupled iterations)
+    ! redoes the step instead of taking another one.
+    REAL(KIND=dp), ALLOCATABLE :: x(:,:), xo(:,:), xoo(:,:)
+    REAL(KIND=dp), ALLOCATABLE :: y(:), yo(:), yoo(:), hist(:)
+    ! w(j) = sum over the strand of gres*SigmaRef^2/sigma_dc, i.e. the DC
+    ! resistance weight, so that the strand dissipation is
+    !   P_j = w(j) * [ y_j^2 + sum_k 2 (y_j - x_kj)^2 ],
+    ! the first term being the DC loss and each ladder stage dissipating in its
+    ! own 2 R_dc resistor. The tail inductance dissipates nothing.
+    REAL(KIND=dp), ALLOCATABLE :: w(:)
+    ! The strand pieces of the last assembly, element by element: element,
+    ! strand and the piece's share of w, so that the loss beyond DC can be put
+    ! back in space.
+    INTEGER :: nPiece = 0
+    INTEGER, ALLOCATABLE :: pElem(:), pStrand(:)
+    REAL(KIND=dp), ALLOCATABLE :: pW(:)
+    ! Step count (fskin_step) at the last AdvanceFoilSkin of this component.
+    INTEGER :: AdvancedStep = 0
+  END TYPE FoilSkin_t
 
-  ! Per-Component flag: True iff Coil Type = stranded AND Homogenization Model
-  ! = True AND Transient Homogenization = True. Set once at SIF parse time.
-  LOGICAL, ALLOCATABLE, SAVE :: has_skin_ladder(:)
+  TYPE(FoilSkin_t), ALLOCATABLE, SAVE :: FSkin(:)
+  LOGICAL, SAVE :: fskin_allocated = .FALSE.
+  ! Number of timesteps PrepareFoilSkinStep has started.
+  INTEGER, SAVE :: fskin_step = 0
 
-  REAL(KIND=dp), SAVE :: cached_dt = -1.0_dp
-  LOGICAL, SAVE       :: state_allocated = .FALSE.
+  ! Per element of the 'Proximity Loss' field: the value found before the skin
+  ! ladder's share was added, and the value written (PublishFoilSkinExcess).
+  REAL(KIND=dp), ALLOCATABLE, SAVE :: PLBase(:), PLWritten(:)
+  LOGICAL, ALLOCATABLE, SAVE :: PLHave(:)
 
 CONTAINS
 
   !----------------------------------------------------------------------------
-  ! One-time allocation + per-Component SIF triplet read. Called from
-  ! CircuitsAndDynamics inside its First block, after the Components are
-  ! populated by ReadComponents.
+  ! Allocate the ladder state and compute the time constants. Called once, after
+  ! the Components exist, from the same First block as InitStrandedSkinLadder.
   !----------------------------------------------------------------------------
-  SUBROUTINE InitSkinLadderState()
+  SUBROUTINE InitFoilSkinLadder()
+    IMPLICIT NONE
+    INTEGER :: i, n_comp, nn, ns, nsub, k
+    TYPE(ValueList_t), POINTER :: CompParams
+    LOGICAL :: found
+    CHARACTER(LEN=MAX_NAME_LEN) :: ctype
+    LOGICAL :: ladderon
+    REAL(KIND=dp) :: tau0, rest, rt
+
+    IF (fskin_allocated) RETURN
+    n_comp = CurrentModel % NumberOfComponents
+    IF (n_comp <= 0) RETURN
+    ALLOCATE(FSkin(n_comp))
+    fskin_allocated = .TRUE.
+
+    DO i = 1, n_comp
+      CompParams => CurrentModel % Components(i) % Values
+      IF (.NOT. ASSOCIATED(CompParams)) CYCLE
+      ctype = ListGetString(CompParams, 'Coil Type', found)
+      IF (.NOT. found) CYCLE
+      IF (TRIM(ctype) /= 'foil sheet') CYCLE
+
+      ! Without a foil time constant there is no ladder, but the per strand
+      ! state is still allocated: the loss bookkeeping uses its resistance
+      ! weights whether the ladder runs or not.
+      ladderon = .TRUE.
+      tau0 = GetConstReal(CompParams, 'Foil Sheet Tau0', found)
+      IF (.NOT. found .OR. tau0 <= 0._dp) THEN
+        ladderon = .FALSE.
+        tau0 = 1._dp
+      END IF
+
+      nn = GetInteger(CompParams, 'Sheet Skin Ladder Order', found)
+      IF (.NOT. found) nn = 4
+      IF (nn < 1 .OR. nn > 16) &
+          CALL Fatal('InitFoilSkinLadder','"Sheet Skin Ladder Order" must be between 1 and 16!')
+
+      FSkin(i) % nCells    = GetInteger(CompParams, 'Foil Sheet Cells', found)
+      IF (.NOT. found) CYCLE
+      FSkin(i) % nSegments = GetInteger(CompParams, 'Foil Sheet Segments', found)
+      IF (.NOT. found) CYCLE
+      ! One state per strand, and a strand is a (sub-layer, segment) pair. The
+      ! transient sheet accepts one sub-layer per turn only, but sizing this
+      ! from the cells alone would overrun the moment that changes.
+      nsub = GetInteger(CompParams, 'Foil Sheet Sublayers', found)
+      IF (.NOT. found .OR. nsub < 1) nsub = 1
+      ns = FSkin(i) % nCells * nsub * FSkin(i) % nSegments
+      IF (ns < 1) CYCLE
+
+      FSkin(i) % Active  = ladderon
+      FSkin(i) % Alloc   = .TRUE.
+      FSkin(i) % N       = nn
+      FSkin(i) % nStrand = ns
+      ALLOCATE(FSkin(i) % tau(nn), FSkin(i) % Minv(nn))
+      ALLOCATE(FSkin(i) % x(nn,ns), FSkin(i) % xo(nn,ns), FSkin(i) % xoo(nn,ns))
+      ALLOCATE(FSkin(i) % y(ns), FSkin(i) % yo(ns), FSkin(i) % yoo(ns), FSkin(i) % hist(ns), &
+          FSkin(i) % w(ns))
+      FSkin(i) % x = 0._dp; FSkin(i) % xo = 0._dp; FSkin(i) % xoo = 0._dp
+      FSkin(i) % y = 0._dp; FSkin(i) % yo = 0._dp; FSkin(i) % yoo = 0._dp
+      FSkin(i) % hist = 0._dp
+      FSkin(i) % w = 0._dp
+      FSkin(i) % Minv = 1._dp
+
+      rest = PI*PI/6._dp
+      DO k = 1, nn
+        FSkin(i) % tau(k) = tau0 / (REAL(k,dp)*PI)**2
+        rest = rest - 1._dp/REAL(k*k,dp)
+      END DO
+      FSkin(i) % Ltail = 2._dp * tau0 / (PI*PI) * rest
+
+      WRITE(Message,'(A,I0,A,I0,A,ES12.5)') 'Foil sheet skin ladder: order ', nn, &
+          ', ', ns, ' strands, tail inductance ', FSkin(i) % Ltail
+      CALL Info('InitFoilSkinLadder', Message, Level=5)
+      DO k = 1, nn
+        WRITE(Message,'(A,I0,A,ES12.5,A)') '  stage ', k, ': tau = ', FSkin(i) % tau(k), ' s'
+        CALL Info('InitFoilSkinLadder', Message, Level=5)
+      END DO
+    END DO
+
+    ! The ladder states are not in restart files. Continuing a restarted
+    ! transient would restart them from zero under the restored fields, an
+    ! artificial step in voltage and loss. 'Restart Time = 0' starts a new
+    ! transient from the restored fields (as TRAFOLO's thermal iterations do).
+    ! Without 'Restart Time' the file may as well be a steady result, which has
+    ! no ladder state to lose, so that case only warns.
+    IF (ANY(FSkin % Active) .AND. ListCheckPresent(CurrentModel % Simulation, 'Restart File')) THEN
+      IF (ListGetString(CurrentModel % Simulation, 'Simulation Type', found) == 'transient') THEN
+        rt = ListGetConstReal(CurrentModel % Simulation, 'Restart Time', found)
+        IF (.NOT. found) THEN
+          CALL Warn('InitFoilSkinLadder', 'Transient foil sheet restarted without "Restart Time": '// &
+              'its skin-effect state starts from zero. Continuing an energized transient this way '// &
+              'gives an artificial step in voltage and loss; "Restart Time = 0" silences this.')
+        ELSE IF (rt /= 0._dp) THEN
+          CALL Fatal('InitFoilSkinLadder', &
+              'Transient foil sheet cannot continue a restarted transient: its skin-effect state '// &
+              'is not stored in restart files. Set "Restart Time = 0" to start a new transient '// &
+              'from the restored fields.')
+        END IF
+      END IF
+    END IF
+
+    ! PrepareFoilSkinStep runs once per step number, so a step retried with
+    ! another size keeps the factors of the rejected one.
+    IF (ANY(FSkin % Active) .AND. ListGetLogical(CurrentModel % Simulation, 'Adaptive Timestepping', found)) &
+        CALL Warn('InitFoilSkinLadder', 'Transient foil sheet with adaptive time stepping: a retried '// &
+            'step keeps the skin-ladder factors of the rejected time step size.')
+  END SUBROUTINE InitFoilSkinLadder
+
+  !----------------------------------------------------------------------------
+  ! Start of a timestep: commit the last iterate of the previous step, then the
+  ! Schur factors for this dt and the BDF weights bdfw of the step
+  ! (TransientLadderBDF), and the history of every strand. Must run once per
+  ! step, before its assembly.
+  !----------------------------------------------------------------------------
+  SUBROUTINE PrepareFoilSkinStep(dt, bdfw)
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: dt, bdfw(3)
+    INTEGER :: i, k, j
+    REAL(KIND=dp) :: c, a, hx, h, ta
+    REAL(KIND=dp), ALLOCATABLE :: eb(:,:), ec(:,:)
+    TYPE(ValueList_t), POINTER :: CompParams
+
+    IF (.NOT. fskin_allocated) RETURN
+    IF (dt <= 0._dp) RETURN
+
+    ! The states of the finished step come from AdvanceFoilSkin, which only
+    ! CircuitsOutput calls. Without it the history would silently stay stale and
+    ! the output schedule would change the solution.
+    IF (fskin_step > 0) THEN
+      DO i = 1, SIZE(FSkin)
+        IF (.NOT. FSkin(i) % Active) CYCLE
+        IF (FSkin(i) % AdvancedStep == fskin_step) CYCLE
+        IF (.NOT. ListCheckPresent(CurrentModel % Components(i) % Values, &
+            'Circuit Voltage Variable Id')) CYCLE
+        CALL Fatal('PrepareFoilSkinStep','Transient foil sheet: the skin-effect state was not '// &
+            'advanced in the previous time step. Run the "CircuitsOutput" solver in every '// &
+            'time step (Exec Solver = Always).')
+      END DO
+    END IF
+    fskin_step = fskin_step + 1
+
+    c = bdfw(1)/dt
+
+    DO i = 1, SIZE(FSkin)
+      IF (.NOT. FSkin(i) % Active) CYCLE
+      FSkin(i) % xoo = FSkin(i) % xo
+      FSkin(i) % xo  = FSkin(i) % x
+      FSkin(i) % yoo = FSkin(i) % yo
+      FSkin(i) % yo  = FSkin(i) % y
+
+      FSkin(i) % bdfw = bdfw
+      FSkin(i) % Gdiag = 1._dp + FSkin(i) % Ltail * c
+      DO k = 1, FSkin(i) % N
+        a = FSkin(i) % tau(k) * c
+        FSkin(i) % Minv(k) = 1._dp/(1._dp + a)
+        FSkin(i) % Gdiag = FSkin(i) % Gdiag + 2._dp * a * FSkin(i) % Minv(k)
+      END DO
+
+      ! Strand j stores w(j) (sum_k tau_k x_kj^2 + Ltail y_j^2/2): the inductor
+      ! 2 tau_k R_dc of stage k carries x_kj and the tail one y_j. With
+      ! x_kj = (y_j + hx_kj) Minv_k in this step that is w(j) (A y_j^2 + B_j y_j + C_j),
+      ! published for MagnetoDynamicsCalcFields, which knows y_j and w(j) in space.
+      ALLOCATE(eb(FSkin(i) % nStrand,1), ec(FSkin(i) % nStrand,1))
+      DO j = 1, FSkin(i) % nStrand
+        h = FSkin(i) % Ltail * (-(bdfw(2)*FSkin(i) % yo(j) + bdfw(3)*FSkin(i) % yoo(j))) / dt
+        eb(j,1) = 0._dp
+        ec(j,1) = 0._dp
+        DO k = 1, FSkin(i) % N
+          hx = FSkin(i) % tau(k) * (-(bdfw(2)*FSkin(i) % xo(k,j) + bdfw(3)*FSkin(i) % xoo(k,j))) / dt
+          h = h + 2._dp * hx * FSkin(i) % Minv(k)
+          ta = FSkin(i) % tau(k) * FSkin(i) % Minv(k)**2
+          eb(j,1) = eb(j,1) + 2._dp * ta * hx
+          ec(j,1) = ec(j,1) + ta * hx**2
+        END DO
+        FSkin(i) % hist(j) = h
+      END DO
+      CompParams => CurrentModel % Components(i) % Values
+      CALL ListAddConstReal(CompParams, 'Foil Sheet Skin Energy Quadratic', &
+          0.5_dp * FSkin(i) % Ltail + SUM(FSkin(i) % tau * FSkin(i) % Minv**2))
+      CALL ListAddConstRealArray(CompParams, 'Foil Sheet Skin Energy Linear', FSkin(i) % nStrand, 1, eb)
+      CALL ListAddConstRealArray(CompParams, 'Foil Sheet Skin Energy Constant', FSkin(i) % nStrand, 1, ec)
+      DEALLOCATE(eb, ec)
+
+      WRITE(Message,'(A,I0,A,ES12.5,A,ES12.5,A,ES12.5)') 'Foil skin ladder comp ', i, &
+          ': Gdiag = ', FSkin(i) % Gdiag, ', hist(1) = ', FSkin(i) % hist(1), &
+          ', y(1) = ', FSkin(i) % yo(1)
+      CALL Info('PrepareFoilSkinStep', Message, Level=7)
+    END DO
+  END SUBROUTINE PrepareFoilSkinStep
+
+  !----------------------------------------------------------------------------
+  ! End of a timestep: x_n^{n+1} = (y^{n+1} + hx_n)/M_n from the committed
+  ! states, with the weights the step was prepared with.
+  !----------------------------------------------------------------------------
+  SUBROUTINE AdvanceFoilSkin(i, ynew, dt)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i
+    REAL(KIND=dp), INTENT(IN) :: ynew(:), dt
+    INTEGER :: k, j
+    REAL(KIND=dp) :: hx
+
+    IF (.NOT. fskin_allocated) RETURN
+    IF (i < 1 .OR. i > SIZE(FSkin)) RETURN
+    IF (.NOT. FSkin(i) % Alloc) RETURN
+    IF (dt <= 0._dp) RETURN
+
+    ! The strand currents are recorded whether or not the ladder is on, because
+    ! the loss bookkeeping needs them; only the stage states are advanced.
+    DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
+      FSkin(i) % y(j) = ynew(j)
+    END DO
+    IF (.NOT. FSkin(i) % Active) RETURN
+
+    DO j = 1, MIN(FSkin(i) % nStrand, SIZE(ynew))
+      DO k = 1, FSkin(i) % N
+        hx = FSkin(i) % tau(k) * (-(FSkin(i) % bdfw(2)*FSkin(i) % xo(k,j) &
+            + FSkin(i) % bdfw(3)*FSkin(i) % xoo(k,j))) / dt
+        FSkin(i) % x(k,j) = (ynew(j) + hx) * FSkin(i) % Minv(k)
+      END DO
+    END DO
+    FSkin(i) % AdvancedStep = fskin_step
+  END SUBROUTINE AdvanceFoilSkin
+
+  !----------------------------------------------------------------------------
+  ! Record one strand piece of component i as the assembly visits it.
+  !----------------------------------------------------------------------------
+  SUBROUTINE AddFoilSkinPiece(i, elem, strand, wp)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i, elem, strand
+    REAL(KIND=dp), INTENT(IN) :: wp
+    INTEGER, PARAMETER :: FirstCapacity = 1024
+    INTEGER :: n, m
+    INTEGER, ALLOCATABLE :: itmp(:)
+    REAL(KIND=dp), ALLOCATABLE :: rtmp(:)
+
+    n = FSkin(i) % nPiece + 1
+    IF (.NOT. ALLOCATED(FSkin(i) % pW)) THEN
+      ALLOCATE(FSkin(i) % pElem(FirstCapacity), FSkin(i) % pStrand(FirstCapacity), &
+          FSkin(i) % pW(FirstCapacity))
+    ELSE IF (n > SIZE(FSkin(i) % pW)) THEN
+      m = 2 * SIZE(FSkin(i) % pW)
+      ALLOCATE(itmp(m))
+      itmp(1:n-1) = FSkin(i) % pElem(1:n-1)
+      CALL MOVE_ALLOC(itmp, FSkin(i) % pElem)
+      ALLOCATE(itmp(m))
+      itmp(1:n-1) = FSkin(i) % pStrand(1:n-1)
+      CALL MOVE_ALLOC(itmp, FSkin(i) % pStrand)
+      ALLOCATE(rtmp(m))
+      rtmp(1:n-1) = FSkin(i) % pW(1:n-1)
+      CALL MOVE_ALLOC(rtmp, FSkin(i) % pW)
+    END IF
+    FSkin(i) % pElem(n) = elem
+    FSkin(i) % pStrand(n) = strand
+    FSkin(i) % pW(n) = wp
+    FSkin(i) % nPiece = n
+  END SUBROUTINE AddFoilSkinPiece
+
+  !----------------------------------------------------------------------------
+  ! Put the strand loss beyond DC, the dissipation w_j sum_k 2 (y_j - x_kj)^2 of
+  ! the skin ladder resistors, into the elemental 'Proximity Loss' field of the
+  ! sheet elements, spread over each strand's pieces like its DC loss. For a
+  ! transient foil sheet that field then carries all of the loss beyond the DC
+  ! Joule heating: the AV solver writes the reluctivity ladder's share and this
+  ! adds the skin ladder's, so 'Joule Heating' plus 'Proximity Loss' integrate
+  ! to the sheet loss. The value found is kept as the base: a second call
+  ! within a timestep replaces the skin share instead of adding it again, and a
+  ! value the AV solver wrote since becomes the new base.
+  !----------------------------------------------------------------------------
+  SUBROUTINE PublishFoilSkinExcess(Mesh)
+    IMPLICIT NONE
+    TYPE(Mesh_t), POINTER :: Mesh
+    TYPE(Variable_t), POINTER :: PL
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: sx(:), Basis(:)
+    REAL(KIND=dp) :: pe, vol, detJ, base
+    INTEGER :: i, j, k, r, e, idx, g, nv
+    LOGICAL :: stat
+
+    IF (.NOT. fskin_allocated) RETURN
+    IF (.NOT. ANY(FSkin(:) % Active)) RETURN
+    PL => VariableGet(Mesh % Variables, 'Proximity Loss', ThisOnly = .TRUE.)
+    IF (.NOT. ASSOCIATED(PL)) RETURN
+    IF (PL % TYPE /= Variable_on_elements) RETURN
+
+    nv = SIZE(PL % Values)
+    IF (ALLOCATED(PLBase)) THEN
+      IF (SIZE(PLBase) /= nv) DEALLOCATE(PLBase, PLWritten, PLHave)
+    END IF
+    IF (.NOT. ALLOCATED(PLBase)) THEN
+      ALLOCATE(PLBase(nv), PLWritten(nv), PLHave(nv))
+      PLHave = .FALSE.
+    END IF
+    ALLOCATE(Basis(Mesh % MaxElementNodes))
+
+    DO i = 1, SIZE(FSkin)
+      IF (.NOT. FSkin(i) % Active) CYCLE
+      ALLOCATE(sx(FSkin(i) % nStrand))
+      DO j = 1, FSkin(i) % nStrand
+        sx(j) = 0._dp
+        DO k = 1, FSkin(i) % N
+          sx(j) = sx(j) + 2._dp * (FSkin(i) % y(j) - FSkin(i) % x(k,j))**2
+        END DO
+      END DO
+
+      r = 1
+      DO WHILE (r <= FSkin(i) % nPiece)
+        e = FSkin(i) % pElem(r)
+        pe = 0._dp
+        DO WHILE (r <= FSkin(i) % nPiece)
+          IF (FSkin(i) % pElem(r) /= e) EXIT
+          pe = pe + FSkin(i) % pW(r) * sx(FSkin(i) % pStrand(r))
+          r = r + 1
+        END DO
+
+        idx = e
+        IF (ASSOCIATED(PL % Perm)) idx = PL % Perm(e)
+        IF (idx <= 0 .OR. idx > nv) CYCLE
+
+        Element => Mesh % Elements(e)
+        CALL GetElementNodes(Nodes, UElement = Element)
+        IP = GaussPoints(Element)
+        vol = 0._dp
+        DO g = 1, IP % n
+          stat = ElementInfo(Element, Nodes, IP % U(g), IP % V(g), IP % W(g), detJ, Basis)
+          vol = vol + IP % s(g) * detJ
+        END DO
+        IF (vol <= 0._dp) CYCLE
+
+        IF (PLHave(idx) .AND. PL % Values(idx) == PLWritten(idx)) THEN
+          base = PLBase(idx)
+        ELSE
+          base = PL % Values(idx)
+        END IF
+        PL % Values(idx) = base + pe / vol
+        PLBase(idx) = base
+        PLWritten(idx) = PL % Values(idx)
+        PLHave(idx) = .TRUE.
+      END DO
+      DEALLOCATE(sx)
+    END DO
+  END SUBROUTINE PublishFoilSkinExcess
+
+  !----------------------------------------------------------------------------
+  ! Instantaneous strand dissipation of a component and its DC part. The ladder
+  ! puts the whole strand current through every stage, and stage k dissipates in
+  ! its 2 R_dc resistor, whose current is (y - x_k); the tail inductance
+  ! dissipates nothing. Pdc is what post processing already accounts for from
+  ! the strand current density and the DC conductivity, so the caller adds only
+  ! Ptot - Pdc on top of it.
+  !----------------------------------------------------------------------------
+  SUBROUTINE FoilSkinLoss(i, Ptot, Pdc)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i
+    REAL(KIND=dp), INTENT(OUT) :: Ptot, Pdc
+    INTEGER :: j, k
+    REAL(KIND=dp) :: s
+
+    Ptot = 0._dp; Pdc = 0._dp
+    IF (.NOT. fskin_allocated) RETURN
+    IF (i < 1 .OR. i > SIZE(FSkin)) RETURN
+    IF (.NOT. FSkin(i) % Alloc) RETURN
+
+    DO j = 1, FSkin(i) % nStrand
+      s = FSkin(i) % y(j)**2
+      Pdc = Pdc + FSkin(i) % w(j) * s
+      IF (FSkin(i) % Active) THEN
+        DO k = 1, FSkin(i) % N
+          s = s + 2._dp * (FSkin(i) % y(j) - FSkin(i) % x(k,j))**2
+        END DO
+      END IF
+      Ptot = Ptot + FSkin(i) % w(j) * s
+    END DO
+  END SUBROUTINE FoilSkinLoss
+
+  !----------------------------------------------------------------------------
+  ! Read the skin ladder of every stranded component with 'Homogenization
+  ! Model' and 'Transient Homogenization' and derive its impedance form. Called
+  ! once, after the Components exist, from the First block of
+  ! CircuitsAndDynamics.
+  !----------------------------------------------------------------------------
+  SUBROUTINE InitStrandedSkinLadder()
     IMPLICIT NONE
     INTEGER :: i, n_comp
     TYPE(ValueList_t), POINTER :: CompParams
     LOGICAL :: found
-    CHARACTER(LEN=MAX_NAME_LEN) :: ctype
-    REAL(KIND=dp) :: SigmaMat(1, 1)
+    CHARACTER(LEN=MAX_NAME_LEN) :: ctype, cname, uname
+    REAL(KIND=dp) :: SigmaMat(1, 1), rt, ralpha
+    CHARACTER(*), PARAMETER :: Caller = 'InitStrandedSkinLadder'
 
-    IF (state_allocated) RETURN
-
+    IF (sskin_allocated) RETURN
     n_comp = CurrentModel % NumberOfComponents
     IF (n_comp <= 0) RETURN
-
-    ALLOCATE(y0_sigma(n_comp), alpha_sigma(n_comp), sigma_sigma(n_comp), &
-             G_skin(n_comp), v_hist_coeff(n_comp), xi_S(n_comp), &
-             has_skin_ladder(n_comp))
-    y0_sigma        = 0.0_dp
-    alpha_sigma     = 0.0_dp
-    sigma_sigma     = 0.0_dp
-    G_skin          = 0.0_dp
-    v_hist_coeff    = 0.0_dp
-    xi_S            = 0.0_dp
-    has_skin_ladder = .FALSE.
+    ALLOCATE(SSkin(n_comp))
+    sskin_allocated = .TRUE.
 
     DO i = 1, n_comp
       CompParams => CurrentModel % Components(i) % Values
@@ -116,64 +591,210 @@ CONTAINS
       IF (.NOT. (GetLogical(CompParams, 'Homogenization Model', found) .AND. found)) CYCLE
       IF (.NOT. (GetLogical(CompParams, 'Transient Homogenization', found) .AND. found)) CYCLE
 
+      uname = ListGetString(CompParams, 'Name', found)
+      IF (found) THEN
+        cname = 'Component '//I2S(i)//' ("'//TRIM(uname)//'")'
+      ELSE
+        cname = 'Component '//I2S(i)
+      END IF
+
+      ! A given 'Resistance' replaces the integrated one, and the ladder with
+      ! it. It has no memory, so it can only stand in for a ladder without one.
+      IF (ListCheckPresent(CompParams, 'Resistance')) THEN
+        ralpha = GetConstReal(CompParams, 'Sigma 33 alpha', found)
+        IF (found .AND. ralpha /= 0._dp) THEN
+          WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': an explicit "Resistance" replaces the '// &
+              'skin ladder, whose memory it cannot carry ("Sigma 33 alpha" = ', ralpha, &
+              '). Remove "Resistance", or set "Sigma 33 alpha = 0".'
+          CALL Fatal(Caller, Message)
+        END IF
+        CYCLE
+      END IF
+
       ! Hard-fail on missing keywords (matches the proximity-side behavior
       ! in WhitneyAVSolver - silent DC fallbacks mask Python emitter bugs).
       CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
-                                             y0_sigma(i), alpha_sigma(i), SigmaMat)
-      sigma_sigma(i)     = SigmaMat(1, 1)
-      has_skin_ladder(i) = .TRUE.
+          SSkin(i) % y0, SSkin(i) % alpha, SigmaMat)
+      SSkin(i) % sigma = SigmaMat(1, 1)
+
+      IF (SSkin(i) % y0 < 0._dp) THEN
+        WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': "Sigma 33 y0" = ', SSkin(i) % y0, &
+            ' is negative. It is the conductivity of the ladder at high frequency; y0 = 0 '// &
+            'is allowed.'
+        CALL Fatal(Caller, Message)
+      END IF
+      ! A negative alpha makes L and the shunt A negative: the ladder would not
+      ! be passive, and its stage heat turns negative when the current drops.
+      IF (SSkin(i) % alpha < 0._dp) THEN
+        WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': "Sigma 33 alpha" = ', SSkin(i) % alpha, &
+            ' is negative: the conductivity would rise with frequency and the ladder heat '// &
+            'could turn negative. Refit the ladder with alpha >= 0.'
+        CALL Fatal(Caller, Message)
+      END IF
+      IF (SSkin(i) % y0 + SSkin(i) % alpha <= 0._dp) THEN
+        WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': "Sigma 33 y0" + "Sigma 33 alpha" = ', &
+            SSkin(i) % y0 + SSkin(i) % alpha, ' is not positive. It is the DC conductivity.'
+        CALL Fatal(Caller, Message)
+      END IF
+      IF (SSkin(i) % sigma < 0._dp) THEN
+        WRITE(Message,'(A,ES12.5,A)') TRIM(cname)//': "Sigma 33 Sigma" = ', SSkin(i) % sigma, &
+            ' is negative.'
+        CALL Fatal(Caller, Message)
+      END IF
+
+      SSkin(i) % G0    = SSkin(i) % y0 + SSkin(i) % alpha
+      SSkin(i) % R0    = 1._dp / SSkin(i) % G0
+      SSkin(i) % L     = SSkin(i) % sigma * SSkin(i) % alpha / (SSkin(i) % G0 * SSkin(i) % G0)
+      SSkin(i) % Tau   = SSkin(i) % sigma * SSkin(i) % y0 / SSkin(i) % G0
+      SSkin(i) % Gskin = SSkin(i) % G0
+      SSkin(i) % Active = .TRUE.
+
+      WRITE(Message,'(A,4(A,ES12.5))') TRIM(cname)//' stranded skin ladder:', &
+          ' G0 = ', SSkin(i) % G0, ', R0 = ', SSkin(i) % R0, ', L = ', SSkin(i) % L, &
+          ', tau = ', SSkin(i) % Tau
+      CALL Info(Caller, Message, Level=5)
     END DO
 
-    state_allocated = .TRUE.
-  END SUBROUTINE InitSkinLadderState
+    ! Policy of the foil sheet ladder (InitFoilSkinLadder): the state is not in
+    ! restart files, so a restart may start a new transient ('Restart Time = 0')
+    ! but not continue one. Unlike there, a restart that does not say which is
+    ! stopped too: TRAFOLO always writes 'Restart Time = 0' with its restarts.
+    IF (ANY(SSkin % Active .AND. SSkin % L /= 0._dp) .AND. &
+        ListCheckPresent(CurrentModel % Simulation, 'Restart File')) THEN
+      IF (ListGetString(CurrentModel % Simulation, 'Simulation Type', found) == 'transient') THEN
+        rt = ListGetConstReal(CurrentModel % Simulation, 'Restart Time', found)
+        IF (.NOT. found) THEN
+          CALL Fatal(Caller, 'Transient stranded coil skin ladder restarted without "Restart Time": '// &
+              'its state is not stored in restart files, so it would start from zero and give an '// &
+              'artificial step in voltage and loss if the transient continues. Set "Restart Time = 0" '// &
+              'to start a new transient from the restored fields.')
+        ELSE IF (rt /= 0._dp) THEN
+          CALL Fatal(Caller, 'Transient stranded coil skin ladder cannot continue a restarted '// &
+              'transient: its state is not stored in restart files. Set "Restart Time = 0" to '// &
+              'start a new transient from the restored fields.')
+        END IF
+      END IF
+    END IF
+
+    IF (ANY(SSkin % Active .AND. SSkin % L /= 0._dp) .AND. &
+        ListGetLogical(CurrentModel % Simulation, 'Adaptive Timestepping', found)) &
+        CALL Warn(Caller, 'Transient stranded coil skin ladder with adaptive time stepping: a '// &
+            'retried step keeps the ladder factors of the rejected time step size.')
+  END SUBROUTINE InitStrandedSkinLadder
 
   !----------------------------------------------------------------------------
-  ! BDF-1 Schur reduction of the n_ladder = 1 skin ladder:
-  !   M = 1 + sigma/dt
-  !   G_skin       = y0 + alpha / M
-  !   v_hist_coeff = alpha * (sigma/dt) / M
-  ! v_hist(t^n) = v_hist_coeff * xi_S^n is added to the Component voltage
-  ! equation RHS (sign sets sign of feed-through).
+  ! Start of a timestep: commit the last iterate of the previous step, then the
+  ! factors of this step for the BDF weights bdfw (TransientLadderBDF). Must run
+  ! once per step, before its assembly. The state factors are also published on
+  ! the component for MagnetoDynamicsCalcFields, which runs before
+  ! CircuitsOutput and needs q^n for the heat.
   !----------------------------------------------------------------------------
-  SUBROUTINE RecomputeSkinLadderForDt(dt)
+  SUBROUTINE PrepareStrandedSkinStep(dt, bdfw)
     IMPLICIT NONE
-    REAL(KIND=dp), INTENT(IN) :: dt
+    REAL(KIND=dp), INTENT(IN) :: dt, bdfw(3)
     INTEGER :: i
-    REAL(KIND=dp) :: M, mk_inv, sd
+    REAL(KIND=dp) :: sd, ct, hx
+    TYPE(ValueList_t), POINTER :: CompParams
 
-    IF (.NOT. state_allocated) RETURN
-    IF (dt <= 0.0_dp) RETURN
+    IF (.NOT. sskin_allocated) RETURN
+    IF (dt <= 0._dp) RETURN
 
-    DO i = 1, SIZE(G_skin)
-      IF (.NOT. has_skin_ladder(i)) CYCLE
-      sd     = sigma_sigma(i) / dt
-      M      = 1.0_dp + sd
-      mk_inv = 1.0_dp / M
-      G_skin(i)       = y0_sigma(i)    + alpha_sigma(i) * mk_inv
-      v_hist_coeff(i) = alpha_sigma(i) * mk_inv * sd
+    ! The state of the finished step comes from AdvanceStrandedSkin, which only
+    ! CircuitsOutput calls. Without it the history would silently stay stale.
+    IF (sskin_step > 0) THEN
+      DO i = 1, SIZE(SSkin)
+        IF (.NOT. SSkin(i) % Active .OR. SSkin(i) % L == 0._dp) CYCLE
+        IF (SSkin(i) % AdvancedStep == sskin_step) CYCLE
+        IF (.NOT. ListCheckPresent(CurrentModel % Components(i) % Values, &
+            'Circuit Current Variable Id')) CYCLE
+        CALL Fatal('PrepareStrandedSkinStep','Transient stranded coil skin ladder: the state was '// &
+            'not advanced in the previous time step. Run the "CircuitsOutput" solver in every '// &
+            'time step (Exec Solver = Always).')
+      END DO
+    END IF
+    sskin_step = sskin_step + 1
+
+    DO i = 1, SIZE(SSkin)
+      IF (.NOT. SSkin(i) % Active) CYCLE
+      SSkin(i) % chioo = SSkin(i) % chio
+      SSkin(i) % chio  = SSkin(i) % chi
+
+      ! For implicit Euler (bdfw(1) = 1) this is G_skin = y0 + alpha/(1 + sigma/dt)
+      ! bit for bit as before, which TRAFOLO rescales r_component with.
+      sd = (SSkin(i) % sigma * bdfw(1)) / dt
+      SSkin(i) % Gskin = SSkin(i) % y0 + SSkin(i) % alpha * (1._dp / (1._dp + sd))
+      ct = (SSkin(i) % Tau * bdfw(1)) / dt
+      SSkin(i) % Gain = (bdfw(1) / dt) / (1._dp + ct)
+      hx = (bdfw(2) * SSkin(i) % chio + bdfw(3) * SSkin(i) % chioo) / dt
+      SSkin(i) % QHist = hx / (1._dp + ct)
+      SSkin(i) % VHist = SSkin(i) % L * SSkin(i) % QHist
+
+      CompParams => CurrentModel % Components(i) % Values
+      CALL ListAddConstReal(CompParams, 'Stranded Skin State Gain', SSkin(i) % Gain)
+      CALL ListAddConstReal(CompParams, 'Stranded Skin State History', SSkin(i) % QHist)
+
+      WRITE(Message,'(A,I0,3(A,ES12.5))') 'Stranded skin ladder comp ', i, &
+          ': G_skin = ', SSkin(i) % Gskin, ', chi = ', SSkin(i) % chio, &
+          ', history voltage per K = ', SSkin(i) % VHist
+      CALL Info('PrepareStrandedSkinStep', Message, Level=7)
     END DO
-  END SUBROUTINE RecomputeSkinLadderForDt
+  END SUBROUTINE PrepareStrandedSkinStep
 
   !----------------------------------------------------------------------------
-  ! BDF-1 advance of the ladder state, called from CircuitsOutput once
-  ! WhitneyAVSolver has converged so i_S^{n+1} is available.
-  !   xi_S^{n+1} = (i_S^{n+1} + (sigma/dt) * xi_S^n) / M
+  ! Whether component i runs the stranded coil skin ladder.
   !----------------------------------------------------------------------------
-  SUBROUTINE AdvanceXiS(comp_id, i_S_new, dt)
+  FUNCTION StrandedSkinActive(i) RESULT(act)
     IMPLICIT NONE
-    INTEGER,       INTENT(IN) :: comp_id
-    REAL(KIND=dp), INTENT(IN) :: i_S_new, dt
-    REAL(KIND=dp) :: M, sd
+    INTEGER, INTENT(IN) :: i
+    LOGICAL :: act
 
-    IF (.NOT. state_allocated) RETURN
-    IF (comp_id < 1 .OR. comp_id > SIZE(xi_S)) RETURN
-    IF (.NOT. has_skin_ladder(comp_id)) RETURN
-    IF (dt <= 0.0_dp) RETURN
+    act = .FALSE.
+    IF (.NOT. sskin_allocated) RETURN
+    IF (i < 1 .OR. i > SIZE(SSkin)) RETURN
+    act = SSkin(i) % Active
+  END FUNCTION StrandedSkinActive
 
-    sd          = sigma_sigma(comp_id) / dt
-    M           = 1.0_dp + sd
-    xi_S(comp_id) = (i_S_new + sd * xi_S(comp_id)) / M
-  END SUBROUTINE AdvanceXiS
+  !----------------------------------------------------------------------------
+  ! End of a timestep: q^n = Gain I^n + QHist from the committed states, and
+  ! the inductor current chi^n = I^n - tau q^n.
+  !----------------------------------------------------------------------------
+  SUBROUTINE AdvanceStrandedSkin(i, inew)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i
+    REAL(KIND=dp), INTENT(IN) :: inew
+
+    IF (.NOT. StrandedSkinActive(i)) RETURN
+    SSkin(i) % q = SSkin(i) % Gain * inew + SSkin(i) % QHist
+    SSkin(i) % chi = inew - SSkin(i) % Tau * SSkin(i) % q
+    SSkin(i) % AdvancedStep = sskin_step
+  END SUBROUTINE AdvanceStrandedSkin
+
+  !----------------------------------------------------------------------------
+  ! Conduction heat of the step, P = K [ R0 I^2 + L tau q^2 ], for the current
+  ! I that q was advanced with.
+  !----------------------------------------------------------------------------
+  FUNCTION StrandedSkinHeat(i, inow) RESULT(P)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i
+    REAL(KIND=dp), INTENT(IN) :: inow
+    REAL(KIND=dp) :: P
+
+    P = SSkin(i) % K * (SSkin(i) % R0 * inow**2 + &
+        SSkin(i) % L * SSkin(i) % Tau * SSkin(i) % q**2)
+  END FUNCTION StrandedSkinHeat
+
+  !----------------------------------------------------------------------------
+  ! Voltage of the ladder for the step, v_R = K [ R0 I + L q ], for the current
+  ! I that q was advanced with: the coil voltage without its flux linkage.
+  !----------------------------------------------------------------------------
+  FUNCTION StrandedSkinVoltage(i, inow) RESULT(v)
+    IMPLICIT NONE
+    INTEGER, INTENT(IN) :: i
+    REAL(KIND=dp), INTENT(IN) :: inow
+    REAL(KIND=dp) :: v
+
+    v = SSkin(i) % K * (SSkin(i) % R0 * inow + SSkin(i) % L * SSkin(i) % q)
+  END FUNCTION StrandedSkinVoltage
 
 END MODULE TransientHomogCircuitState
 !------------------------------------------------------------------------------
@@ -263,7 +884,7 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   ! PREVIOUS-TIMESTEP values because AddBasicCircuitEquations uses it for the
   ! BDF1 history term.
   REAL(KIND=dp), ALLOCATABLE :: CrtIter(:), CrtExp(:)
-  REAL(KIND=dp) :: CrtRelax
+  REAL(KIND=dp) :: CrtRelax, bdfw(3)
   TYPE(Variable_t), POINTER :: LagrangeVar
   INTEGER :: Tstep=-1
   LOGICAL :: Parallel
@@ -365,11 +986,11 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
 
     CALL CheckComponentVariables()
 
-    ! Slice 2: allocate skin-effect ladder state (one scalar per Component).
-    ! Reads (y0, alpha, sigma) for 'Sigma 33' from every Component that has
-    ! both Homogenization Model and Transient Homogenization set to True; flags
-    ! the rest as has_skin_ladder = False. Hard-fail on missing keywords.
-    CALL InitSkinLadderState()
+    ! The stranded coil skin ladder, one state per component.
+    CALL InitStrandedSkinLadder()
+
+    ! The foil sheet strand skin ladder, N states per strand.
+    CALL InitFoilSkinLadder()
 
     ! Create CRS matrix structures for the circuit equations:
     ! ------------------------------------------------------
@@ -398,12 +1019,11 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   IF (Tstep /= GetTimestep()) THEN
     Tstep = GetTimestep()
 
-    ! Slice 2: recompute Schur-eliminated G_skin and history coefficient if dt
-    ! changed (covers adaptive timestepping; in a fixed-dt run this fires only
-    ! the first time it's called).
-    IF (state_allocated .AND. dt /= cached_dt) THEN
-      CALL RecomputeSkinLadderForDt(dt)
-      cached_dt = dt
+    ! The skin ladder histories change every step, not only when dt does.
+    IF (TransientSimulation) THEN
+      bdfw = TransientLadderBDF(Model % ASolver % Order, dt)
+      CALL PrepareStrandedSkinStep(dt, bdfw)
+      CALL PrepareFoilSkinStep(dt, bdfw)
     END IF
 
     ! Circuit variable values from previous timestep:
@@ -651,6 +1271,18 @@ CONTAINS
 
       Comp % Resistance = 0._dp 
       Comp % Conductance = 0._dp 
+      IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
+      IF (ALLOCATED(Comp % StrandResWeight)) Comp % StrandResWeight = 0._dp
+      ! The strand resistance weights are re-accumulated with the matrix.
+      IF (fskin_allocated) THEN
+        IF (Comp % ComponentId >= 1 .AND. Comp % ComponentId <= SIZE(FSkin)) THEN
+          IF (FSkin(Comp % ComponentId) % Alloc) THEN
+            FSkin(Comp % ComponentId) % w = 0._dp
+            FSkin(Comp % ComponentId) % nPiece = 0
+          END IF
+        END IF
+      END IF
+      IF (StrandedSkinActive(Comp % ComponentId)) SSkin(Comp % ComponentId) % K = 0._dp
 
       Cvar => Comp % vvar
       vvarId = Comp % vvar % ValueId + nm
@@ -658,6 +1290,12 @@ CONTAINS
 
       CompParams => CurrentModel % Components(Comp % ComponentId) % Values
       IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal ('AddComponentEquationsAndCouplings', 'Component parameters not found')
+      ! MagnetoDynamicsCalcFields rebuilds the sheet current density from the raw
+      ! strand dofs, which Add_foil_sheet scales, so the scale of this step has to
+      ! travel with the component.
+      IF (Comp % CoilType == 'foil sheet') &
+          CALL ListAddConstReal(CompParams, 'Foil Sheet Dof Scale', &
+              FoilSheetDofScale(Comp % SigmaRef, dt, FoilSheetTimeScale()))
       IF (Comp % CoilType == 'stranded' .OR. Comp % ComponentType == 'resistor') THEN
         Comp % Resistance = ListGetCReal(CompParams, 'Resistance', Found)
         IF (Found) THEN
@@ -763,6 +1401,27 @@ CONTAINS
               ! ----------------------------------------------------------
               CALL AddToMatrixElement(CM, j + VvarId, IvarId, val)
             END DO
+          CASE('flat wire')
+            ! Flat wire voltage: V - sum_k V_k = 0
+            ! ------------------------------------
+            CALL AddToMatrixElement(CM, VvarId, VvarId, 1._dp)
+            DO j = 1, Cvar % pdofs
+              CALL AddToMatrixElement(CM, VvarId, j + VvarId, -1._dp)
+              ! Cell k: (sigma V_k grad W, grad W) + (sigma dA/dt, grad W) - I = 0
+              ! -----------------------------------------------------------------
+              CALL AddToMatrixElement(CM, j + VvarId, IvarId, -1._dp)
+            END DO
+          CASE('foil sheet')
+            ! Foil sheet voltage: V - sum_k m_k V_k = 0, m_k foils in cell k
+            ! -------------------------------------------------------------
+            CALL AddToMatrixElement(CM, VvarId, VvarId, 1._dp)
+            val = -REAL(Comp % foilsPerCell, dp)
+            DO j = 1, Comp % nCells
+              CALL AddToMatrixElement(CM, VvarId, j + VvarId, val)
+              ! Cell k: sum_j (t, grad W)_kj y_kj - m_k I / SigmaRef = 0
+              ! -------------------------------------------------------
+              CALL AddToMatrixElement(CM, j + VvarId, IvarId, val / Comp % SigmaRef)
+            END DO
           END SELECT
         END IF
       END IF
@@ -800,32 +1459,40 @@ CONTAINS
             CALL Add_stranded(Element,Tcoef,Comp,nn,nd,dt,CompParams)
           CASE ('massive')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
-            CALL Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt)
+            CALL Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt,CompParams)
           CASE ('foil winding')
             IF (.NOT. HasSupport(Element,nn)) CYCLE
-            CALL Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt)
+            ! DEV-1491: CompParams passed in so that the kernel can read
+            ! 'Activate Constraint' and add the nodal (scalar potential)
+            ! couplings. Before: the kernel had no access to the component list.
+            CALL Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt,CompParams)
+          CASE ('flat wire')
+            IF (.NOT. HasSupport(Element,nn)) CYCLE
+            CALL Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt,CompParams)
+          CASE ('foil sheet')
+            IF (.NOT. HasSupport(Element,nn)) CYCLE
+            CALL Add_foil_sheet(Element,Comp,nn,nd,dt,CompParams)
           CASE DEFAULT
             CALL Fatal ('AddComponentEquationsAndCouplings', 'Non-existent Coil Type Chosen!')
           END SELECT
         END IF
       END DO
 
-      ! Slice 2 (n=1, conductivity convention): no v_hist RHS term.
-      ! The (y0, alpha, sigma) triplet is fitted as a frequency-dependent
-      ! CONDUCTIVITY (S/m), matching Elmer's existing 'Sigma 33' keyword,
-      ! and enters the lumped resistance via localC = G_skin replacing the
-      ! constant DC sigma in Add_stranded. The xi_S history term in the plan
-      ! is for the IMPEDANCE-form ladder; in the conductivity form, n=1
-      ! collapses cleanly to a per-step scalar G_skin substitution and the
-      ! ladder memory is implicit in how G_skin depends on dt. For n>1 we'd
-      ! need either a proper impedance fit OR additional global circuit DOFs;
-      ! see plan section 7 unit/convention callout.
+      IF (Comp % CoilType == 'foil sheet') THEN
+        CALL CheckFoilSheetStrands(Comp)
+        CALL ComputeFoilSheetDcResistance(Comp, CompParams)
+      END IF
     END DO
 
     IF( Parallel ) THEN
       DO CompInd = 1, Circuit % n_comp
         Comp => Circuit % Components(CompInd)
-        Comp % Resistance = ParallelReduction(Comp % Resistance)
+        ! A foil sheet's resistance comes from strand sums that are already
+        ! reduced over the partitions.
+        IF (Comp % CoilType /= 'foil sheet') &
+            Comp % Resistance = ParallelReduction(Comp % Resistance)
+        IF (StrandedSkinActive(Comp % ComponentId)) &
+            SSkin(Comp % ComponentId) % K = ParallelReduction(SSkin(Comp % ComponentId) % K)
         Comp % Conductance = ParallelReduction(Comp % Conductance)
       END DO
     END IF
@@ -850,11 +1517,11 @@ CONTAINS
     INTEGER, POINTER :: PS(:)
     TYPE(Matrix_t), POINTER :: CM
     TYPE(Nodes_t), SAVE :: Nodes
-    REAL(KIND=dp) :: Basis(nd), DetJ, x,POT(nd),pPOT(nd),ppPOT(nd),tscl
+    REAL(KIND=dp) :: Basis(nd), DetJ, x,POT(nd),pPOT(nd),ppPOT(nd),tscl,bdfw(3)
     REAL(KIND=dp) :: dBasisdx(nd,3), wBase(nn), w(3)
-    REAL(KIND=dp) :: localC, val, circ_eq_coeff, localR !, localL
+    REAL(KIND=dp) :: localC, val, circ_eq_coeff, localR, localK !, localL
     INTEGER :: j,t
-    LOGICAL :: stat
+    LOGICAL :: stat, SkinLadder
 
     TYPE(GaussIntegrationPoints_t) :: IP
     LOGICAL :: CSymmetry, First=.TRUE., InitHandle=.TRUE., &
@@ -926,14 +1593,15 @@ CONTAINS
 
     CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
 
-    IF(Solver % Order<2.OR.GetTimeStep()<=2) THEN 
-      tscl=1.0_dp
-    ELSE
-      tscl=1.5_dp
+    ! (tscl a^{n+1} - pPOT)/dt is the BDF derivative of a, with the field's
+    ! weights for this step: those of a variable step too, not only 1.5/-2/0.5.
+    bdfw = TransientLadderBDF(ASolver % Order, dt)
+    tscl = bdfw(1)
+    IF (bdfw(3) /= 0._dp) THEN
       CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
-      pPot = 2*pPOT - 0.5_dp*ppPOT
+      pPot = -(bdfw(2)*pPOT + bdfw(3)*ppPOT)
     END IF
-    
+
     ncdofs=nd
     IF (dim == 3) THEN
       ! We can choose the base per component.
@@ -951,6 +1619,7 @@ CONTAINS
 
     VvarId = Comp % vvar % ValueId + nm
     IvarId = Comp % ivar % ValueId + nm
+    SkinLadder = StrandedSkinActive(Comp % ComponentId)
 
     ! Numerical integration:
     ! ----------------------
@@ -987,17 +1656,10 @@ CONTAINS
         END IF
       END SELECT
 
-      ! Slice 2: for Components flagged Transient Homogenization, replace the
-      ! material conductivity at this IP with the BDF-1 Schur-eliminated
-      ! G_skin (= y0 + alpha / (1 + sigma/dt)) computed once per timestep in
-      ! RecomputeSkinLadderForDt. This makes the lumped coil resistance R
-      ! frequency-dependent (via dt) instead of the static DC sigma.
-      IF (state_allocated) THEN
-        IF (has_skin_ladder(Comp % ComponentId)) THEN
-          localC = G_skin(Comp % ComponentId)
-        ELSE
-          localC = SUM(Tcoef(1,1,1:nn) * Basis(1:nn))
-        END IF
+      ! With the stranded skin ladder the conductivity is that of the ladder at
+      ! s = c of the step, Gskin (TransientHomogCircuitState).
+      IF (SkinLadder) THEN
+        localC = SSkin(Comp % ComponentId) % Gskin
       ELSE
         localC = SUM(Tcoef(1,1,1:nn) * Basis(1:nn))
       END IF
@@ -1010,6 +1672,15 @@ CONTAINS
         Comp % Resistance = Comp % Resistance + localR
 
         CALL AddToMatrixElement(CM, VvarId, IvarId, localR)
+
+        ! The ladder's history voltage K VHist is known, so it goes to the right
+        ! hand side.
+        IF (SkinLadder) THEN
+          localK = Comp % N_j **2 * IP % s(t)*detJ*SUM(w*w)*circ_eq_coeff / Comp % VoltageFactor
+          SSkin(Comp % ComponentId) % K = SSkin(Comp % ComponentId) % K + localK
+          IF (SSkin(Comp % ComponentId) % VHist /= 0._dp) &
+              CM % RHS(VvarId) = CM % RHS(VvarId) - localK * SSkin(Comp % ComponentId) % VHist
+        END IF
       END IF
 
       DO j=1,ncdofs
@@ -1048,12 +1719,13 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt)
+   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd,dt,crt,CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    TYPE(Element_t) :: Element
+    TYPE(Element_t), POINTER :: Element
     REAL(KIND=dp) :: Tcoef(3,3,nn),dt, crt(:)
     TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
 
     TYPE(Solver_t), POINTER :: ASolver
     INTEGER, POINTER :: PS(:)
@@ -1103,6 +1775,19 @@ CONTAINS
 
     CALL GetElementNodes(Nodes)
     nd = GetElementDOFs(Indexes,Element,ASolver)
+
+    ! Each branch below sets only what its own scheme needs, while the assembly
+    ! loop reads both sets. Default to first order plus constant-average-
+    ! acceleration Newmark (alpha=0) so that no path reads an undefined value
+    ! and no reader divides by zero.
+    tscl = 1.0_dp
+    prevV = 0.0_dp
+    alpha = 0.0_dp
+    beta = 0.25_dp
+    gamma = 0.5_dp
+    delta = 0.0_dp
+    Permittivity = 0.0_dp
+
     IF (ASolver % TimeOrder==2) THEN
       CALL GetLocalSolution(pPot,UElement=Element,USolver=ASolver,tstep=-3)
       CALL GetLocalSolution(pVel,UElement=Element,USolver=ASolver,tstep=-4)
@@ -1138,8 +1823,7 @@ CONTAINS
 
     ncdofs=nd
     IF (dim == 3) THEN
-      !CALL GetLocalSolution(Wbase, 'w')      
-      CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+      CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
       ncdofs=nd-nn
     END IF
 
@@ -1268,7 +1952,11 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-   SUBROUTINE Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt)
+!> Flat wire winding: a massive conductor restricted to each turn cell. Cell k
+!> owns the voltage dof vvar+k and carries the full component current, so the
+!> series voltage is V = sum_k V_k.
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_flat_wire(Element,Tcoef,Comp,nn,nd,dt,CompParams)
 !------------------------------------------------------------------------------
     USE MGDynMaterialUtils
     IMPLICIT NONE
@@ -1276,6 +1964,335 @@ CONTAINS
     TYPE(Element_t), POINTER :: Element
     REAL(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val, dt
     TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, localR
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
+    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId, ni
+    LOGICAL :: stat, PiolaVersion, Found, ConstraintActive
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
+                     RotMLoc(3,3), RotM(3,3,nn)
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_flat_wire','Flat wire is implemented only in 3D!')
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_flat_wire','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
+
+    CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
+    IF(Solver % Order<2.OR.GetTimeStep()<=2) THEN
+      tscl=1.0_dp
+    ELSE
+      tscl=1.5_dp
+      CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
+      pPot = 2*pPOT - 0.5_dp*ppPOT
+    END IF
+
+    CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
+    CALL GetElementRotM(Element, RotM, nn)
+    ncdofs = nd - nn
+
+    vvarId = Comp % vvar % ValueId
+
+    ! DEV-1491: see the harmonic Add_flat_wire. Same non-solenoidal source, same
+    ! nodal couplings; the transient system does not stall the same way, so this
+    ! is opt-in only ('Activate Constraint'), never auto-enabled here.
+    ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
+
+    IF (PiolaVersion) THEN
+      IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
+    ELSE
+      IP = GaussPoints(Element)
+    END IF
+
+    DO t=1,IP % n
+      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+
+      DO i=1,3
+        DO j=1,3
+          C(i,j) = SUM( Tcoef(i,j,1:nn) * Basis(1:nn) )
+          RotMLoc(i,j) = SUM( RotM(i,j,1:nn) * Basis(1:nn) )
+        END DO
+      END DO
+
+      ! I * R, where R = (1/sigma * js,js):
+      ! -----------------------------------
+      localR = Comp % N_j **2 * IP % s(t)*detJ/C(3,3)/Comp % VoltageFactor
+      Comp % Resistance = Comp % Resistance + localR
+
+      C = MATMUL(MATMUL(RotMLoc, C),TRANSPOSE(RotMLoc))
+
+      k = FlatWireCellIndex(Comp % nStack, Comp % nAcross, &
+          SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)))
+      dofId = vvarId + k
+
+      ! Conductance of the cell: V_k (sigma grad W, grad W)
+      ! --------------------------------------------------
+      val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*gradv) * Comp % VoltageFactor
+      CALL AddToMatrixElement(CM, dofId+nm, dofId+nm, val)
+
+      DO j=1,ncdofs
+        q = j + nn
+        IF ( TransientSimulation ) THEN
+          ! (sigma d/dt a, grad W)
+          ! ----------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,Wbasis(j,:))*gradv)/dt
+          CALL AddToMatrixElement(CM, dofId+nm, PS(Indexes(q)), tscl * val)
+          CM % RHS(dofId+nm) = CM % RHS(dofId+nm) + pPOT(q) * val
+        END IF
+        ! Source of the a equation: V_k (sigma grad W, a')
+        ! ------------------------------------------------
+        val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*Wbasis(j,:)) * Comp % VoltageFactor
+        CALL AddToMatrixElement(CM, PS(Indexes(q)), dofId+nm, val)
+      END DO
+
+      IF (ConstraintActive) THEN
+        DO ni=1,nn
+          ! DEV-1491: (sigma grad v, grad W) -- conduction current of the nodal
+          ! potential. No 1/dt and no history term (this is not an induced term).
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+          CALL AddToMatrixElement(CM, dofId+nm, PS(Indexes(ni)), val)
+          ! DEV-1491: V_k (sigma grad W, grad si) in the nodal constraint rows.
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*dBasisdx(ni,:)) * Comp % VoltageFactor
+          CALL AddToMatrixElement(CM, PS(Indexes(ni)), dofId+nm, val)
+        END DO
+      END IF
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_flat_wire
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Weight of the new state in the BDF derivative of the transient strand
+!> equation: the first TransientLadderBDF weight of the step.
+!------------------------------------------------------------------------------
+   FUNCTION FoilSheetTimeScale() RESULT(tscl)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: tscl
+    REAL(KIND=dp) :: w(3)
+
+    w = TransientLadderBDF(CurrentModel % ASolver % Order, dt)
+    tscl = w(1)
+!------------------------------------------------------------------------------
+   END FUNCTION FoilSheetTimeScale
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Scale of the transient strand dofs: Add_foil_sheet solves for y' = sdofscl*y,
+!> which keeps the circuit block as well conditioned as the flat wire one. Every
+!> reader of the raw dofs - CircuitsOutput and MagnetoDynamicsCalcFields - has to
+!> divide by the same number, so it is computed only here.
+!------------------------------------------------------------------------------
+   FUNCTION FoilSheetDofScale(SigmaRef, dtime, tscl) RESULT(sdofscl)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: SigmaRef, dtime, tscl, sdofscl
+
+    sdofscl = 1._dp
+    IF (TransientSimulation .AND. dtime > 0._dp) sdofscl = SQRT(SigmaRef * dtime / tscl)
+!------------------------------------------------------------------------------
+   END FUNCTION FoilSheetDofScale
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Foil sheet winding, transient version. The sheet conductivity is the DC one;
+!> the frequency dependence of the intra-turn skin effect is carried by the
+!> per-strand skin ladder, which replaces 1/sigma_s by a conductance with a
+!> history term on the right hand side.
+!> Rows, per strand (k,j) of cell k (see the harmonic version for the model):
+!>   (1/sigma_s)(t,gradW) c_kj - f (t,gradW) V_k - (da/dt, t) = 0
+!>   sum_j (t,gradW) c_kj - m_k I = 0
+!> and the a equation gets the source + c_kj (t, a'), with t = P grad(W) the
+!> foil-plane projection of grad(W).
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_foil_sheet(Element,Comp,nn,nd,dt,CompParams)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
+    REAL(KIND=dp) :: dt
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, pPOT(nd), ppPOT(nd), tscl, val, g, sigma_s, bdfw(3)
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
+    INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    LOGICAL :: stat, PiolaVersion, Found
+    TYPE(Nodes_t), SAVE :: Nodes
+    REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
+    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww, cpl(nd)
+    TYPE(FoilSheetQuad_t) :: FsQ
+    LOGICAL :: Classic
+    INTEGER :: CompId
+    LOGICAL :: SkinLadder, HaveSkinState
+    REAL(KIND=dp) :: Kfac
+    REAL(KIND=dp) :: sdofscl
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_foil_sheet','Foil sheet is implemented only in 3D!')
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    ! In transient the strand resistance is the DC one; the frequency dependence
+    ! of the skin effect is carried by the ladder, not by the conductivity.
+    sigma_s = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
+    IF (.NOT. Found) sigma_s = GetConstReal(CompParams, 'Sigma 33', Found)
+    IF (.NOT. Found) CALL Fatal('Add_foil_sheet', &
+        'Foil sheet needs "Sheet Conductivity" with "Fill Factor", or "Sigma 33"!')
+    IF (sigma_s <= 0._dp) CALL Fatal('Add_foil_sheet', &
+        'Foil sheet: the DC sheet conductivity is not positive, check "Sheet Conductivity" '// &
+        'and "Fill Factor" (or the explicit "Sigma 33")!')
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+    Classic = .NOT. PiolaVersion .AND. EdgeBasisDegree <= 1
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
+
+    ! (tscl a^{n+1} - pPOT)/dt is the BDF derivative of a in the strand equation.
+    CALL GetLocalSolution(pPOT,UElement=Element,USolver=ASolver,tstep=-1)
+    bdfw = TransientLadderBDF(ASolver % Order, dt)
+    tscl = bdfw(1)
+    IF (bdfw(3) /= 0._dp) THEN
+      CALL GetLocalSolution(ppPOT,UElement=Element,USolver=ASolver,tstep=-2)
+      pPot = -(bdfw(2)*pPOT + bdfw(3)*ppPOT)
+    END IF
+
+    CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
+    DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
+    IF (.NOT. Found) DirSign = 1._dp
+    ncdofs = nd - nn
+    vvarId = Comp % vvar % ValueId
+
+    CompId = Comp % ComponentId
+    SkinLadder = .FALSE.
+    HaveSkinState = .FALSE.
+    IF (fskin_allocated .AND. CompId >= 1) THEN
+      IF (CompId <= SIZE(FSkin)) THEN
+        SkinLadder    = FSkin(CompId) % Active
+        HaveSkinState = FSkin(CompId) % Alloc
+      END IF
+    END IF
+
+    ! Every element scales its strand dofs, whether or not this component has
+    ! skin ladder state, so this must be set on every path: the value divides a
+    ! matrix entry, and an undefined one reaches the parallel glue as a nonzero
+    ! where none is expected.
+    sdofscl = FoilSheetDofScale(Comp % SigmaRef, dt, tscl)
+    IF (HaveSkinState) FSkin(CompId) % DofScale = sdofscl
+
+    CALL FoilSheetQuadrature(Comp, CompParams, Element, nn, sStack, sAcross, FsQ)
+
+    DO t=1,FsQ % nItem
+      CALL FoilSheetQuadPoint(FsQ, t, uu, vv, ww)
+      stat = ElementInfo( Element, Nodes, uu, vv, ww, &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      wgt = FoilSheetQuadWeight(FsQ, t, detJ)
+      gradv = FoilSheetQuadGradient(FsQ, t, WBase, dBasisdx, nn)
+      ! Euler potential strand direction; see the harmonic Add_foil_sheet.
+      tvec = FoilSheetQuadDirection(FsQ, t, sStack, sAcross, dBasisdx, nn, DirSign)
+      CALL FoilSheetQuadCoupling(FsQ, t, tvec, WBasis, ncdofs, Classic, cpl)
+
+      CALL FoilSheetQuadStrand(FsQ, Comp, t, sStack, sAcross, Basis, nn, kc, js)
+      IF (kc <= 0) CYCLE
+      sInd = (kc-1) * Comp % nSegments + js
+      sdof = vvarId + FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
+      vdof = vvarId + FoilSheetLayerCell(Comp % nSublayers, kc)
+
+      g = wgt*SUM(tvec*gradv)
+      gres = wgt*SUM(tvec*tvec)
+      Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
+      ! The reported DC resistance is built from these per strand sums once
+      ! the whole block is in (ComputeFoilSheetDcResistance).
+      Comp % StrandResWeight(sInd) = Comp % StrandResWeight(sInd) + gres
+
+      ! Strand equation and cell current balance
+      ! ----------------------------------------
+      ! With the skin ladder the strand impedance is the DC resistance times
+      ! Gdiag, the Schur eliminated u coth u of this timestep, and the ladder
+      ! history moves to the right hand side with the same weight.
+      Kfac = gres * Comp % SigmaRef / sigma_s
+      IF (SkinLadder) THEN
+        CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac * FSkin(CompId) % Gdiag)
+        CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + sdofscl * Kfac * FSkin(CompId) % hist(sInd)
+      ELSE
+        CALL AddToMatrixElement(CM, sdof+nm, sdof+nm, Kfac)
+      END IF
+      ! Kfac*SigmaRef = gres SigmaRef^2/sigma_dc is the DC resistance weight of
+      ! this piece, which turns the strand dofs into a dissipation. Accumulated
+      ! whether or not the ladder is on, so that the loss is reported either way.
+      IF (HaveSkinState) FSkin(CompId) % w(sInd) = FSkin(CompId) % w(sInd) + Kfac * Comp % SigmaRef
+      IF (SkinLadder) CALL AddFoilSkinPiece(CompId, Element % ElementIndex, sInd, Kfac * Comp % SigmaRef)
+      CALL AddToMatrixElement(CM, sdof+nm, vdof+nm, -sdofscl * g * Comp % VoltageFactor)
+      CALL AddToMatrixElement(CM, vdof+nm, sdof+nm, g / sdofscl)
+
+      DO j=1,ncdofs
+        q = j + nn
+        IF ( TransientSimulation ) THEN
+          ! -(d/dt a, t) in the strand equation
+          ! -----------------------------------
+          val = -wgt*cpl(j)/dt
+          CALL AddToMatrixElement(CM, sdof+nm, PS(Indexes(q)), sdofscl * tscl * val)
+          CM % RHS(sdof+nm) = CM % RHS(sdof+nm) + sdofscl * pPOT(q) * val
+        END IF
+        ! Source of the a equation: SigmaRef y_kj (t, a')
+        ! -----------------------------------------------
+        val = Comp % SigmaRef * wgt*cpl(j)
+        CALL AddToMatrixElement(CM, PS(Indexes(q)), sdof+nm, val / sdofscl)
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_foil_sheet
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_foil_winding(Element,Tcoef,Comp,nn,nd,dt,CompParams)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    REAL(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val, dt
+    TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
 
     TYPE(Solver_t), POINTER :: ASolver
     INTEGER, POINTER :: PS(:)
@@ -1287,16 +2304,20 @@ CONTAINS
     INTEGER :: nm,p,j,t,Indexes(nd),vvarId,vpolord_tot, &
                vpolord, vpolordtest, dofId, dofIdtest, &
                dim
-    LOGICAL :: stat, PiolaVersion
+    LOGICAL :: stat, PiolaVersion, ConstraintActive
     TYPE(Nodes_t), SAVE :: Nodes
     TYPE(GaussIntegrationPoints_t) :: IP
     LOGICAL :: CSymmetry, First=.TRUE.
 
     REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
                      RotMLoc(3,3), RotM(3,3,nn)
-    INTEGER :: i,ncdofs,q,EdgeBasisDegree
+    INTEGER :: i,ncdofs,q,EdgeBasisDegree,ni
     TYPE(Variable_t), POINTER, SAVE :: Wpot
-    
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname, CoilType
+    TYPE(VariableHandle_t), SAVE :: Wvec_h
+    LOGICAL :: CoilUseWvec, Found2
+    LOGICAL, SAVE :: CoilUseWvec0 = .FALSE.
+
     SAVE CSymmetry, dim, First
 
     IF (First) THEN
@@ -1304,6 +2325,32 @@ CONTAINS
       CSymmetry = ( CurrentCoordinateSystem() == AxisSymmetric .OR. &
       CurrentCoordinateSystem() == CylindricSymmetric )
       dim = CoordinateSystemDimension()
+
+      CoilUseWvec0 = GetLogical(CurrentModel % Solver % Values, 'Coil Use W Vector', Found2 )
+      DO i=1,CurrentModel % NumberOfComponents
+        CoilType = ListGetString(CurrentModel % Components(i) % Values, 'Coil Type',Found)
+        IF(.NOT. Found) CYCLE
+        IF(CoilType == 'foil winding') THEN
+          CoilWVecVarName = GetString(CurrentModel % Components(i) % Values,'W Vector Variable Name', Found)
+          IF(Found) EXIT
+        END IF
+      END DO
+      IF(.NOT. Found) THEN
+        CoilWVecVarName = GetString(CurrentModel % Solver % Values,'W Vector Variable Name', Found)
+        IF(.NOT. Found) THEN
+          IF( GetLogical(CurrentModel % Solver % Values,'Use Nodal CoilCurrent',Found ) ) &
+              CoilWVecVarname = 'CoilCurrent'
+        END IF
+        IF(.NOT. Found) THEN
+          IF( GetLogical(CurrentModel % Solver % Values,'Use Elemental CoilCurrent',Found ) ) &
+              CoilWVecVarname = 'CoilCurrent e'
+        END IF
+        IF(Found) CALL Info('Add_foil_winding','Setting coil current to: '//TRIM(CoilWVecVarname),Level=6)
+        ! If we did not find w vector named in any component it is fair to assume that it is globally used!
+        IF(.NOT. Found2) CoilUseWvec0 = Found
+      END IF
+      IF(.NOT. Found) CoilWVecVarname = 'W Vector E'
+      CALL ListInitElementVariable(Wvec_h, CoilWVecVarname)
 
       CALL GetWPotentialVar(Wpot)
     END IF
@@ -1332,15 +2379,27 @@ CONTAINS
     END IF
 
     ncdofs=nd
+    CoilUseWvec = CoilUseWvec0
     IF (dim == 3) THEN
-      CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
-      !CALL GetLocalSolution(Wbase, 'w')
+      ! If we do not have a local flag then use the one from the solver section
+      CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
+      IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
+
+      IF (.NOT. CoilUseWvec) CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
+
       CALL GetElementRotM(Element, RotM, nn)
       ncdofs=nd-nn
     END IF
 
     vvarId = Comp % vvar % ValueId
     vpolord_tot = Comp % vvar % pdofs - 1
+
+    ! DEV-1491: see the harmonic Add_foil_winding. Same nodal (scalar potential)
+    ! couplings, opt-in only via 'Activate Constraint'; 3D only. Before: the
+    ! circuit source entered the edge rows only and the coil's nodal rows were
+    ! eliminated by the AV solver.
+    ConstraintActive = .FALSE.
+    IF (dim == 3) ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
 
     ! Numerical integration:
     ! ----------------------
@@ -1353,6 +2412,7 @@ CONTAINS
     DO t=1,IP % n
       grads_coeff = -1._dp
       circ_eq_coeff = 1._dp
+      localR = 0._dp  ! the SELECT below only covers dim 2 and 3
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
@@ -1372,7 +2432,13 @@ CONTAINS
       CASE(3)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
             detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
-        gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+
+        IF (CoilUseWvec) THEN
+          gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
+        ELSE
+          gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+        END IF
+
         ! Compute the conductivity tensor
         ! -------------------------------
         DO i=1,3
@@ -1433,6 +2499,16 @@ CONTAINS
           END DO
         END IF
 
+        ! DEV-1491: (sigma grad v, V'(alpha) grad W) -- conduction current of the
+        ! nodal potential. No 1/dt and no history term.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localVtest*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+            CALL AddToMatrixElement(CM, dofIdtest+nm, PS(Indexes(ni)), val)
+          END DO
+        END IF
+
       END DO
 
       DO vpolord = 0, vpolord_tot ! V(alpha)
@@ -1447,6 +2523,15 @@ CONTAINS
             val = val * Comp % VoltageFactor
             CALL AddToMatrixElement(CM, PS(indexes(q)), dofId+nm, val)
         END DO
+
+        ! DEV-1491: V(alpha) (sigma grad W, grad si) in the nodal constraint rows.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localV*SUM(MATMUL(C,gradv)*dBasisdx(ni,:)) * Comp % VoltageFactor
+            CALL AddToMatrixElement(CM, PS(Indexes(ni)), dofId+nm, val)
+          END DO
+        END IF
       END DO
 
     END DO
@@ -1506,7 +2591,9 @@ CONTAINS
   SUBROUTINE SetDynamicAngle()
     TYPE(Variable_t), POINTER :: AngVar, VeloVar
     TYPE(ValueList_t), POINTER :: Simulation
-    REAL(KIND=dp) :: dt, ang, velo, ang0, velo0, imom, torq    
+    ! dt is the timestep of the host routine: a local of that name would shadow
+    ! it and never be given a value.
+    REAL(KIND=dp) :: ang, velo, ang0, velo0, imom, torq
     INTEGER :: tStep, tStepPrev = 0
     LOGICAL :: Found
     
@@ -1521,6 +2608,12 @@ CONTAINS
       CALL Fatal('SetRotation','Variable > Rotor Velo < does not exist!')
     END IF
     
+    ! Start from the current state: the branch that takes the angle from the
+    ! simulation section and the one that finds no torque both fall through to
+    ! the writes below, which then put back what they read.
+    ang = AngVar % Values(1)
+    velo = VeloVar % Values(1)
+
     Simulation => GetSimulation()
 
     IF( ListCheckPresent( Model % Simulation,'Rotor Angle') ) THEN
@@ -1603,6 +2696,7 @@ END SUBROUTINE CircuitsAndDynamicsHarmonic_init
 SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
   USE CircuitUtils
+  USE CircuitsMod
   USE CircMatInitMod
   USE MGDynMaterialUtils
   IMPLICIT NONE
@@ -1623,6 +2717,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
   TYPE(Circuit_t), POINTER :: Circuits(:)  
   LOGICAL :: Parallel, Found, EigenSystem
   REAL(KIND=dp), POINTER :: px(:)
+  TYPE(ValueList_t), POINTER :: CompParams
+  CHARACTER(LEN=MAX_NAME_LEN) :: CoilType
   CHARACTER(LEN=MAX_NAME_LEN) :: sname
   CHARACTER(*), PARAMETER :: Caller = 'CircuitsAndDynamicsHarmonic'
   
@@ -1710,6 +2806,18 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       Circuits(p) % Asolver => ASolver
     END DO
 
+    ! DEV-1491: at DC the foil / flat wire circuit source is not discretely
+    ! solenoidal (V varies over the component), so the edge-only A system is
+    ! singular AND inconsistent and the linear solver stalls on a residual
+    ! floor. Turning the nodal scalar potential on ('Activate Constraint') lets
+    ! it absorb the non-solenoidal part. Before: the keyword had to be set by
+    ! hand and a 0 Hz run simply failed to converge. Limitation: only done at
+    ! exactly omega = 0 so that omega > 0 results stay bit-identical; the user
+    ! must still opt in explicitly at small but nonzero frequencies.
+    ! This must run BEFORE Circuits_MatrixInit(), which reserves the matrix
+    ! structure for the nodal couplings based on this very keyword.
+    CALL AutoActivateConstraintAtDC()
+
     ! Create CRS matrix structures for the circuit equations:
     ! ------------------------------------------------------
     CALL Circuits_MatrixInit()
@@ -1729,6 +2837,19 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
   IF (SIZE(CM % values) <= 0) RETURN
   CM % RHS = 0._dp
   IF(ASSOCIATED(CM % Values)) CM % Values = 0._dp
+
+  ! 'Sheet Conductivity' may be a function of Temperature, and a thermal
+  ! iteration calls this solver again with an updated temperature field, so the
+  ! derived sheet material is re-evaluated here rather than once at init. A
+  ! constant keyword makes this a no-op.
+  DO i=1,Model % NumberOfComponents
+    CompParams => Model % Components(i) % Values
+    IF(.NOT. ASSOCIATED(CompParams)) CYCLE
+    CoilType = ListGetString(CompParams,'Coil Type',Found)
+    IF(.NOT. Found) CYCLE
+    IF(CoilType /= 'foil sheet') CYCLE
+    CALL UpdateFoilSheetMaterial(CompParams)
+  END DO
 
   ! Write Circuit equations:
   ! ------------------------
@@ -1765,6 +2886,73 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
   
   CONTAINS
+
+!------------------------------------------------------------------------------
+!> DEV-1491: At omega = 0 a foil winding / flat wire component cannot be solved
+!> with the edge dofs alone: the circuit source sigma*V(x)*grad W is discretely
+!> solenoidal only for a constant V, so the singular curl-curl system becomes
+!> inconsistent and the Krylov residual floors. The cure is the nodal scalar
+!> potential of the AV solver, which is switched on per component by
+!> 'Activate Constraint'. Enable it automatically here, and only at exactly
+!> omega = 0, so that every omega > 0 result stays bit-identical.
+!------------------------------------------------------------------------------
+   SUBROUTINE AutoActivateConstraintAtDC()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: CompParams
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilType
+    INTEGER :: i
+    LOGICAL :: FoundType, FoundFlag, FlagValue, FoundFreq
+    REAL(KIND=dp) :: w
+
+    w = GetAngularFrequency( Found = FoundFreq )
+    IF( .NOT. FoundFreq ) RETURN
+    IF( ABS( w ) > 0.0_dp ) RETURN
+
+    DO i=1,CurrentModel % NumberOfComponents
+      CompParams => CurrentModel % Components(i) % Values
+      IF(.NOT. ASSOCIATED(CompParams)) CYCLE
+
+      CoilType = ListGetString(CompParams,'Coil Type',FoundType)
+      IF(.NOT. FoundType) CYCLE
+      ! 'foil sheet' is deliberately not here. Its source is a set of strand
+      ! currents along the Euler direction t = s grad(Alpha) x grad(Beta), which
+      ! is exactly solenoidal and exactly tangential to the strand interfaces,
+      ! so the edge only system stays consistent at DC and needs no nodal
+      ! potential. The sheet kernel has no nodal couplings to give it either.
+      IF(CoilType /= 'foil winding' .AND. CoilType /= 'flat wire') CYCLE
+
+      FlagValue = ListGetLogical(CompParams,'Activate Constraint',FoundFlag)
+
+      IF(.NOT. FoundFlag) THEN
+        CALL ListAddLogical(CompParams,'Activate Constraint',.TRUE.)
+        CALL Info(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): setting '&
+            //'"Activate Constraint = True" because the angular frequency is zero. '&
+            //'The DC circuit source needs the nodal scalar potential to be solvable.',Level=4)
+      ELSE IF(.NOT. FlagValue) THEN
+        CALL Warn(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): '&
+            //'"Activate Constraint = False" at zero frequency. The linear solver is '&
+            //'expected to stall on a residual floor.')
+      END IF
+
+      IF(ListGetLogical(CompParams,'Activate Constraint',FoundFlag)) THEN
+        IF(.NOT. ListCheckPresent(CompParams,'Electrode Boundaries')) THEN
+          IF(ListGetLogical(CompParams,'Coil Closed',FoundFlag)) THEN
+            ! A closed coil has no electrodes by construction. The AV solver
+            ! pins one single node of its bodies instead.
+            CALL Info(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): closed '&
+                //'coil, so the nodal potential is pinned at one node of the coil.',Level=4)
+          ELSE
+            CALL Warn(Caller,'Component '//I2S(i)//' ('//TRIM(CoilType)//'): no '&
+                //'"Electrode Boundaries" given, so the automatic electrode BC has no '&
+                //'place to pin the nodal potential (or pins it on the whole coil surface).')
+          END IF
+        END IF
+      END IF
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE AutoActivateConstraintAtDC
+!------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
    SUBROUTINE AddBasicCircuitEquations(p)
@@ -1892,6 +3080,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
       Comp % Resistance = 0._dp
       Comp % Conductance = 0._dp
+      IF (ALLOCATED(Comp % StrandWeight)) Comp % StrandWeight = 0._dp
+      IF (ALLOCATED(Comp % StrandResWeight)) Comp % StrandResWeight = 0._dp
 
       Cvar => Comp % vvar
       vvarId = Comp % vvar % ValueId + nm
@@ -1954,6 +3144,33 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
             CALL AddToCmplxMatrixElement(CM, 2*j + VvarId, IvarId, &
                REAL(cmplx_val), AIMAG(cmplx_val))
           END DO
+        CASE('flat wire')
+          ! Flat wire voltage: V - sum_k V_k = 0
+          ! ------------------------------------
+          i_multiplier = Comp % i_multiplier_re + im * Comp % i_multiplier_im
+          IF (i_multiplier == 0_dp) i_multiplier = 1.0_dp
+          CALL AddToCmplxMatrixElement(CM, VvarId, VvarId, 1._dp, 0._dp)
+          DO j = 1, Cvar % pdofs
+            CALL AddToCmplxMatrixElement(CM, VvarId, 2*j + VvarId, -1._dp, 0._dp)
+            ! Cell k: (sigma V_k grad W, grad W) + (i omega sigma a, grad W) - I = 0
+            ! ---------------------------------------------------------------------
+            CALL AddToCmplxMatrixElement(CM, 2*j + VvarId, IvarId, &
+               -REAL(i_multiplier), -AIMAG(i_multiplier))
+          END DO
+        CASE('foil sheet')
+          ! Foil sheet voltage: V - sum_k m_k V_k = 0, m_k foils in cell k
+          ! -------------------------------------------------------------
+          i_multiplier = Comp % i_multiplier_re + im * Comp % i_multiplier_im
+          IF (i_multiplier == 0_dp) i_multiplier = 1.0_dp
+          CALL AddToCmplxMatrixElement(CM, VvarId, VvarId, 1._dp, 0._dp)
+          cmplx_val = -REAL(Comp % foilsPerCell, dp) * i_multiplier / Comp % SigmaRef
+          DO j = 1, Comp % nCells
+            CALL AddToCmplxMatrixElement(CM, VvarId, 2*j + VvarId, -REAL(Comp % foilsPerCell, dp), 0._dp)
+            ! Cell k: sum_j (t, grad W)_kj y_kj - m_k I / SigmaRef = 0
+            ! -------------------------------------------------------
+            CALL AddToCmplxMatrixElement(CM, 2*j + VvarId, IvarId, &
+               REAL(cmplx_val), AIMAG(cmplx_val))
+          END DO
         END SELECT
       END IF
 
@@ -1968,12 +3185,20 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
         CALL AddComponentElementContributions(Element, Comp, Tcoef, &
                                               sigma_33, sigmaim_33, .True.)
       END DO
+
+      IF (Comp % CoilType == 'foil sheet') THEN
+        CALL CheckFoilSheetStrands(Comp)
+        CALL ComputeFoilSheetDcResistance(Comp, CompParams)
+      END IF
     END DO
 
     IF( Circuit % Parallel ) THEN
       DO CompInd = 1, Circuit % n_comp
         Comp => Circuit % Components(CompInd)
-        Comp % Resistance = ParallelReduction(Comp % Resistance)
+        ! A foil sheet's resistance comes from strand sums that are already
+        ! reduced over the partitions.
+        IF (Comp % CoilType /= 'foil sheet') &
+            Comp % Resistance = ParallelReduction(Comp % Resistance)
         Comp % Conductance = ParallelReduction(Comp % Conductance)
       END DO
     END IF
@@ -2052,12 +3277,28 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       CASE ('massive')
         IF (HasSupport(Element,nn_elem)) THEN
           Tcoef = GetCMPLXElectricConductivityTensor(Element, nn_elem, .TRUE., CoilType) 
-          CALL Add_massive(Element,Tcoef,Comp,nn_elem,nd_elem)
+          CALL Add_massive(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
         END IF
       CASE ('foil winding')
         IF (HasSupport(Element,nn_elem)) THEN
           Tcoef = GetCMPLXElectricConductivityTensor(Element, nn_elem, .TRUE., CoilType) 
           CALL Add_foil_winding(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
+        END IF
+      CASE ('flat wire')
+        IF (HasSupport(Element,nn_elem)) THEN
+          Tcoef = GetCMPLXElectricConductivityTensor(Element, nn_elem, .TRUE., CoilType)
+          CALL Add_flat_wire(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
+        END IF
+      CASE ('foil sheet')
+        IF (HasSupport(Element,nn_elem)) THEN
+          ! The block has no volumetric conductivity; the strands conduct with
+          ! the complex sheet conductivity sigma_s = Sigma 33 + i Sigma 33 im.
+          CALL GetComponentCmplxNodal(CompParams, 'sigma 33', nn_elem, sigma_33, sigmaim_33, Found)
+          IF ( .NOT. Found ) CALL Fatal ('AddComponentElementContributions', &
+              'Foil sheet: Sigma 33 not found!')
+          Tcoef = CMPLX(0._dp, 0._dp, KIND=dp)
+          Tcoef(3,3,1:nn_elem) = CMPLX(sigma_33, sigmaim_33, KIND=dp)
+          CALL Add_foil_sheet(Element,Tcoef,Comp,nn_elem,nd_elem,CompParams)
         END IF
       CASE DEFAULT
         CALL Fatal ('AddComponentEquationsAndCouplings', 'Non existent Coil Type Chosen!')
@@ -2184,6 +3425,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     DO t=1,IP % n
  
       circ_eq_coeff = 1._dp
+      cmplx_val = 0._dp  ! only dim 2 and 3 have a term below
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
@@ -2257,12 +3499,13 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
-   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd)
+   SUBROUTINE Add_massive(Element,Tcoef,Comp,nn,nd,CompParams)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
-    TYPE(Element_t) :: Element
+    TYPE(Element_t), POINTER :: Element
     COMPLEX(KIND=dp) :: Tcoef(3,3,nn)
     TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
 
     TYPE(Solver_t), POINTER :: ASolver
     TYPE(ValueList_t), POINTER :: BC
@@ -2324,8 +3567,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 
     ncdofs=nd
     IF (dim == 3) THEN
-      !CALL GetWPotential(WBase)     
-      CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+      CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
       ncdofs=nd-nn
     END IF
 
@@ -2362,6 +3604,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     DO t=1,IP % n
       grads_coeff = -1._dp
       circ_eq_coeff = 1._dp
+      invZs = 0._dp  ! the surface impedance is set below only when SkinBc
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
@@ -2511,6 +3754,291 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Flat wire winding, harmonic version: see the transient Add_flat_wire.
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_flat_wire(Element,Tcoef,Comp,nn,nd,CompParams)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    COMPLEX(KIND=dp) :: Tcoef(3,3,nn), C(3,3), val
+    TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, Omega, localR
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
+    INTEGER :: nm, i, j, k, t, q, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, dofId, ni
+    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec, ConstraintActive
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname
+    TYPE(VariableHandle_t), SAVE :: Wvec_h
+    REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
+                     RotMLoc(3,3), RotM(3,3,nn)
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE., CoilUseWvec0 = .FALSE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_flat_wire','Flat wire is implemented only in 3D!')
+      CoilUseWvec0 = GetLogical(CurrentModel % Solver % Values, 'Coil Use W Vector', Found)
+      CoilWVecVarName = GetString(CurrentModel % Solver % Values,'W Vector Variable Name', Found)
+      IF (.NOT. Found) CoilWVecVarname = 'W Vector E'
+      CALL ListInitElementVariable(Wvec_h, CoilWVecVarname)
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_flat_wire','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+    Omega = GetAngularFrequency()
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
+
+    CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
+    IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
+    IF (.NOT. CoilUseWvec) CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
+    CALL GetElementRotM(Element, RotM, nn)
+    ncdofs = nd - nn
+
+    vvarId = Comp % vvar % ValueId
+
+    ! DEV-1491: see the comment in the harmonic Add_foil_winding. The per-cell
+    ! voltages V_k make the circuit source non-solenoidal (cell borders cut
+    ! through elements), so at omega=0 the edge-only system was inconsistent and
+    ! the linear solver floored. Before: the source hit the edge rows only.
+    ! Limitation: needs 'Activate Constraint' on the component (auto-enabled at
+    ! omega=0) plus a Dirichlet point for v ('Electrode Boundaries').
+    ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
+
+    IF (PiolaVersion) THEN
+      IP = GaussPoints(Element, PReferenceElement=PiolaVersion, EdgeBasisDegree=EdgeBasisDegree)
+    ELSE
+      IP = GaussPoints(Element)
+    END IF
+
+    DO t=1,IP % n
+      stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), IP % W(t), &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      IF (CoilUseWvec) THEN
+        gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = 3 )
+      ELSE
+        gradv = MATMUL( WBase(1:nn), dBasisdx(1:nn,:))
+      END IF
+
+      DO i=1,3
+        DO j=1,3
+          C(i,j) = SUM( Tcoef(i,j,1:nn) * Basis(1:nn) )
+          RotMLoc(i,j) = SUM( RotM(i,j,1:nn) * Basis(1:nn) )
+        END DO
+      END DO
+
+      ! I * R, where R = (1/sigma * js,js):
+      ! -----------------------------------
+      localR = Comp % N_j **2 * IP % s(t)*detJ/C(3,3) / Comp % VoltageFactor
+      Comp % Resistance = Comp % Resistance + localR
+
+      C = MATMUL(MATMUL(RotMLoc, C),TRANSPOSE(RotMLoc))
+
+      k = FlatWireCellIndex(Comp % nStack, Comp % nAcross, &
+          SUM(sStack(1:nn)*Basis(1:nn)), SUM(sAcross(1:nn)*Basis(1:nn)))
+      dofId = vvarId + 2*k
+
+      ! Conductance of the cell: V_k (sigma grad W, grad W)
+      ! --------------------------------------------------
+      val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*gradv) * Comp % VoltageFactor
+      CALL AddToCmplxMatrixElement(CM, dofId+nm, dofId+nm, REAL(val), AIMAG(val))
+
+      DO j=1,ncdofs
+        q = j + nn
+        ! (i omega sigma a, grad W)
+        ! -------------------------
+        val = im * Omega * IP % s(t)*detJ*SUM(MATMUL(C,Wbasis(j,:))*gradv)
+        CALL AddToCmplxMatrixElement(CM, dofId+nm, ReIndex(PS(Indexes(q))), REAL(val), AIMAG(val))
+        ! Source of the a equation: V_k (sigma grad W, a')
+        ! ------------------------------------------------
+        val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*Wbasis(j,:)) * Comp % VoltageFactor
+        CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(q))), dofId+nm, REAL(val), AIMAG(val))
+      END DO
+
+      IF (ConstraintActive) THEN
+        DO ni=1,nn
+          ! DEV-1491: (sigma grad v, grad W) -- conduction current of the nodal
+          ! potential in the cell equation. No i*omega, no VoltageFactor.
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+          CALL AddToCmplxMatrixElement(CM, dofId+nm, ReIndex(PS(Indexes(ni))), REAL(val), AIMAG(val))
+          ! DEV-1491: V_k (sigma grad W, grad si) -- the same source as in the
+          ! edge rows, now also in the nodal constraint rows.
+          ! ------------------------------------------------------------------
+          val = IP % s(t)*detJ*SUM(MATMUL(C,gradv)*dBasisdx(ni,:)) * Comp % VoltageFactor
+          CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(ni))), dofId+nm, REAL(val), AIMAG(val))
+        END DO
+      END IF
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_flat_wire
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Foil sheet winding, harmonic version. The block is split into nCells cells
+!> along Alpha (the stacking normal) and each cell into nSegments strands along
+!> Beta (the foil width). Strand (k,j) carries the uniform current density
+!> c_kj*t, where t = P grad(W) is grad(W) projected on the foil plane, with the
+!> complex sheet conductivity sigma_s = Tcoef(3,3). The block itself has no
+!> volumetric eddy current.
+!> Rows (f = Circuit Equation Voltage Factor, m_k = foils per cell):
+!>   (R1) strand: (1/sigma_s)(t,gradW) c_kj - f (t,gradW) V_k
+!>                                          - i w (a, t) = 0
+!>   (R2) cell:   sum_j (t,gradW)_kj c_kj - m_k I = 0
+!>   (R3) comp.:  V - sum_k m_k V_k = 0   (in AddComponentEquationsAndCouplings)
+!> and the a equation gets the source + c_kj (t, a'), exactly as the flat wire
+!> kernel does for sigma*f*V_k. At DC (R1) gives c_kj = sigma_s f V_k, so the
+!> strand current is proportional to the segment width: a uniform sheet current
+!> and the exact ring Rdc.
+!------------------------------------------------------------------------------
+   SUBROUTINE Add_foil_sheet(Element,Tcoef,Comp,nn,nd,CompParams)
+!------------------------------------------------------------------------------
+    USE MGDynMaterialUtils
+    IMPLICIT NONE
+    INTEGER :: nn, nd
+    TYPE(Element_t), POINTER :: Element
+    COMPLEX(KIND=dp) :: Tcoef(3,3,nn), sigma_s, val
+    TYPE(Component_t) :: Comp
+    TYPE(Valuelist_t), POINTER :: CompParams
+
+    TYPE(Solver_t), POINTER :: ASolver
+    INTEGER, POINTER :: PS(:)
+    TYPE(Matrix_t), POINTER :: CM
+    REAL(KIND=dp) :: Basis(nd), DetJ, Omega, g
+    REAL(KIND=dp) :: dBasisdx(nd,3), sStack(nn), sAcross(nn)
+    INTEGER :: nm, j, t, q, kc, js, ncdofs, EdgeBasisDegree, Indexes(nd), vvarId, sdof, vdof, sInd
+    LOGICAL :: stat, PiolaVersion, Found, CoilUseWvec
+    TYPE(Nodes_t), SAVE :: Nodes
+    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
+    CHARACTER(LEN=MAX_NAME_LEN) :: CoilWVecVarname
+    TYPE(VariableHandle_t), SAVE :: Wvec_h
+    REAL(KIND=dp) :: wBase(nn), gradv(3), tvec(3), WBasis(nd,3), RotWBasis(nd,3)
+    REAL(KIND=dp) :: gres, DirSign, wgt, uu, vv, ww, cpl(nd)
+    TYPE(FoilSheetQuad_t) :: FsQ
+    LOGICAL :: Classic
+    TYPE(Variable_t), POINTER, SAVE :: Wpot
+    LOGICAL, SAVE :: First = .TRUE., CoilUseWvec0 = .FALSE.
+
+    IF (First) THEN
+      First = .FALSE.
+      IF (CoordinateSystemDimension() /= 3) CALL Fatal('Add_foil_sheet','Foil sheet is implemented only in 3D!')
+      CoilUseWvec0 = GetLogical(CurrentModel % Solver % Values, 'Coil Use W Vector', Found)
+      CoilWVecVarName = GetString(CurrentModel % Solver % Values,'W Vector Variable Name', Found)
+      IF (.NOT. Found) CoilWVecVarname = 'W Vector E'
+      CALL ListInitElementVariable(Wvec_h, CoilWVecVarname)
+      CALL GetWPotentialVar(Wpot)
+    END IF
+
+    ASolver => CurrentModel % Asolver
+    IF (.NOT.ASSOCIATED(ASolver)) CALL Fatal('Add_foil_sheet','ASolver not found!')
+    CALL EdgeElementStyle(ASolver % Values, PiolaVersion, BasisDegree = EdgeBasisDegree)
+    Classic = .NOT. PiolaVersion .AND. EdgeBasisDegree <= 1
+
+    PS => Asolver % Variable % Perm
+    CM => CurrentModel % CircuitMatrix
+    nm = CurrentModel % Asolver % Matrix % NumberOfRows
+    Omega = GetAngularFrequency()
+
+    CALL GetElementNodes(Nodes)
+    nd = GetElementDOFs(Indexes,Element,ASolver)
+    CALL GetFlatWireLocalFields(Comp % StackAlongAlpha, Element, nn, sStack, sAcross)
+
+    CoilUseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
+    IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
+    IF (.NOT. CoilUseWvec) CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
+    DirSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
+    IF (.NOT. Found) DirSign = 1._dp
+    ncdofs = nd - nn
+
+    vvarId = Comp % vvar % ValueId
+
+    CALL FoilSheetQuadrature(Comp, CompParams, Element, nn, sStack, sAcross, FsQ)
+
+    DO t=1,FsQ % nItem
+      CALL FoilSheetQuadPoint(FsQ, t, uu, vv, ww)
+      stat = ElementInfo( Element, Nodes, uu, vv, ww, &
+          detJ, Basis, dBasisdx, EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = ASolver )
+      wgt = FoilSheetQuadWeight(FsQ, t, detJ)
+      IF (CoilUseWvec) THEN
+        gradv = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = 3 )
+      ELSE
+        gradv = FoilSheetQuadGradient(FsQ, t, WBase, dBasisdx, nn)
+      END IF
+
+      ! Euler potential strand direction: exactly solenoidal and exactly
+      ! tangential to the strand interfaces, which are iso-surfaces of the
+      ! stacking and across fields. See FoilSheetDirection.
+      tvec = FoilSheetQuadDirection(FsQ, t, sStack, sAcross, dBasisdx, nn, DirSign)
+      CALL FoilSheetQuadCoupling(FsQ, t, tvec, WBasis, ncdofs, Classic, cpl)
+
+      sigma_s = SUM( Tcoef(3,3,1:nn) * Basis(1:nn) )
+      IF (sigma_s == CMPLX(0._dp,0._dp,KIND=dp)) &
+          CALL Fatal('Add_foil_sheet','Foil sheet: "Sigma 33" is zero; give '// &
+              '"Sheet Conductivity" with "Fill Factor", or "Sigma 33" directly!')
+
+      CALL FoilSheetQuadStrand(FsQ, Comp, t, sStack, sAcross, Basis, nn, kc, js)
+      IF (kc <= 0) CYCLE
+      ! kc is the sub-layer; the sub-layers of one turn are that turn's conductor
+      ! in parallel, so they share its voltage dof and its current constraint.
+      sInd = (kc-1) * Comp % nSegments + js
+      sdof = vvarId + 2*FoilSheetStrandDof(Comp % nCells, Comp % nSegments, kc, js)
+      vdof = vvarId + 2*FoilSheetLayerCell(Comp % nSublayers, kc)
+
+      ! g pairs the strand with grad W and is the strand's flux for c = 1; it is
+      ! the SAME number in R1 and R2, which keeps the transposition exact. gres
+      ! is the resistive weight int |t|^2.
+      g = wgt*SUM(tvec*gradv)
+      gres = wgt*SUM(tvec*tvec)
+      Comp % StrandWeight(sInd) = Comp % StrandWeight(sInd) + g
+      ! The reported resistance is the DC one, built from these per strand
+      ! sums with the DC sheet conductivity (ComputeFoilSheetDcResistance):
+      ! Re(1/sigma_s) is the AC plate resistance and drifts with the frequency.
+      Comp % StrandResWeight(sInd) = Comp % StrandResWeight(sInd) + gres
+
+      ! (R1) strand equation
+      ! --------------------
+      val = gres * Comp % SigmaRef / sigma_s
+      CALL AddToCmplxMatrixElement(CM, sdof+nm, sdof+nm, REAL(val), AIMAG(val))
+      CALL AddToCmplxMatrixElement(CM, sdof+nm, vdof+nm, -g * Comp % VoltageFactor, 0._dp)
+
+      ! (R2) cell current balance
+      ! -------------------------
+      CALL AddToCmplxMatrixElement(CM, vdof+nm, sdof+nm, g, 0._dp)
+
+      DO j=1,ncdofs
+        q = j + nn
+        ! -(i omega a, t) in the strand equation
+        ! --------------------------------------
+        val = -im * Omega * wgt*cpl(j)
+        CALL AddToCmplxMatrixElement(CM, sdof+nm, ReIndex(PS(Indexes(q))), REAL(val), AIMAG(val))
+        ! Source of the a equation: SigmaRef y_kj (t, a')
+        ! -----------------------------------------------
+        val = Comp % SigmaRef * wgt*cpl(j)
+        CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(q))), sdof+nm, REAL(val), AIMAG(val))
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+   END SUBROUTINE Add_foil_sheet
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
    SUBROUTINE Add_foil_winding(Element,Tcoef,Comp,nn,nd,CompParams)
 !------------------------------------------------------------------------------
     USE MGDynMaterialUtils
@@ -2546,7 +4074,8 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     REAL(KIND=dp) :: wBase(nn), gradv(3), WBasis(nd,3), RotWBasis(nd,3), &
                      RotMLoc(3,3), RotM(3,3,nn)
     REAL(KIND=dp) :: Jvec(3)
-    INTEGER :: i,ncdofs,q,EdgeBasisDegree
+    INTEGER :: i,ncdofs,q,EdgeBasisDegree,ni
+    LOGICAL :: ConstraintActive
     TYPE(Variable_t), POINTER, SAVE :: Wpot
 
     
@@ -2609,9 +4138,7 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
       IF (.NOT. Found) CoilUseWvec = CoilUseWvec0
 
       IF (.NOT. CoilUseWvec) THEN
-        !CALL GetLocalSolution(Wbase, 'w')
-        !CALL GetWPotential(WBase)
-        CALL GetLocalSolution( Wbase,UElement=Element,UVariable=Wpot, Found=Found)
+        CALL GetCoilWBase(Element, nn, CompParams, Wbase, Wpot)
       END IF
 
       FoilUseJvec = GetLogical(CompParams, 'Foil Winding Use J Vector', Found)
@@ -2638,6 +4165,20 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     vvarId = Comp % vvar % ValueId
     vpolord_tot = Comp % vvar % pdofs - 1
 
+    ! DEV-1491: couple the circuit source to the nodal potential v as well.
+    ! Why: at (and near) omega=0 the ungauged edge system is singular and the
+    ! circuit source sigma*V(alpha)*grad W is not discretely solenoidal unless
+    ! V is constant, so the edge-only system was inconsistent and Krylov stalled
+    ! on a residual floor. Before: the source entered the edge rows only and the
+    ! nodal rows of the coil were dropped (Activate Constraint unset -> the AV
+    ! solver's ConstrainUnused eliminated them). Limitation: only active when the
+    ! component sets 'Activate Constraint' (auto-enabled at omega=0, see the
+    ! CircuitsAndDynamicsHarmonic init), 3D only, and the exactness of the
+    ! consistency identity assumes grad(nodal basis) is in the edge basis space
+    ! (lowest order Whitney / p-hierarchical edge elements).
+    ConstraintActive = .FALSE.
+    IF (dim == 3) ConstraintActive = GetLogical(CompParams,'Activate Constraint',Found)
+
     ! Numerical integration:
     ! ----------------------
     IF (PiolaVersion) THEN
@@ -2649,6 +4190,9 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
     DO t=1,IP % n
       grads_coeff = -1._dp
       circ_eq_coeff = 1._dp
+      ! the SELECT below and the terms further down only cover dim 2 and 3
+      localR = 0._dp
+      val = 0._dp
       SELECT CASE(dim)
       CASE(2)
         stat = ElementInfo( Element, Nodes, IP % U(t), IP % V(t), &
@@ -2739,6 +4283,17 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
           CALL AddToCmplxMatrixElement(CM, dofIdtest+nm, ReIndex(PS(Indexes(q))), REAL(val), AIMAG(val) )
         END DO
 
+        ! DEV-1491: conduction current driven by the nodal potential,
+        ! (sigma grad v, V'(alpha) grad W). No im*Omega (this is conduction, not
+        ! induction) and no VoltageFactor, exactly like the a-coupling above.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localVtest*SUM(MATMUL(C,dBasisdx(ni,:))*gradv)
+            CALL AddToCmplxMatrixElement(CM, dofIdtest+nm, ReIndex(PS(Indexes(ni))), REAL(val), AIMAG(val) )
+          END DO
+        END IF
+
       END DO
 
       DO vpolord = 0, vpolord_tot ! V(alpha)
@@ -2753,6 +4308,18 @@ SUBROUTINE CircuitsAndDynamicsHarmonic( Model,Solver,dt,TransientSimulation )
             val = val * Comp % VoltageFactor
             CALL AddToCmplxMatrixElement(CM, ReIndex(PS(indexes(q))), dofId+nm, REAL(val), AIMAG(val))
         END DO
+
+        ! DEV-1491: same source in the nodal rows of the constraint equation
+        ! -div(sigma*(im*Omega*a + grad v + V(alpha) grad W)) = 0, i.e. the edge
+        ! source with a' replaced by grad(nodal basis). This is what makes the
+        ! coupled system consistent at Omega = 0.
+        ! ------------------------------------------------------------------
+        IF (ConstraintActive) THEN
+          DO ni=1,nn
+            val = IP % s(t)*detJ*localV*SUM(Jvec*dBasisdx(ni,:)) * Comp % VoltageFactor
+            CALL AddToCmplxMatrixElement(CM, ReIndex(PS(Indexes(ni))), dofId+nm, REAL(val), AIMAG(val))
+          END DO
+        END IF
       END DO
 
     END DO
@@ -3030,6 +4597,85 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
    !  Solver % Variable => LagrangeVar 
    !END IF
    
+   ! Advance the foil sheet strand skin ladder now that the strand
+   ! currents of this timestep are known. crt is already reduced over the
+   ! partitions, so every partition advances the same states.
+   IF (Transient) THEN
+     BLOCK
+       INTEGER :: ci, kc, js, vvid, nce, nse, idx, nskin, nFSkin
+       LOGICAL :: gotid, gotp, gotq, gotl
+       TYPE(ValueList_t), POINTER :: CPar
+       REAL(KIND=dp), ALLOCATABLE :: ynew(:)
+       REAL(KIND=dp) :: Ptot, Pdc, Pstrand, Pstranddc, Pprox, Pother, Pstrandedprox
+       Pstrand = 0._dp; Pstranddc = 0._dp; nskin = 0
+       nFSkin = 0
+       IF (fskin_allocated) nFSkin = SIZE(FSkin)
+       DO ci = 1, nFSkin
+         IF (.NOT. FSkin(ci) % Alloc) CYCLE
+         nskin = 1
+         CPar => CurrentModel % Components(ci) % Values
+         IF (.NOT. ASSOCIATED(CPar)) CYCLE
+         vvid = GetInteger(CPar, 'Circuit Voltage Variable Id', gotid)
+         IF (.NOT. gotid) CYCLE
+         nce = FSkin(ci) % nCells
+         nse = FSkin(ci) % nSegments
+         ALLOCATE(ynew(FSkin(ci) % nStrand))
+         ynew = 0._dp
+         DO kc = 1, nce
+           DO js = 1, nse
+             idx = vvid + FoilSheetStrandDof(nce, nse, kc, js)
+             IF (idx >= 1 .AND. idx <= circuit_tot_n) ynew((kc-1)*nse + js) = crt(idx) / FSkin(ci) % DofScale
+           END DO
+         END DO
+         CALL AdvanceFoilSkin(ci, ynew, dt)
+         CALL FoilSkinLoss(ci, Ptot, Pdc)
+         Pstrand = Pstrand + Ptot
+         Pstranddc = Pstranddc + Pdc
+         DEALLOCATE(ynew)
+       END DO
+
+       CALL PublishFoilSkinExcess(ASolver % Mesh)
+
+       ! The weights are partition-local sums, so the losses are too. Together
+       ! the strand loss (the DC part and the skin ladder's) and the proximity
+       ! loss (the reluctivity ladder's, integrated by the AV solver) are the
+       ! whole dissipation of the foil sheet blocks in transient.
+       ! MagnetoDynamicsCalcFields has them at the DC sheet conductivity only and
+       ! publishes every other conductor apart, so the total conductor loss is
+       ! that plus the sheets whole, plus the reluctivity ladder loss of
+       ! homogenized stranded windings, which is in no Joule heating either.
+       ! Nothing here reads what it writes, so a second call within a timestep
+       ! gives the same numbers.
+       ! The reductions are collective, so every partition has to reach them,
+       ! including one whose mesh carries no sheet element and whose ladder
+       ! state is therefore not allocated. The "is there a sheet" flag is
+       ! reduced first, so the branch below is taken on all ranks or on none.
+       nskin = ParallelReduction(nskin, 2)
+       Pstrand = ParallelReduction(Pstrand)
+       Pstranddc = ParallelReduction(Pstranddc)
+       Pother = GetConstReal(Model % Simulation, 'Eddy current power outside foil sheets', gotq)
+       IF (.NOT. gotq) Pother = 0._dp
+       Pstrandedprox = GetConstReal(Model % Simulation, 'Stranded coil proximity loss', gotl)
+       IF (.NOT. gotl) Pstrandedprox = 0._dp
+       IF (nskin > 0) THEN
+         Pprox = GetConstReal(Model % Simulation, 'res: sheet proximity loss', gotp)
+         IF (.NOT. gotp) Pprox = 0._dp
+         CALL ListAddConstReal(Model % Simulation, 'res: sheet strand loss', Pstrand)
+         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', &
+             (Pother + Pstrandedprox) + (Pstrand + Pprox))
+         WRITE(Message,'(A,5ES13.5)') 'Foil sheet strand loss, its DC part, sheet proximity loss, '// &
+             'stranded coil proximity loss, other conductors:', Pstrand, Pstranddc, Pprox, &
+             Pstrandedprox, Pother
+         CALL Info(Caller, Message, Level=5)
+       ELSE IF (gotl .AND. gotq) THEN
+         CALL ListAddConstReal(Model % Simulation, 'res: Eddy current power', Pother + Pstrandedprox)
+         WRITE(Message,'(A,2ES13.5)') 'Stranded coil proximity loss, other conductors:', &
+             Pstrandedprox, Pother
+         CALL Info(Caller, Message, Level=5)
+       END IF
+     END BLOCK
+   END IF
+
    ! Export circuit & dynamic variables for "SaveScalars":
    ! -----------------------------------------------------
 
@@ -3089,10 +4735,6 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
          Current = crt(Comp % ivar % ValueId)
          IF ( Circuits(p) % Harmonic ) Current = Current + im * crt(Comp % ivar % ImValueId)
 
-         ! Slice 2 (n=1 conductivity-form): nothing to advance per-step.
-         ! xi_S would only be needed for n>1 ladder OR an impedance-form fit;
-         ! see TransientHomogCircuitState comments and plan section 7.
-
          CompParams => CurrentModel % Components (Comp % ComponentId) % Values
          IF (.NOT. ASSOCIATED(CompParams)) CALL Fatal ('CircuitsOutput', &
            'Component parameters not found!')
@@ -3114,6 +4756,29 @@ SUBROUTINE CircuitsOutput(Model,Solver,dt,Transient)
           
        END DO  
    END DO
+
+   ! The stranded coil skin ladder: advance its state from the current of this
+   ! timestep (crt is reduced over the partitions) and report the DC resistance
+   ! K/G0, the conduction heat of the step and the ladder's voltage, which is
+   ! the coil voltage without the flux linkage. r_component above stays the
+   ! diagonal of the step, K/Gskin. Nothing here reads what it writes, so a
+   ! second call within a timestep gives the same numbers.
+   IF (Transient) THEN
+     DO p = 1, n_Circuits
+       IF (Circuits(p) % Harmonic) CYCLE
+       DO j = 1, SIZE(Circuits(p) % Components)
+         Comp => Circuits(p) % Components(j)
+         IF (.NOT. StrandedSkinActive(Comp % ComponentId)) CYCLE
+         CALL AdvanceStrandedSkin(Comp % ComponentId, crt(Comp % ivar % ValueId))
+         CALL SimListAddAndOutputConstReal('r_dc_skin_component('//i2s(Comp % ComponentId)//')', &
+             SSkin(Comp % ComponentId) % K / SSkin(Comp % ComponentId) % G0, Level=8)
+         CALL SimListAddAndOutputConstReal('p_skin_component('//i2s(Comp % ComponentId)//')', &
+             StrandedSkinHeat(Comp % ComponentId, crt(Comp % ivar % ValueId)), Level=8)
+         CALL SimListAddAndOutputConstReal('v_skin_component('//i2s(Comp % ComponentId)//')', &
+             StrandedSkinVoltage(Comp % ComponentId, crt(Comp % ivar % ValueId)), Level=8)
+       END DO
+     END DO
+   END IF
 
    CALL Circuits_ToMeshVariable(Solver,crt)
    

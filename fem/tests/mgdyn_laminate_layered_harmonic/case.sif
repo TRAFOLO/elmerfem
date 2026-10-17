@@ -1,0 +1,187 @@
+! DEV-1600: 'layered' laminate stack model with lamination sheets ('Thin Sheet Laminate Thickness').
+! 1/8 of a copper bar clad by three insulated NiFe laminations (8 um, mu_r 190, 1.67 MS/m,
+! stacking factor 16/17) at 100 MHz, i.e. lamination thickness 2.8 skin depths. The clad block is
+! homogenized: side, top and corner bodies with the stack reluctivity, one sheet per lamination.
+! Columns of scalars.dat: terminal current re, im (A), eddy current power, field energy,
+! thin sheet power, laminate stack loss. The norm is the laminate stack loss (W).
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "mesh"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = "Cartesian"
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Angular Frequency = Real 628318530.718
+End
+
+Body 1
+  Equation = 1
+  Material = 1
+End
+
+Body 2
+  Equation = 1
+  Material = 2
+End
+
+Body 3
+  Equation = 1
+  Material = 3
+End
+
+Body 4
+  Equation = 1
+  Material = 4
+End
+
+Body 5
+  Equation = 1
+  Material = 5
+End
+
+Body 6
+  Equation = 1
+  Material = 6
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+Material 1
+  Relative Permeability = 1.0
+  Electric Conductivity = 0.0
+  Relative Permittivity = 1.0
+End
+
+Material 2
+  Relative Permeability = 1.0
+  Electric Conductivity = 52200000.0
+  Relative Permittivity = 1.0
+End
+
+Material 3
+  Relative Permeability = 190.0
+  Electric Conductivity = 1670000.0
+  Relative Permittivity = 1.0
+End
+
+Material 4
+  Relative Permeability = 190.0
+  Electric Conductivity = 0.0
+  Relative Permittivity = 1.0
+  Laminate Stack Model = String "layered"
+  Laminate Thickness = Real 8e-06
+  Laminate Stack Conductivity = Real 1670000
+  Laminate Stacking Factor = Real 0.9411764706
+  Laminate Normal(3) = Real 1 0 0
+End
+
+Material 5
+  Relative Permeability = 190.0
+  Electric Conductivity = 0.0
+  Relative Permittivity = 1.0
+  Laminate Stack Model = String "layered"
+  Laminate Thickness = Real 8e-06
+  Laminate Stack Conductivity = Real 1670000
+  Laminate Stacking Factor = Real 0.9411764706
+  Laminate Normal(3) = Real 0 1 0
+End
+
+Material 6
+  Relative Permeability = 190.0
+  Electric Conductivity = 0.0
+  Relative Permittivity = 1.0
+  Laminate Stack Model = String "layered"
+  Laminate Thickness = Real 8e-06
+  Laminate Stack Conductivity = Real 1670000
+  Laminate Stacking Factor = Real 0.9411764706
+End
+
+Solver 1
+  Equation = "MGDynamics"
+  Variable = "AV[AV re:1 AV im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Linear System Symmetric = True
+  Linear System Solver = "Direct"
+  Linear System Direct Method = "MUMPS"
+  Use Tree Gauge = Logical False
+End
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "AV"
+  Calculate Current Density = Logical True
+  Calculate Nodal Fields = Logical False
+  Calculate Elemental Fields = Logical True
+  Linear System Solver = "Iterative"
+  Linear System Iterative Method = CG
+  Linear System Preconditioning = None
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-8
+End
+
+Solver 3
+  Exec Solver = after all
+  Equation = "SaveScalars"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = scalars.dat
+  Variable 1 = Current Density re e 3
+  Operator 1 = boundary int
+  Variable 2 = Current Density im e 3
+  Operator 2 = boundary int
+  Show Norm Index = 6
+End
+
+Boundary Condition 1
+  Target Boundaries(1) = 1
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  AV re = Real 1.0
+  AV im = Real 0.0
+  Save Scalars = Logical True
+End
+
+Boundary Condition 2
+  Target Boundaries(1) = 2
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  AV re = Real 0.0
+  AV im = Real 0.0
+End
+
+Boundary Condition 3
+  Target Boundaries(1) = 3
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+End
+
+Boundary Condition 5
+  Target Boundaries(1) = 5
+  Thin Sheet Laminate Thickness = Real 8e-06
+  Thin Sheet Relative Permeability = Real 190
+  Thin Sheet Electric Conductivity = Real 1670000
+End
+
+Boundary Condition 6
+  Target Boundaries(1) = 6
+  Thin Sheet Laminate Thickness = Real 8e-06
+  Thin Sheet Relative Permeability = Real 190
+  Thin Sheet Electric Conductivity = Real 1670000
+End
+
+Boundary Condition 7
+  Target Boundaries(1) = 7
+  Thin Sheet Laminate Thickness = Real 8e-06
+  Thin Sheet Relative Permeability = Real 190
+  Thin Sheet Electric Conductivity = Real 1670000
+End
+
+Solver 3 :: Reference Norm = Real 7.08518666E-02
+Solver 3 :: Reference Norm Tolerance = Real 1.0e-5

@@ -1,0 +1,18 @@
+! Two automatic windings in the order inner (100 turns), outer (10 turns), 50 Hz. Beta of both runs 0..0.5, so
+! the raw gradient across is half the normalized one and a measurement that skips the normalization of the
+! winding not initialized yet doubles its across extent (automatic segments inner 6 instead of 4, outer 10
+! instead of 5). The plan must measure with the fields the layout uses: 100 x 4 + 10 x 5 = 450 strands fit.
+! expect: Component 1 foil sheet: 100 cells x 1 sub-layers x 4 segments
+! expect: Component 2 foil sheet: 10 cells x 1 sub-layers x 5 segments
+Simulation 1 :: Frequency = Real 50
+Boundary Condition 7 :: Beta = Real 0.5
+Component 1 :: Number of Turns = Real 100
+Component 1 :: Foil Thickness = Real 0.00008
+Component 1 :: Sheet Cells = Integer 0
+Component 1 :: Sheet Segments = Integer 0
+Component 2 :: Number of Turns = Real 10
+Component 2 :: Foil Thickness = Real 0.0008
+Component 2 :: Sheet Cells = Integer 0
+Component 2 :: Sheet Segments = Integer 0
+Solver 10 :: Reference Norm = Real 6.26685414E-02
+Solver 10 :: Reference Norm Tolerance = Real 1E-6

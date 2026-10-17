@@ -252,6 +252,169 @@ CONTAINS
   END SUBROUTINE GetReluctivityC
 !------------------------------------------------------------------------------
 
+
+!------------------------------------------------------------------------------
+!> Permeability of vacuum: the model constant if given, else 4 pi 1e-7.
+!------------------------------------------------------------------------------
+  FUNCTION VacuumPermeability() RESULT(mu0)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: mu0
+    LOGICAL :: Found
+!------------------------------------------------------------------------------
+    mu0 = GetConstReal(CurrentModel % Constants, 'Permeability of Vacuum', Found)
+    IF (.NOT. Found) mu0 = PI * 4.0d-7
+!------------------------------------------------------------------------------
+  END FUNCTION VacuumPermeability
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Conductance factor of the mid-surface sheet that carries the net current of
+!> one lamination inside a 'layered' stack body: sinh(k d)/(k d). The stack
+!> body already holds mu g over the lamination, which adds i omega mu g d/4 to
+!> the net-current impedance between the two faces; with this factor the face
+!> impedance is the exact one, x coth(x)/(sigma d). Low frequency limit 1.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateSheetFactor(Omega, Mu, Sigma, Thickness) RESULT(f)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: Omega, Sigma, Thickness
+    COMPLEX(KIND=dp), INTENT(IN) :: Mu
+    COMPLEX(KIND=dp) :: f
+!------------------------------------------------------------------------------
+    COMPLEX(KIND=dp) :: kd
+    ! below SeriesLimit sinh(kd)/kd is taken from its series; above OverflowLimit it is capped
+    REAL(KIND=dp), PARAMETER :: SeriesLimit = 1.0d-3, OverflowLimit = 600.0_dp
+!------------------------------------------------------------------------------
+    kd = SQRT(im * Omega * Mu * Sigma) * Thickness
+    IF (ABS(kd) < SeriesLimit) THEN
+      f = 1.0_dp + kd**2 / 6
+    ELSE IF (REAL(kd) > OverflowLimit) THEN
+      CALL Fatal('LaminateSheetFactor', 'Lamination is too thick for its skin depth (k d > 600)!')
+    ELSE
+      f = SINH(kd) / kd
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateSheetFactor
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Skin factor g = tanh(x)/x of one insulated lamination of thickness d, with
+!> x = k d/2 and k = sqrt(i omega mu sigma) (time dependence exp(i omega t)).
+!> mu*g is the mean permeability of the lamination when the tangential field is
+!> the same on both faces; sigma*g is the conductivity that links its net sheet
+!> current to the mean of the two face electric fields.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateSkinFactor(Omega, Mu, Sigma, Thickness) RESULT(g)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: Omega, Sigma, Thickness
+    COMPLEX(KIND=dp), INTENT(IN) :: Mu
+    COMPLEX(KIND=dp) :: g
+!------------------------------------------------------------------------------
+    COMPLEX(KIND=dp) :: x
+    ! below SeriesLimit tanh(x)/x is taken from its series, above TanhOneLimit tanh(x) = 1
+    REAL(KIND=dp), PARAMETER :: SeriesLimit = 1.0d-3, TanhOneLimit = 20.0_dp
+!------------------------------------------------------------------------------
+    x = SQRT(im * Omega * Mu * Sigma) * Thickness / 2
+    IF (ABS(x) < SeriesLimit) THEN
+      g = 1.0_dp - x**2 / 3
+    ELSE IF (REAL(x) > TanhOneLimit) THEN
+      g = 1.0_dp / x
+    ELSE
+      g = TANH(x) / x
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateSkinFactor
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Reads the parameters of the 'layered' laminate stack model of a material:
+!> lamination thickness, lamination conductivity, stacking factor and the
+!> optional lamination normal. Without a normal the stack is treated as bent
+!> (a corner) and the in-plane reluctivity is used in every direction.
+!------------------------------------------------------------------------------
+  SUBROUTINE GetLaminateLayeredParameters(Material, Thickness, Sigma, &
+      StackingFactor, Normal, HasNormal)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: Material
+    REAL(KIND=dp), INTENT(OUT) :: Thickness, Sigma, StackingFactor, Normal(3)
+    LOGICAL, INTENT(OUT) :: HasNormal
+!------------------------------------------------------------------------------
+    REAL(KIND=dp), POINTER :: NormalArray(:,:)
+    LOGICAL :: Found
+    CHARACTER(*), PARAMETER :: Caller = 'GetLaminateLayeredParameters'
+!------------------------------------------------------------------------------
+    Thickness = GetConstReal(Material, 'Laminate Thickness', Found)
+    IF (.NOT. Found .OR. Thickness <= 0.0_dp) &
+        CALL Fatal(Caller, 'Give a positive > Laminate Thickness < for the layered model!')
+    Sigma = GetConstReal(Material, 'Laminate Stack Conductivity', Found)
+    IF (.NOT. Found .OR. Sigma < 0.0_dp) &
+        CALL Fatal(Caller, 'Give > Laminate Stack Conductivity < for the layered model!')
+    StackingFactor = GetConstReal(Material, 'Laminate Stacking Factor', Found)
+    IF (.NOT. Found) StackingFactor = 1.0_dp
+    IF (StackingFactor <= 0.0_dp .OR. StackingFactor > 1.0_dp) &
+        CALL Fatal(Caller, '> Laminate Stacking Factor < must be in (0,1]!')
+
+    Normal = 0.0_dp
+    NormalArray => ListGetConstRealArray(Material, 'Laminate Normal', HasNormal)
+    IF (HasNormal) THEN
+      IF (SIZE(NormalArray,1) < 3) CALL Fatal(Caller, '> Laminate Normal < needs three components!')
+      Normal = NormalArray(1:3,1)
+      IF (SQRT(SUM(Normal**2)) < EPSILON(1.0_dp)) CALL Fatal(Caller, '> Laminate Normal < is a zero vector!')
+      Normal = Normal / SQRT(SUM(Normal**2))
+    END IF
+!------------------------------------------------------------------------------
+  END SUBROUTINE GetLaminateLayeredParameters
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Reluctivity tensor of a stack of insulated laminations ('layered' laminate
+!> stack model): nu_par = 1/(F mu g + (1-F) mu0) in the lamination plane and
+!> nu_perp = F nu + (1-F)/mu0 along the normal. NuMaterial is the (complex)
+!> reluctivity of the lamination material. Without a normal nu_par is used in
+!> every direction.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateLayeredReluctivity(Omega, NuMaterial, Sigma, Thickness, &
+      StackingFactor, Normal, HasNormal) RESULT(Nu)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: Omega, Sigma, Thickness, StackingFactor, Normal(3)
+    COMPLEX(KIND=dp), INTENT(IN) :: NuMaterial
+    LOGICAL, INTENT(IN) :: HasNormal
+    COMPLEX(KIND=dp) :: Nu(3,3)
+!------------------------------------------------------------------------------
+    COMPLEX(KIND=dp) :: mu, g, nu_par, nu_perp
+    REAL(KIND=dp) :: mu0
+    INTEGER :: i, j
+!------------------------------------------------------------------------------
+    mu0 = VacuumPermeability()
+
+    mu = 1.0_dp / NuMaterial
+    g = LaminateSkinFactor(Omega, mu, Sigma, Thickness)
+    nu_par = 1.0_dp / (StackingFactor * mu * g + (1.0_dp - StackingFactor) * mu0)
+    nu_perp = StackingFactor * NuMaterial + (1.0_dp - StackingFactor) / mu0
+
+    Nu = 0.0_dp
+    DO i = 1, 3
+      Nu(i,i) = nu_par
+    END DO
+    IF (HasNormal) THEN
+      DO i = 1, 3
+        DO j = 1, 3
+          Nu(i,j) = Nu(i,j) + (nu_perp - nu_par) * Normal(i) * Normal(j)
+        END DO
+      END DO
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateLayeredReluctivity
+!------------------------------------------------------------------------------
+
 !> Get a real-valued reluctivity tensor. This subroutine seeks values which
 !> are strictly given as reluctivity (giving the permeability is not an option
 !> here).

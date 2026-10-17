@@ -1,0 +1,9 @@
+! 50 Hz, all counts 0: 15 x 40 strands are past the budget of 500, so the
+! largest divisor of 15 with 40 x cells <= 500: 5 cells (5 given explicitly: the same
+! power). The stack skin depth rule of before gave 3 cells: 1.352682941517E-03 W.
+! expect: strands wanted 600 of 500, this component 500, skin depth rule 3 cells, 5 cells
+! expect: foil sheet: 5 cells x 1 sub-layers x 40 segments
+! expect: Sheet Cells = 5, Sheet Segments = 40 (406 block elements)
+Simulation 1 :: Frequency = Real 50
+Solver 9 :: Reference Norm = Real 1.352972831801E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-6
