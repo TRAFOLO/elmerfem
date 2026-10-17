@@ -226,6 +226,32 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   `Nonlinear System Linesearch` or `Nonlinear System Compute Change in Scaled System` (both stop
   with an error). Tests: `mgdyn_bh_flux_density` (static, iterative),
   `mgdyn_harmonic_flux_density` (harmonic, linear: stops at iteration 2).
+- MUMPS with a gauge-free A-V system (DEV-1564). Without a gauge the A-V system is singular.
+  `Mumps Null Pivot Detection` can then pin a physical pivot that falls below its threshold,
+  which gives a wrong solution without an error; without it MUMPS has to delay the singular
+  pivots, which can cost much time and memory or stop with `INFOG(1) = -17`, and in a Newton
+  loop the gauge part of the solution can grow from iteration to iteration.
+  `Mumps Diagonal Regularization = alpha` adds alpha*|a_ii| to the diagonal of the matrix
+  MUMPS factorizes (real and complex, distributed: each rank shifts its partial entry), and
+  `Mumps Iterative Refinement` (on with a shift) refines against the unshifted matrix, x <- x +
+  F^-1 (b - A x): at least two corrections, then on while the componentwise backward error,
+  measured with the row scales of the first solution, halves (at most `Mumps Refinement Max
+  Iterations`, 10). It must end below `Mumps Refinement Tolerance` (1e-11; in the comparison
+  tests below it ends between 2e-16 and 2e-14): a correction that raises the error tenfold, or
+  a later one that raises it above the tolerance, is taken back, and a stop above the tolerance
+  warns. An inconsistent system (e.g. a coil current that is not divergence free) cannot be
+  refined below the level of its inconsistency.
+  `Mumps Regularize Nodal Dofs = False` leaves the rows of the nodal dofs unshifted. The
+  harmonic A-V solver sets it with its electrodynamics or Darwin model: there the potential
+  carries the capacitive field, which a shift of its rows next to a conductor would disturb
+  (the conductive part of such a row is many orders of magnitude larger), so the potential must
+  be fixed somewhere (a boundary value, an electrode); without them the potential exists in
+  conductors only and the shift of its rows also fixes the potential constant of a floating
+  conductor. In the tests the shifted solutions equal the unshifted direct solve or the
+  iterative solver converged to 1e-12 or below, in 2 to 5 corrections. Tests:
+  `mgdyn_harmonic_wire_mumps_regularization` (and `_ed`, the edge-only shift),
+  `circuits_harmonic_massive_mumps`, `WinkelBmPoissonMumpsRegularized` (real systems),
+  `robustness_mumps_refinement` (the warnings).
 
 ## Building the distributed bundle
 

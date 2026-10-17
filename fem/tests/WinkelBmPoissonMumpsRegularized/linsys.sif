@@ -1,0 +1,5 @@
+Linear System Solver = Direct
+Linear System Direct Method = "Mumps"
+! A shift far larger than needed: without the iterative refinement the solution would
+! be off; with it the norm equals that of WinkelBmPoissonMumps.
+Mumps Diagonal Regularization = Real 1.0e-6
