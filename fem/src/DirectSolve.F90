@@ -2009,8 +2009,14 @@ CONTAINS
 
 !------------------------------------------------------------------------------
 !> The fixed scale of every global row for the refinement: its activity
-!> |A||x| + |b| at the first solution, but at least 1e-12 of the largest
-!> activity of its block (MumpsRowBlocks). False when an activity is not finite.
+!> |A||x| + |b| at the first solution. A row whose activity is below 1e-12 of
+!> the largest one of its block (MumpsRowBlocks) is measured against that
+!> largest activity instead (a block-relative fallback after the normwise part
+!> of Arioli, Demmel and Duff's sparse backward error): there the residual can
+!> be rounding noise in a part of the solution that is zero for practical
+!> purposes (e.g. a circuit branch without current), and it is accepted up to
+!> the tolerance times the block's largest activity. False when an activity is
+!> not finite.
 !------------------------------------------------------------------------------
   FUNCTION MumpsRowScale( Activity, GBlock, Scale ) RESULT( Valid )
 !------------------------------------------------------------------------------
@@ -2030,7 +2036,11 @@ CONTAINS
     END DO
     DO i=1,SIZE(Activity)
       k = MAX( 1, MIN( 3, GBlock(i) ) )
-      Scale(i) = MAX( Activity(i), 1.0e-12_dp * amax(k) )
+      IF ( Activity(i) >= 1.0e-12_dp * amax(k) ) THEN
+        Scale(i) = Activity(i)
+      ELSE
+        Scale(i) = amax(k)
+      END IF
     END DO
 !------------------------------------------------------------------------------
   END FUNCTION MumpsRowScale
