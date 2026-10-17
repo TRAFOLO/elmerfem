@@ -1,0 +1,7 @@
+   Homogenization Ladder Order = Integer 4
+   Nu 11 y0 = Real 895774.715
+   Nu 11 Residues(4) = Real -30000.0 -30000.0 -20000.0 -20000.0
+   Nu 11 Taus(4) = Real 0.0002 0.0002 0.002 0.002
+   Nu 22 y0 = Real 895774.715
+   Nu 22 Residues(4) = Real -30000.0 -30000.0 -20000.0 -20000.0
+   Nu 22 Taus(4) = Real 0.0002 0.0002 0.002 0.002

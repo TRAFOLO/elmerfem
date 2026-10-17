@@ -999,6 +999,23 @@ MODULE Types
          N_j, coilthickness, i_multiplier_re, i_multiplier_im, nofturns, &
          VoltageFactor=1._dp, SymmetryCoeff=1._dp
     INTEGER :: polord, nofcnts, BodyId, ComponentId
+    ! flat wire: turn cells along the stacking direction and across it
+    INTEGER :: nStack = 1, nAcross = 1
+    LOGICAL :: StackAlongAlpha = .FALSE.
+    REAL(KIND=dp) :: FillFactor = 1._dp
+    ! foil sheet: cells along Alpha, segments along Beta, foils per cell
+    INTEGER :: nCells = 1, nSegments = 1, foilsPerCell = 1
+    ! foil sheet: strand layers through the thickness of one turn. The cells
+    ! along the stack are subdivided nSublayers times, but the sub-layers of a
+    ! turn share its voltage dof and its current constraint.
+    INTEGER :: nSublayers = 1
+    ! foil sheet: scale of the strand current dofs, c_kj = SigmaRef * y_kj, so
+    ! that the unknowns y_kj are voltages like V_k instead of sigma*voltage
+    REAL(KIND=dp) :: SigmaRef = 1._dp
+    ! foil sheet, per strand: g = int t.grad(W) dV, the strand flux for a unit
+    ! strand dof (also used to detect empty strands), and gres = int |t|^2 dV,
+    ! its resistive weight; together they give the DC resistance
+    REAL(KIND=dp), ALLOCATABLE :: StrandWeight(:), StrandResWeight(:)
     INTEGER, POINTER :: ElBoundaries(:) => NULL()
     INTEGER, POINTER :: BodyIds(:) => NULL()
     CHARACTER(:), ALLOCATABLE :: CoilType, ComponentType

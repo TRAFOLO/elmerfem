@@ -1,0 +1,88 @@
+! htc_udf smoke test (validation gate 6).
+! 2D block (heateq test mesh, ~2x1 m) with a uniform volumetric source and a
+! temperature-dependent convective BC evaluated by htc_udf per nonlinear
+! iteration -- the exact wiring the TRAFOLO app emits (DEV-1396).
+! Pass criteria (checked by the gate runner from htc_smoke.dat):
+!   max(Htc) in [1.5, 15] W/m2K   (vertical plate, Lc=0.1 m, still air)
+!   max(Temperature) in (25, 200) C
+
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "Mesh"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = "Cartesian 2D"
+  Simulation Type = "Steady State"
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+End
+
+Constants
+  Stefan Boltzmann = 5.67e-08
+End
+
+Body 1
+  Body Force = 1
+  Equation = 1
+  Material = 1
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+Solver 1
+  Equation = "heat"
+  Variable = "Temperature"
+  Procedure = "HeatSolve" "HeatSolver"
+  Linear System Solver = "Iterative"
+  Linear System Iterative Method = "BiCGStab"
+  Linear System Max Iterations = 500
+  Linear System Convergence Tolerance = 1.0e-10
+  Linear System Preconditioning = "ILU0"
+  Steady State Convergence Tolerance = 1.0e-05
+  Stabilize = True
+  Nonlinear System Convergence Tolerance = 1.0e-06
+  Nonlinear System Max Iterations = 30
+  Nonlinear System Relaxation Factor = 0.8
+  Exported Variable 1 = Htc
+End
+
+Solver 2
+  Equation = "scalars"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = "htc_smoke.dat"
+  Variable 1 = Htc
+  Operator 1 = max
+  Variable 2 = Temperature
+  Operator 2 = max
+End
+
+Material 1
+  Density = real 1
+  Heat Conductivity = real 1.0
+  Heat Capacity = real 1
+End
+
+Body Force 1
+  Heat Source = real 1000.0
+End
+
+Boundary Condition 1
+  Name = "convective"
+  Target Boundaries(6) = 1 2 3 4 5 6
+  External Temperature = Real 25.0
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+  T_ambient = Real 25.0
+  NatOrient = Integer 3
+  FcdOrient = Integer 0
+  Lc_nat = Real 0.1
+  Lc_forced = Real 0.0
+  theta_deg = Real 0.0
+  channel_gap = Real 0.0
+  channel_length = Real 0.0
+  velocity_mag = Real 0.0
+End

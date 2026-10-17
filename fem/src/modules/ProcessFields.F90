@@ -34,6 +34,7 @@
 ! *                 April 30, 2026 - added HAm magnitude for harmonic cases
 ! *                                  added iGSE assuming only major loop
 ! *                                  replaced BTmax with native spatial DeltaB tracking
+! *                 September 30, 2026 - Steinmetz thermal factor per node (DEV-1537)
 ! *
 ! *****************************************************************************/
 
@@ -123,7 +124,7 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
   REAL(KIND=dp) :: Told = 0.0d0, Tstart = 0.0d0
   REAL(KIND=dp), POINTER :: VarLCk1(:), VarLC2k2(:), VarFdP(:), VarFqP(:),  &
                             VarDens(:), dBdt(:), VarBoldX(:), VarBoldY(:),  &
-                            VarBoldZ(:)
+                            VarBoldZ(:), VarTF(:)
 
   TYPE(Variable_t),POINTER :: VarJH, VarBT, TmpVar, VarLoadWkg, VarLoadWm3, &
                               VarDeltaB, VarLoadWkgAvg, VarLoadWm3Avg, VarLossLin, &
@@ -136,7 +137,7 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
   CHARACTER(LEN=15) :: coeffStr
   CHARACTER(LEN=MAX_NAME_LEN) :: LossMethodStr
 
-  SAVE Visit, Mesh, VarLCk1, VarLC2k2, VarFdP, VarFqP, VarDens, LossCoeff, &
+  SAVE Visit, Mesh, VarLCk1, VarLC2k2, VarFdP, VarFqP, VarDens, VarTF, LossCoeff, &
        LossCoeff2, Told, Tstart, VarBoldX, VarBoldY, VarBoldZ, dBdt, LossMethodStr
 
 !------------------------------------------------------------------------------
@@ -186,6 +187,24 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
         VarDens(VarLoadWkg % Perm(Element % DGIndexes ) ) = 1.2d0
       END IF
     END DO
+
+    ! Steinmetz thermal correction poly(T), per node at the current Temperature field (the initial
+    ! condition, or the previous thermal solve restarted for temperature iterations > 1). It can't
+    ! live in the Harmonic Loss coefficients: CalcFields evaluates those with ListGetFun(..., Freq),
+    ! which puts the frequency where the temperature should be (DEV-1537).
+    ALLOCATE( VarTF(NSIZE) )
+    VarTF = 1.0d0
+    DO i = 1, GetNOFActive()
+      Element => Mesh % Elements(i)
+      Material => GetMaterial( Element )
+      IF ( ListCheckPresent( Material, 'Harmonic Loss Temperature Factor' ) ) THEN
+        VarTF(VarLoadWkg % Perm(Element % DGIndexes ) ) = &
+            GetReal( Material, 'Harmonic Loss Temperature Factor', Found, UElement = Element )
+      END IF
+    END DO
+    WRITE(Message, '(A,ES12.5,A,ES12.5)') 'Core loss temperature factor: min ', MINVAL(VarTF), &
+        ', max ', MAXVAL(VarTF)
+    CALL Info('ProcessFields', Message, Level=3 )
   END IF
 
   ! Reset LoadWkg for the current timestep and unconditionally add Joule & Proximity Loss if present
@@ -298,8 +317,10 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
             LossCoeff2 = 0.0d0
           END IF
 
-          VarLCk1(VarLoadWkg % Perm(Element % DGIndexes ) ) = LossCoeff * k1
-          VarLC2k2(VarLoadWkg % Perm(Element % DGIndexes ) ) = LossCoeff2 * k2
+          VarLCk1(VarLoadWkg % Perm(Element % DGIndexes ) ) = LossCoeff * k1 * &
+              VarTF(VarLoadWkg % Perm(Element % DGIndexes ) )
+          VarLC2k2(VarLoadWkg % Perm(Element % DGIndexes ) ) = LossCoeff2 * k2 * &
+              VarTF(VarLoadWkg % Perm(Element % DGIndexes ) )
           VarFdP(VarLoadWkg % Perm(Element % DGIndexes ) ) = FieldPower
           VarFqP(VarLoadWkg % Perm(Element % DGIndexes ) ) = FreqPower
         END DO
@@ -496,7 +517,7 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
     VarLossQuad => VariableGet( Mesh % Variables, 'harmonic loss quadratic e', ThisOnly = .TRUE. )
 
     IF (ASSOCIATED( VarLossLin ) .AND. ASSOCIATED( VarLossQuad ) ) THEN
-      VarLoadWkg % Values = VarLoadWkg % Values + VarLossLin % Values + VarLossQuad % Values
+      VarLoadWkg % Values = VarLoadWkg % Values + VarTF * (VarLossLin % Values + VarLossQuad % Values)
     ELSE
       CALL Info('ProcessFields','Core loss will not be computed!', Level=3 )
     END IF

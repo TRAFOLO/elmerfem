@@ -1,0 +1,2 @@
+# Bash runs these in the MSYS2 shell; a CRLF checkout would put carriage returns into the generated Makefile.inc.
+*.sh text eol=lf

@@ -1310,6 +1310,7 @@ Solver:Real:        'Initial Volume'
 Solver:Real:        'Intersect Epsilon'
 Solver:Real:        'Isosurface Value'
 Solver:Real:        'Isosurface Values'
+Solver:Real:        'Lagrange Multiplier Relaxation Factor'
 Solver:Real:        'Levelset Bandwidth'
 Solver:Real:        'Limiter Load Tolerance'
 Solver:Real:        'Limiter Value Tolerance'
@@ -1389,6 +1390,7 @@ Solver:String:      'Capacitance Matrix Filename'
 Solver:String:      'Comment'
 Solver:String:      'Cost Function Name'
 Solver:String:      'Default Parallel Operator'
+Solver:String:      'Direction Method'
 Solver:String:      'Displacement Field Name'
 Solver:String:      'Displacement Variable Name'
 Solver:String:      'Eigen System Select'
@@ -1483,7 +1485,9 @@ ic:real:            'av re {e}'
 ic:real:            'av re'
 ic:real:            'av {e}'
 ic:real:            'av'
+material:real:      'laminate normal'
 material:real:      'laminate stack conductivity'
+material:real:      'laminate stacking factor'
 material:real:      'laminate thickness'
 material:real:      'permeability'
 material:string:    'laminate stack model'
@@ -1658,6 +1662,118 @@ Component:Real:      'Nu 22 Sigma'
 Component:Real:      'Sigma 33 y0'
 Component:Real:      'Sigma 33 alpha'
 Component:Real:      'Sigma 33 Sigma'
+! The stranded coil skin ladder state of the step, q = Gain I + History,
+! written by the circuits solver for MagnetoDynamicsCalcFields.
+Component:Real:      'Stranded Skin State Gain'
+Component:Real:      'Stranded Skin State History'
+! Foster form of the same ladders: y0 + sum_k r_k/(1 + s T_k). Accepted
+! alongside the alpha/Sigma triplet, which stays valid for order 1.
+Component:Real:      'Nu 33 y0'
+Component:Real:      'Nu 11 Residues'
+Component:Real:      'Nu 11 Taus'
+Component:Real:      'Nu 22 Residues'
+Component:Real:      'Nu 22 Taus'
+Component:Real:      'Nu 33 Residues'
+Component:Real:      'Nu 33 Taus'
+! Nodal scalar potential of the AV solver inside a coil component. Required for
+! DC / low-frequency foil and flat wire runs (auto-enabled at zero frequency).
+Component:Logical:   'Activate Constraint'
+Component:Logical:   'Automatic Electrode BC'
+Component:Integer:   'Electrode Boundaries'
+Component:Real:      'Electrode Area'
+Component:Real:      'Circuit Equation Voltage Factor'
+Component:Integer:   'Circuit Voltage Variable Id'
+! Take the coil direction field from a precomputed vector variable instead of
+! from grad(W). Accepted on the Component and on the circuits Solver section.
+Component:Logical:   'Coil Use W Vector'
+Component:String:    'W Vector Variable Name'
+Solver:Logical:      'Coil Use W Vector'
+Solver:String:       'W Vector Variable Name'
+! Closed (full 360 degree) coil: no electrodes and no single valued W, so the
+! direction field is the CoilSolver cut potential normalized to unit
+! circulation. The multipliers and the measured circulation are written by
+! Elmer itself, not by the SIF.
+Component:Logical:   'Coil Closed'
+Component:Real:      'Coil Potential Multiplier'
+Component:Real:      'Coil Potential Multiplier B'
+Component:Real:      'Coil Circulation'
+! Keep the Dirichlet layer of the cut at one crossing of the cut plane, the
+! piece with the largest global node index or, with "Select Min Coil Cut", the
+! smallest, unless that piece is no clean cross section of the wire: another
+! one of the half plane is kept then, or without "Coil Tangent" other half
+! planes are taken. A closed solid coil of several turns needs it: it is then
+! cut once and carries one series current. The flag is one per CoilSolver: set
+! in the Solver section or in any one Component, it applies to every coil that
+! CoilSolver cuts. The CoilSolver writes "Single Coil Cut" into each Component
+! it applied it to, which is where the circuits solver reads it.
+Solver:Logical:      'Single Coil Cut'
+Solver:Logical:      'Select Min Coil Cut'
+Component:Logical:   'Single Coil Cut'
+! Direction in the coil plane of the half plane that holds branch A of the cut
+! (branch B takes the opposite one). Given, the cut is not turned elsewhere.
+Solver:Real:         'Coil Tangent'
+Component:Real:      'Coil Tangent'
+! Relative difference of the loop current the two branches of the cut of a
+! closed massive coil may show before the run stops. Unset, it is half the
+! share of the loop resistance the two cut layers take, between 1 % and 3 %.
+Component:Real:      'Coil Cut Disagreement Limit'
+! Flat wire winding (per-turn cell model).
+Component:Integer:   'Turns Across'
+Component:String:    'Stacking Direction'
+Component:Real:      'Fill Factor'
+Component:Real:      'Conductor Thickness'
+Component:Real:      'Conductor Width'
+! Resolved layout, written back into the Component by Elmer.
+Component:Real:      'Flat Wire Fill Factor'
+Component:Integer:   'Flat Wire Stack Cells'
+Component:Integer:   'Flat Wire Across Cells'
+Component:Logical:   'Flat Wire Stack Along Alpha'
+! Foil sheet winding: conducting sheets, not a conducting continuum.
+Component:Integer:   'Sheet Cells'
+Component:Integer:   'Sheet Segments'
+! Strand layers through the thickness of one turn, 0 = automatic.
+Component:Integer:   'Sheet Sublayers'
+Component:Integer:   'Foil Sheet Sublayers'
+! Fallback quadrature for coil meshes that are not linear tetrahedra, where the
+! exact strand clipping does not apply. Unset (0) selects the clipping.
+Component:Integer:   'Sheet Integration Points'
+! Physics the SIF writer supplies; Elmer derives tau0, the sheet conductivity
+! and the in-plane reluctivity from these.
+Component:Real:      'Foil Thickness'
+Component:Real:      'Sheet Conductivity'
+Component:Real:      'Foil Sheet Tau0'
+Component:Real:      'Foil Sheet Sigma DC'
+Component:Logical:   'Foil Sheet Derive Sigma 33'
+Component:Logical:   'Foil Sheet Derive Nu'
+Component:Logical:   'Foil Sheet Sigma Varies'
+! 'Stacking Direction' of a foil sheet, published for the solvers.
+Component:Logical:   'Foil Sheet Stack Along Alpha'
+Component:Real:      'Foil Sheet Stack Extent'
+Component:Real:      'Foil Sheet Element Size'
+! Resolved layout and strand scaling, written back into the Component by Elmer.
+Component:Integer:   'Foil Sheet Cells'
+Component:Integer:   'Foil Sheet Segments'
+Component:Integer:   'Foil Sheet Foils Per Cell'
+Component:Real:      'Foil Sheet Sigma Ref'
+Component:Real:      'Foil Sheet Dof Scale'
+Component:Real:      'Foil Sheet Direction Sign'
+! Ends of Alpha and of Beta over a foil sheet or flat wire winding, which the
+! kernels map onto 0..1 (a winding of a touching chain spans k-1..k).
+Component:Real:      'Foil Sheet Alpha Range'
+Component:Real:      'Foil Sheet Beta Range'
+! Marks the transient Xi variables as already declared by the AV solver.
+Solver:Logical:      'Foil Sheet Xi Declared'
+! Transient strand skin ladder.
+Component:Integer:   'Sheet Skin Ladder Order'
+Component:Logical:   'Homogenization Model'
+Component:Real:      'Nu 11'
+Component:Real:      'Nu 11 im'
+Component:Real:      'Nu 22'
+Component:Real:      'Nu 22 im'
+Component:Real:      'Nu 33'
+Component:Real:      'Nu 33 im'
+Component:Real:      'Sigma 33'
+Component:Real:      'Sigma 33 im'
 !!!!!!!! TRAFOTEK KEYWORDS
 Material:Real:       'rho0'
 Material:Real:       'rho1'
@@ -1705,6 +1821,7 @@ solver:real:         'coil center'
 solver:real:         'coil normal'
 bc:real:             'air gap length'
 bc:real:             'air gap relative permeability'
+bc:real:             'thin sheet laminate thickness'
 component:integer:   'master bodies'
 component:integer:   'master boundaries'
 component:string:    'master bodies name'
@@ -1828,6 +1945,18 @@ simulation:real:     'adaptive increase coefficient'
 solver:integer:      'displacement variable eigenmode'
 solver:integer:      'linear system ilu order'
 solver:integer:      'mumps percentage increase working space'
+solver:logical:      'mumps null pivot detection'
+solver:real:         'mumps null pivot tolerance'
+solver:logical:      'mumps sequential root'
+solver:logical:      'mumps drop zeros'
+solver:string:       'mumps ordering'
+solver:logical:      'mumps residual check'
+solver:real:         'mumps residual tolerance'
+solver:real:         'mumps diagonal regularization'
+solver:logical:      'mumps regularize nodal dofs'
+solver:logical:      'mumps iterative refinement'
+solver:integer:      'mumps refinement max iterations'
+solver:real:         'mumps refinement tolerance'
 solver:integer:      'number of particle groups'
 solver:logical:      'calculate coil current'
 solver:logical:      'mesh velocity first zero'

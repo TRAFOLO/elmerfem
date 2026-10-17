@@ -1,0 +1,6 @@
+! 0 Hz: one cell. 15 cells given explicitly: 1.324900078214E-03 W.
+! expect: foil sheet: 1 cells x 1 sub-layers x 40 segments
+! expect: Sheet Cells = 1, Sheet Segments = 40 (406 block elements)
+Simulation 1 :: Frequency = Real 0
+Solver 9 :: Reference Norm = Real 1.324946283789E-03
+Solver 9 :: Reference Norm Tolerance = Real 1E-6

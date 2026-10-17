@@ -1,0 +1,24 @@
+! y0 = 0, ramp I = 1e6 t A, BDF2, 0.2 us steps
+$ y0 = 0
+$ alpha = 11819380
+$ sigma = 3.981e-07
+$ Order = 2
+$ Nsteps = 12
+$ function dtfun(t) { _dtfun = 2e-07 }
+$ f0 = 2000000
+$ function isrc(t) { _isrc = 1000000*t }
+$ Tavg = 0
+! Discrete values of the ladder (DEV-1549 predictions): heat average, ladder voltage,
+! coil voltage, circuit heat, field heat and diagonal of the last step
+$ Pavg = 9.6293502164e-01
+$ Vskin = 2.5469406770e+00
+$ Vcomp = 3.9009834353e+03
+$ Plast = 5.2429785568e+00
+$ PJlast = 2.5599257191e+00
+$ Rdiag = 3.6279864206e+00
+$ VcompTol = 1.000e-03
+! Analytic references and their tolerances (SaveScalars norms are absolute values)
+$ Pref = 9.6293502164e-01
+$ PrefTol = 1.000e-06
+$ Vref = 2.5469406770e+00
+$ VrefTol = 1.000e-06

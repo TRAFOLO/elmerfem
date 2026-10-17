@@ -608,7 +608,20 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp), ALLOCATABLE :: WBasis(:,:), RotWBasis(:,:), Basis(:), lBasis(:), &
                 dBasisdx(:,:)
    REAL(KIND=dp), ALLOCATABLE :: SOL(:,:), PSOL(:), ElPotSol(:,:), C(:)
-   REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), NF_ip(:,:)
+   REAL(KIND=dp), ALLOCATABLE :: Wbase(:), alpha(:), beta(:), NF_ip(:,:)
+   INTEGER :: FwStack, FwAcross
+   LOGICAL :: FwStackAlongAlpha, FsStackAlongAlpha
+   INTEGER :: FsCells, FsSegments, FsSublayers, FsK, FsJ, FsDof, FsStrand
+   REAL(KIND=dp) :: FsFillFactor
+   REAL(KIND=dp) :: FsSigmaRef, FsSign, FsDofScale, FsY, FsSigmaDc
+   ! Transient foil sheet strand skin ladder energy, A y^2 + B_j y + C_j.
+   LOGICAL :: SheetSkinStored
+   REAL(KIND=dp) :: SheetSkinA
+   REAL(KIND=dp), POINTER :: SheetSkinB(:,:), SheetSkinC(:,:)
+   TYPE(FoilSheetQuad_t) :: FsQ
+   LOGICAL :: FsExact
+   INTEGER :: nIp
+   REAL(KIND=dp) :: uIp, vIp, wIp
    REAL(KIND=dp), ALLOCATABLE :: omega_velo(:,:), lorentz_velo(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: Magnetization(:,:), BodyForceCurrDens(:,:)
    COMPLEX(KIND=dp), ALLOCATABLE :: R_Z(:), PR(:)
@@ -616,11 +629,39 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    REAL(KIND=dp) :: s,Norm, Mult
    REAL(KIND=dp) :: B(2,3), E(2,3), JatIP(2,3), VP_ip(2,3), JXBatIP(2,3), CC_J(2,3), HdotB, LMSol(2)
    REAL(KIND=dp) :: ldetJ,detJ, C_ip, ST(3,3), Omega, ThinLinePower, Power, Energy(3), w_dens
+   REAL(KIND=dp) :: HomogPower   ! Im(Nu) proximity loss, a part of Power
+   INTEGER :: HomogPowerSeen     ! 1 where a foil sheet contributed to it
+   REAL(KIND=dp) :: SheetPower   ! transient foil sheet Joule loss, a part of Power
+   REAL(KIND=dp) :: LamStackPower   ! Im(Nu) loss of 'layered' laminate stacks, a part of Power
+   REAL(KIND=dp) :: LamSheetPower   ! loss of their lamination sheets, a part of the thin sheet power
+   INTEGER :: LamStackPowerSeen     ! 1 where a layered laminate stack contributed to it
+   LOGICAL :: LayeredLaminate, LamLayerHasNormal, LamSheet
+   REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
+   REAL(KIND=dp) :: SheetLamThick, SheetMu, SheetImagCond, LamSheetEnergy
+   COMPLEX(KIND=dp) :: SheetFactor
+   INTEGER :: SheetPowerSeen     ! 1 where a transient foil sheet contributed to it
    REAL(KIND=dp) :: localThickness
-   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ValAtIP
+   REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ModeLoss(2), BSq(2), AxisSq(2), &
+       BRe(3), BIm(3), BScale
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
+   ! |w|^2 of a stranded coil's winding vector before it is normalized, the
+   ! weight of its circuit terms (K, the integral of N_j^2 |w|^2).
+   REAL(KIND=dp) :: WindingWsq
+   ! Stranded coil skin ladder: stage coefficient L tau, state factors, stage heat,
+   ! inductor current, and the energy density it (or a foil sheet strand's skin
+   ! reactance) stores outside B.
+   REAL(KIND=dp) :: SkinLt, SkinGain, SkinHist, SkinHeat, SkinL, SkinTau, SkinChi, SkinEnergy
+   ! Homogenized blocks: harmonic litz and foil sheet, and the transient ladder of
+   ! either, as in WhitneyAVSolver.
+   LOGICAL :: StrandedHarmonicHomog, SheetHarmonicHomog, StrandedTransientHomog
+   ! The circuit holds the reactance of the litz sigma 33 (no explicit 'Resistance').
+   LOGICAL :: SkinReactanceStored
+   ! The transient ladder: local directions HomogDir carry poles HomogR and states HomogXi.
+   INTEGER :: HomogOrder, HomogDir(2)
+   REAL(KIND=dp) :: HomogY0(3), HomogR(MaxHomogLadderOrder,2), HomogXi(MaxHomogLadderOrder,2)
+   REAL(KIND=dp) :: RotMip(3,3)
    REAL(KIND=dp) :: R_ip, mu_r
    REAL(KIND=dp), SAVE :: mu0 = 1.2566370614359173e-6_dp
 
@@ -680,6 +721,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
    REAL(KIND=dp) :: ItoJCoeff=0, CircuitCurrent=0, CircEqVoltageFactor=0
    TYPE(ValueList_t), POINTER :: CompParams
+   LOGICAL :: ConstraintActive   ! DEV-1491: component solves the nodal potential too
    REAL(KIND=dp) :: DetF, F(3,3), G(3,3), GT(3,3)
    REAL(KIND=dp), ALLOCATABLE :: EBasis(:,:), CurlEBasis(:,:) 
 
@@ -965,11 +1007,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 !------------------------------------------------------------------------------
    ALLOCATE( WBasis(n,3), RotWBasis(n,3), Basis(n), dBasisdx(n,3), lBasis(n) )
    ALLOCATE( SOL(2,n), PSOL(n), ElPotSol(1,n), C(n) )
-   ALLOCATE( Wbase(n), alpha(n), NF_ip(n,3) )
+   ALLOCATE( Wbase(n), alpha(n), beta(n), NF_ip(n,3) )
    ALLOCATE( PR(n), omega_velo(3,n), lorentz_velo(3,n) )
    ALLOCATE( Magnetization(3,n), BodyForceCurrDens(3,n), R_Z(n) )
 !------------------------------------------------------------------------------
-   Wbase = 0; alpha=0; NF_ip=0
+   Wbase = 0; alpha=0; beta=0; NF_ip=0
    SOL = 0._dp; PSOL=0._dp
 
    IF ( ASSOCIATED(ESP) ) THEN
@@ -1030,7 +1072,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    END IF
 
    HomogenizationLoss = ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL)
-   IF (HomogenizationLoss) ALLOCATE( Nu_el(3,3,n) )
+   ALLOCATE( Nu_el(3,3,n) )   ! also used by the foil sheet homogenization
 
    VtuStyle = .FALSE.
    cdofs = 1
@@ -1083,7 +1125,13 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    C = 0._dp; PR=0._dp
    Magnetization = 0._dp
 
-   Power = 0._dp; Energy = 0._dp
+   Power = 0._dp; Energy = 0._dp; HomogPower = 0._dp; HomogPowerSeen = 0
+   LamStackPower = 0._dp; LamStackPowerSeen = 0; LamSheetPower = 0._dp; LamSheetEnergy = 0._dp
+   SheetPower = 0._dp; SheetPowerSeen = 0
+   ! Foil sheet layout of the element at hand; read per element in the coil
+   ! type branch below, but the reconstruction runs for every coil type.
+   FsCells = 1; FsSegments = 1; FsSublayers = 1
+   FsFillFactor = 1._dp; FsSigmaRef = 1._dp; FsSign = 1._dp; FsDofScale = 1._dp
    IF(.NOT. ConstantMassMatrixInUse ) THEN
      CALL DefaultInitialize()
    END IF
@@ -1197,15 +1245,32 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      CALL GetPermittivity(Material,PR,n)
 
      CoilBody = .FALSE.
+     SkinLt = 0._dp
+     SkinL = 0._dp
+     SkinEnergy = 0._dp
+     StrandedHarmonicHomog = .FALSE.
+     SheetHarmonicHomog = .FALSE.
+     SkinReactanceStored = .FALSE.
+     StrandedTransientHomog = .FALSE.
+     SheetSkinStored = .FALSE.
      CompParams => GetComponentParams( Element )
      CoilType = ''
      RotM = 0._dp
      CircEqVoltageFactor = 1._dp
+     ConstraintActive = .FALSE.
      IF (ASSOCIATED(CompParams)) THEN
        CoilType = GetString(CompParams, 'Coil Type', Found)
        IF (Found) CoilBody = .TRUE.
        CircEqVoltageFactor = GetConstReal(CompParams, 'Circuit Equation Voltage Factor', Found)
        IF (.NOT. Found) CircEqVoltageFactor = 1._dp
+       ! DEV-1491: when the component runs with the nodal scalar potential
+       ! ('Activate Constraint', auto-enabled at 0 Hz by the circuits solver),
+       ! -grad v is a genuine part of E in the coil and must be included here.
+       ! Before: the coil branches used only -i*omega*a - V(x)*grad W, which was
+       ! right when the nodal dofs were eliminated but underestimates E (and the
+       ! Joule loss) once they are solved for. Limitation: gated on the keyword,
+       ! so output for existing (unset) cases is unchanged.
+       ConstraintActive = GetLogical(CompParams, 'Activate Constraint', Found)
      END IF 
  
      !------------------------------------------------------------------------------
@@ -1231,7 +1296,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            WvecInitHandle = .FALSE.
          END IF
        ELSE
-         Call GetWPotential(Wbase)
+         CALL GetCoilWBase(Element, n, CompParams, Wbase)
        END IF
   
        SELECT CASE (CoilType)
@@ -1244,8 +1309,14 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
 
          HomogenizationModel = GetLogical(CompParams, 'Homogenization Model', Found)
+         ! The circuit takes the homogenized sigma 33 whether or not the loss is
+         ! output, so the fields and the energy here do too.
+         StrandedHarmonicHomog = HomogenizationModel .AND. .NOT. RealField
+         ! An explicit 'Resistance' replaces the sigma 33 impedance in the circuit.
+         SkinReactanceStored = StrandedHarmonicHomog .AND. &
+             .NOT. ListCheckPresent(CompParams, 'Resistance')
 
-         IF (HomogenizationLoss .and. HomogenizationModel) THEN
+         IF (StrandedHarmonicHomog) THEN
            BLOCK
              REAL(KIND=dp) :: nu_11(n), nuim_11(n), &
                               nu_22(n), nuim_22(n), &
@@ -1266,7 +1337,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              nuim_33 = 0._dp
              nu_33 = GetReal(CompParams, 'nu 33', Found)
              nuim_33 = GetReal(CompParams, 'nu 33 im', FoundIm)
-             IF ( .NOT. Found .AND. .NOT. FoundIm ) CALL Fatal ('LocalMatrix', 'Homogenization Model nu 33 not found!')
+             ! A 2D field has no B_z, so 2D needs no nu 33 (as in MagnetoDynamics2D).
+             IF ( .NOT. Found .AND. .NOT. FoundIm .AND. dim == 3 ) &
+                 CALL Fatal ('LocalMatrix', 'Homogenization Model nu 33 not found!')
              Nu_el = CMPLX(0.0d0, 0.0d0, kind=dp)
              Nu_el(1,1,1:n) = nu_11(1:n) + im * nuim_11(1:n)
              Nu_el(2,2,1:n) = nu_22(1:n) + im * nuim_22(1:n)
@@ -1282,30 +1355,54 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              Tcoef(1,1,1:n) = sigma_33(1:n) + im * sigmaim_33(1:n) ! stranded uses only sigma 33
              Tcoef(2,2,1:n) = Tcoef(1,1,1:n)
              Tcoef(3,3,1:n) = Tcoef(1,1,1:n)
-             IF (dim == 3) THEN
-               CALL GetElementRotM(Element, RotM, n)
-               DO k = 1,n
-                 Nu_el(1:3,1:3,k) = MATMUL(MATMUL(RotM(1:3,1:3,k), Nu_el(1:3,1:3,k)), TRANSPOSE(RotM(1:3,1:3,k)))
-               END DO
-             END IF
+             ! Nu_el stays in the local frame; the energy and loss rotate it at the
+             ! integration point, as WhitneyAVHarmonicSolver assembles it.
+             IF (dim == 3) CALL GetElementRotM(Element, RotM, n)
            END BLOCK
          ELSE IF (HomogenizationModel .AND. Transient) THEN
            IF (GetLogical(CompParams, 'Transient Homogenization', Found) .AND. Found) THEN
-             ! Slice 3 (conduction part): the winding Joule density must use the
-             ! ladder's effective conductivity G_skin = y0 + alpha/(1 + sigma/dt)
-             ! - the same BDF-1 Schur form CircuitsAndDynamics uses for the
-             ! lumped resistance - instead of the raw material conductivity.
-             ! Otherwise the local loss field underestimates the conduction
-             ! loss by sigma_material/sigma_eff while the circuit is right.
+             ! WhitneyAVSolver (3D) publishes the current DG-0 Foster states after
+             ! its solve. Read each element's poles, in the local Alpha/Beta frame.
+             IF (dim == 3) THEN
+               StrandedTransientHomog = .TRUE.
+               BLOCK
+                 INTEGER :: d
+                 HomogOrder = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
+                 IF (.NOT. Found) CALL Fatal(Caller, 'Homogenization Ladder Order not found!')
+                 IF (HomogOrder < 1 .OR. HomogOrder > MaxHomogLadderOrder) CALL Fatal(Caller, &
+                     'Homogenization Ladder Order must be between 1 and '//I2S(MaxHomogLadderOrder))
+                 HomogY0 = 1._dp / mu0
+                 HomogDir = [1, 2]
+                 DO d = 1,2
+                   CALL GetHomogLadderState(d, StrandedXiName(HomogDir(d)))
+                 END DO
+                 CALL GetElementRotM(Element, RotM, n)
+               END BLOCK
+             END IF
+             ! The heat of the circuit's skin ladder (TransientHomogCircuitState
+             ! in CircuitsAndDynamics), spread over the winding like the DC loss:
+             ! |J|^2/G0 from the ladder's DC conductivity G0 = y0 + alpha, plus
+             ! N_j^2 |w|^2 L tau q^2 of the ladder stage, L = sigma alpha/G0^2,
+             ! tau = sigma y0/G0, which vanishes at y0 = 0 and at alpha = 0.
+             ! The circuits solver publishes q^n = Gain I^n + History.
              BLOCK
-               REAL(KIND=dp) :: s_y0, s_alpha, s_SigmaMat(1,1), g_skin
+               REAL(KIND=dp) :: s_y0, s_alpha, s_SigmaMat(1,1), g0
                CALL GetTransientHomogenizationLadder(CompParams, 'Sigma 33', 1, &
                                                      s_y0, s_alpha, s_SigmaMat)
-               g_skin = s_y0 + s_alpha / (1.0_dp + s_SigmaMat(1,1) / dt)
+               g0 = s_y0 + s_alpha
                Tcoef = 0._dp
-               Tcoef(1,1,1:n) = g_skin
-               Tcoef(2,2,1:n) = g_skin
-               Tcoef(3,3,1:n) = g_skin
+               Tcoef(1,1,1:n) = g0
+               Tcoef(2,2,1:n) = g0
+               Tcoef(3,3,1:n) = g0
+               SkinL = s_SigmaMat(1,1) * s_alpha / (g0 * g0)
+               SkinTau = s_SigmaMat(1,1) * s_y0 / g0
+               SkinLt = SkinL * SkinTau
+               IF (SkinL /= 0._dp) THEN
+                 SkinGain = GetConstReal(CompParams, 'Stranded Skin State Gain', Found)
+                 IF (Found) SkinHist = GetConstReal(CompParams, 'Stranded Skin State History', Found)
+                 IF (.NOT. Found) CALL Fatal(Caller, 'Stranded coil skin ladder state not found: '// &
+                     'the "CircuitsAndDynamics" solver must run before this one in every time step.')
+               END IF
              END BLOCK
            END IF
          END IF
@@ -1314,6 +1411,121 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        CASE ('massive')
          VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
          IF (.NOT. Found) CALL Fatal (Caller, 'Circuit Voltage Variable Id not found!')
+
+       CASE ('flat wire')
+         IF (dim /= 3) CALL Fatal(Caller,'Flat wire is implemented only in 3D!')
+         CALL GetElementRotM(Element, RotM, n)
+         VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Circuit Voltage Variable Id not found!')
+         FwStack = GetInteger(CompParams, 'Flat Wire Stack Cells', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Flat Wire Stack Cells not found!')
+         FwAcross = GetInteger(CompParams, 'Flat Wire Across Cells', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Flat Wire Across Cells not found!')
+         FwStackAlongAlpha = GetLogical(CompParams, 'Flat Wire Stack Along Alpha', Found)
+         CALL GetFlatWireLocalFields(FwStackAlongAlpha, Element, n, alpha, beta)
+         DO k = 1,n
+           Tcoef(1:3,1:3,k) = MATMUL(MATMUL(RotM(1:3,1:3,k), Tcoef(1:3,1:3,k)), TRANSPOSE(RotM(1:3,1:3,k)))
+         END DO
+
+       CASE ('foil sheet')
+         IF (dim /= 3) CALL Fatal(Caller,'Foil sheet is implemented only in 3D!')
+         CALL GetElementRotM(Element, RotM, n)
+         VvarId = GetInteger (CompParams, 'Circuit Voltage Variable Id', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Circuit Voltage Variable Id not found!')
+         FsCells = GetInteger(CompParams, 'Foil Sheet Cells', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Cells not found!')
+         FsSegments = GetInteger(CompParams, 'Foil Sheet Segments', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Segments not found!')
+         FsSublayers = GetInteger(CompParams, 'Foil Sheet Sublayers', Found)
+         IF (.NOT. Found) FsSublayers = 1
+         FsFillFactor = GetConstReal(CompParams, 'Fill Factor', Found)
+         IF (.NOT. Found) FsFillFactor = 1._dp
+         FsSigmaRef = GetConstReal(CompParams, 'Foil Sheet Sigma Ref', Found)
+         IF (.NOT. Found) CALL Fatal (Caller, 'Foil Sheet Sigma Ref not found!')
+         ! The transient kernel solves for y' = FsDofScale * y; harmonic and old
+         ! SIFs do not publish the keyword and keep the raw dofs.
+         FsDofScale = GetConstReal(CompParams, 'Foil Sheet Dof Scale', Found)
+         IF (.NOT. Found .OR. FsDofScale <= 0._dp) FsDofScale = 1._dp
+         FsSign = GetConstReal(CompParams, 'Foil Sheet Direction Sign', Found)
+         IF (.NOT. Found) FsSign = 1._dp
+         ! For a foil sheet 'alpha' and 'beta' hold the stacking and the across
+         ! field, in that order, whichever direction field each of them is.
+         FsStackAlongAlpha = GetLogical(CompParams, 'Foil Sheet Stack Along Alpha', Found)
+         IF (.NOT. Found) FsStackAlongAlpha = .TRUE.
+         CALL GetFlatWireLocalFields(FsStackAlongAlpha, Element, n, alpha, beta)
+
+         ! The block has no volumetric conductivity: the strand current density
+         ! c_kj*grad(W) flows with the complex SHEET conductivity, so give the
+         ! post processing an isotropic sigma_s and build E = -c_kj gradW/sigma_s
+         ! below. The Joule density is then |J|^2 Re(1/sigma_s), as it should be.
+         HomogenizationModel = GetLogical(CompParams, 'Homogenization Model', Found)
+         SheetHarmonicHomog = HomogenizationModel .AND. .NOT. RealField
+         BLOCK
+           REAL(KIND=dp) :: sigma_33(n), sigmaim_33(n)
+           CALL GetComponentCmplxNodal(CompParams, 'sigma 33', n, sigma_33, sigmaim_33, Found)
+           IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: Sigma 33 not found!')
+           Tcoef = CMPLX(0._dp, 0._dp, KIND=dp)
+           Tcoef(1,1,1:n) = CMPLX(sigma_33, sigmaim_33, KIND=dp)
+           Tcoef(2,2,1:n) = Tcoef(1,1,1:n)
+           Tcoef(3,3,1:n) = Tcoef(1,1,1:n)
+         END BLOCK
+
+         IF (HomogenizationModel) THEN
+           BLOCK
+             REAL(KIND=dp) :: nu_11(n), nuim_11(n), nu_22(n), nuim_22(n), nu_33(n), nuim_33(n)
+             CALL GetComponentCmplxNodal(CompParams, 'nu 11', n, nu_11, nuim_11, Found)
+             IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: nu 11 not found!')
+             CALL GetComponentCmplxNodal(CompParams, 'nu 22', n, nu_22, nuim_22, Found)
+             IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: nu 22 not found!')
+             CALL GetComponentCmplxNodal(CompParams, 'nu 33', n, nu_33, nuim_33, Found)
+             IF ( .NOT. Found ) CALL Fatal (Caller,'Foil sheet: nu 33 not found!')
+             Nu_el = CMPLX(0.0d0, 0.0d0, kind=dp)
+             Nu_el(1,1,1:n) = nu_11(1:n) + im * nuim_11(1:n)
+             Nu_el(2,2,1:n) = nu_22(1:n) + im * nuim_22(1:n)
+             Nu_el(3,3,1:n) = nu_33(1:n) + im * nuim_33(1:n)
+             DO k = 1,n
+               Nu_el(1:3,1:3,k) = MATMUL(MATMUL(RotM(1:3,1:3,k), Nu_el(1:3,1:3,k)), TRANSPOSE(RotM(1:3,1:3,k)))
+             END DO
+           END BLOCK
+         END IF
+
+         ! In transient the in-plane reluctivity is the Foster ladder written by
+         ! InitFoilSheetMaterial, with the gate and directions of WhitneyAVSolver.
+         ! Its states store energy that the DC 'Nu' read above leaves out.
+         IF (HomogenizationModel .AND. Transient) THEN
+           IF (ListCheckPresent(CompParams, 'Nu 33 Residues')) THEN
+             StrandedTransientHomog = .TRUE.
+             BLOCK
+               INTEGER :: d, dStack
+               HomogOrder = GetInteger(CompParams, 'Homogenization Ladder Order', Found)
+               IF (.NOT. Found) HomogOrder = 4
+               IF (HomogOrder < 1 .OR. HomogOrder > MaxHomogLadderOrder) CALL Fatal(Caller, &
+                   'Homogenization Ladder Order must be between 1 and '//I2S(MaxHomogLadderOrder))
+               CALL FoilSheetNuDirections(FsStackAlongAlpha, dStack, HomogDir)
+               HomogY0 = 1._dp / mu0
+               HomogY0(dStack) = GetConstReal(CompParams, FoilSheetNuKey(dStack)//' y0', Found)
+               IF (.NOT. Found) HomogY0(dStack) = 1._dp / mu0
+               DO d = 1,2
+                 CALL GetHomogLadderState(d, FoilSheetXiName(HomogDir(d)))
+               END DO
+             END BLOCK
+           END IF
+         END IF
+
+         ! The strand skin ladder stores w_j (sum_k tau_k x_kj^2 + Ltail y_j^2/2) in
+         ! strand j, w_j its DC resistance weight. CircuitsAndDynamics publishes the
+         ! bracket as A y_j^2 + B_j y_j + C_j for the whole timestep.
+         IF (Transient) THEN
+           SheetSkinA = GetConstReal(CompParams, 'Foil Sheet Skin Energy Quadratic', SheetSkinStored)
+           IF (SheetSkinStored) THEN
+             SheetSkinB => ListGetConstRealArray(CompParams, 'Foil Sheet Skin Energy Linear', Found)
+             IF (Found) SheetSkinC => ListGetConstRealArray(CompParams, 'Foil Sheet Skin Energy Constant', Found)
+             IF (.NOT. Found) CALL Fatal(Caller, 'Foil sheet skin ladder energy state is incomplete.')
+             ! The conductivity of the circuit's strand rows, which w_j is built with.
+             FsSigmaDc = GetConstReal(CompParams, 'Foil Sheet Sigma DC', Found)
+             IF (.NOT. Found) FsSigmaDc = GetConstReal(CompParams, 'Sigma 33', Found)
+           END IF
+         END IF
 
        CASE ('foil winding')
          CALL GetLocalSolution(alpha,'Alpha')
@@ -1367,6 +1579,17 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        END IF
      END IF
 
+     ! The 'layered' laminate stack model replaces the scalar reluctivity of
+     ! the lamination material by the stack tensor, as in the 3-D harmonic
+     ! solver (the only one that implements it; it rejects coils in the stack).
+     LayeredLaminate = .FALSE.
+     IF ( dim == 3 .AND. .NOT. ( CoilBody .OR. RealField .OR. HasHBCurve .OR. &
+         HasReluctivityFunction .OR. HasTensorReluctivity ) ) THEN
+       LayeredLaminate = ( GetString(Material, 'Laminate Stack Model', Found) == 'layered' )
+       IF (LayeredLaminate) CALL GetLaminateLayeredParameters(Material, LamLayerThick, &
+           LamLayerCond, LamLayerFill, LamLayerNormal, LamLayerHasNormal)
+     END IF
+
      HasVelocity = .FALSE.
      HasLorenzVelocity = .FALSE.
      HasAngularVelocity = .FALSE.
@@ -1389,6 +1612,23 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        IP = GaussPoints(Element, EdgeBasis=dim==3, PReferenceElement=pRef, EdgeBasisDegree=EdgeBasisDegree)
      END IF
 
+     ! A sheet strand is a fraction of an element thick, so a Gauss rule that
+     ! picks the strand at the point mis-estimates the strand volumes by
+     ! percents - and by that much the Joule loss misses the circuit power. Cut
+     ! the element along the strand interfaces instead and integrate each piece
+     ! at its centroid, which is what the circuit kernel does and is exact for
+     ! the affine integrands of a linear tet (B is constant, the nodal basis is
+     ! linear). Other element types and 'Sheet Integration Points' keep the
+     ! Gauss rule, as does the corner / centre sampling of the elemental modes.
+     ! -----------------------------------------------------------------------
+     FsExact = .FALSE.
+     FsQ % Exact = .FALSE.
+     IF (CoilType == 'foil sheet' .AND. ElementalMode < 3) THEN
+       CALL FoilSheetLayoutQuadrature(FsCells, FsSegments, FsSublayers, FsFillFactor, &
+           CompParams, Element, n, alpha, beta, FsQ, WithGaps=.TRUE., Fallback=.TRUE.)
+       FsExact = FsQ % Exact .AND. FsQ % nItem > 0
+     END IF
+
      MASS  = 0._dp
      FORCE = 0._dp
      E = 0._dp; B=0._dp
@@ -1398,16 +1638,46 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        CALL GetHystereticMFS(Element, force(:,4:6), pSolver, HasZirka, CSymmetry=CSymmetry)
      end if
 
-     DO j = 1,IP % n
+     ! The strand pieces integrate the fields exactly but there are too few of
+     ! them to invert the nodal projection, so its mass matrix keeps the Gauss
+     ! rule. It is pure geometry and does not see the strands at all.
+     ! ---------------------------------------------------------------------
+     IF (FsExact .AND. (ElementalFields .OR. .NOT. ConstantMassMatrixInUse)) THEN
+       DO j = 1,IP % n
+         stat = ElementInfo(Element, Nodes, IP % U(j), IP % V(j), IP % W(j), &
+             detJ, Basis, dBasisdx, USolver=pSolver)
+         s = IP % s(j) * detJ
+         IF( CSymmetry ) s = s * SUM( Basis(1:n) * Nodes % x(1:n) )
+         DO p=1,eq_n
+           DO q=1,eq_n
+             MASS(p,q) = MASS(p,q) + s*Basis(p)*Basis(q)
+           END DO
+         END DO
+       END DO
+     END IF
+
+     nIp = IP % n
+     IF (FsExact) nIp = FsQ % nItem
+
+     DO j = 1,nIp
+       IF (FsExact) THEN
+         CALL FoilSheetQuadPoint(FsQ, j, uIp, vIp, wIp)
+       ELSE
+         uIp = IP % U(j); vIp = IP % V(j); wIp = IP % W(j)
+       END IF
        IF(dim == 2 ) THEN
-         stat = ElementInfo(Element,Nodes,IP % u(j),IP % v(j),IP % w(j),&
+         stat = ElementInfo(Element,Nodes,uIp,vIp,wIp,&
              detJ,Basis,dBasisdx,USolver=pSolver)
        ELSE
-         stat = ElementInfo( Element, Nodes, IP % U(j), IP % V(j), IP % W(j), &
+         stat = ElementInfo( Element, Nodes, uIp, vIp, wIp, &
              detJ, Basis, dBasisdx, &
              EdgeBasis = Wbasis, RotBasis = RotWBasis, USolver = pSolver ) 
        END IF         
-       s = IP % s(j) * detJ
+       IF (FsExact) THEN
+         s = FoilSheetQuadWeight(FsQ, j, detJ)
+       ELSE
+         s = IP % s(j) * detJ
+       END IF
 
        grads_coeff = -1._dp/GetCircuitModelDepth()
        IF( CSymmetry ) THEN
@@ -1490,7 +1760,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        END IF
        
        IF (vDOFs > 1) THEN   ! Complex case (harmonic case)
-         IF (CoilType /= 'stranded') THEN
+         IF (CoilType /= 'stranded' .AND. CoilType /= 'foil sheet') THEN
            ! -j * Omega A
            SELECT CASE(dim)
            CASE(2)
@@ -1514,12 +1784,15 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            SELECT CASE(dim)
            CASE(2)
              wvec = [0._dp, 0._dp, 1._dp]
+             WindingWsq = 1._dp
            CASE(3)
 
              IF (CoilUseWvec) THEN
                wvec = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
+               WindingWsq = SUM(wvec**2)
              ELSE
                wvec = -MATMUL(Wbase(1:np), dBasisdx(1:np,:))
+               WindingWsq = SUM(wvec**2)
              ! btw. This does not allow ununiform windings... I don't fix it now. -ettaka
                wvec = wvec/SQRT(SUM(wvec**2._dp)) !Why were we doing this? 04132021 -ettaka
              END IF
@@ -1529,6 +1802,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              imag_value = LagrangeVar % Values(IvarId) + im * LagrangeVar % Values(IvarId+1)
              E(1,:) = E(1,:)+REAL(imag_value * N_j * wvec / CMat_ip(3,3))
              E(2,:) = E(2,:)+AIMAG(imag_value * N_j * wvec / CMat_ip(3,3))
+           END IF
+
+           ! A complex homogenized sigma 33 is a reactance in the circuit, an
+           ! inductance the field does not hold: 1/2 Im(1/sigma)/omega |J|^2 with
+           ! peak phasors and the circuit's |w|^2. At 0 Hz there is none to see.
+           SkinEnergy = 0._dp
+           IF (SkinReactanceStored .AND. Omega > 0._dp) THEN
+             IF (CMat_ip(3,3) /= 0._dp) SkinEnergy = 0.5_dp * N_j**2 * WindingWsq * &
+                 (LagrangeVar % Values(IvarId)**2 + LagrangeVar % Values(IvarId+1)**2) * &
+                 AIMAG(1._dp / CMat_ip(3,3)) / Omega
            END IF
 
          CASE ('massive')
@@ -1543,6 +1826,45 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              E(2,:) = E(2,:)-localV(2) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
            END SELECT
            
+         CASE ('flat wire')
+           k = FlatWireCellIndex(FwStack, FwAcross, SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)))
+           localV(1) = LagrangeVar % Values(VvarId+2*k) * CircEqVoltageFactor
+           localV(2) = LagrangeVar % Values(VvarId+2*k+1) * CircEqVoltageFactor
+           IF (CoilUseWvec) THEN
+             wvec = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
+           ELSE
+             wvec = MATMUL(Wbase(1:np), dBasisdx(1:np,:))
+           END IF
+           E(1,:) = E(1,:)-localV(1) * wvec
+           E(2,:) = E(2,:)-localV(2) * wvec
+
+         CASE ('foil sheet')
+           ! A point in the insulation margin of a turn belongs to no strand:
+           ! it carries no current and no cell voltage.
+           CALL FoilSheetLayoutQuadStrand(FsQ, FsCells, FsSegments, FsSublayers, FsFillFactor, &
+               j, alpha, beta, Basis, np, FsK, FsJ)
+           SkinEnergy = 0._dp
+           IF (FsK > 0) THEN
+             FsDof = 2 * FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+             FsK = FoilSheetLayerCell(FsSublayers, FsK)
+             wvec = FoilSheetQuadDirection(FsQ, j, alpha, beta, dBasisdx, n, FsSign)
+             ! J = -SigmaRef y_kj t (the circuit sign convention of the flat wire
+             ! and foil winding kernels), so E = J/sigma_s.
+             IF (CMat_ip(3,3) /= CMPLX(0._dp,0._dp,KIND=dp)) THEN
+               imag_value = LagrangeVar % Values(VvarId+FsDof) + im * LagrangeVar % Values(VvarId+FsDof+1)
+               ! The skin reactance of a complex sheet conductivity is an inductance
+               ! of the strand the field does not hold: 1/2 Im(1/sigma_s)/omega |J|^2
+               ! with peak phasors, as the strand impedance of the circuit has it.
+               IF (Omega > 0._dp) SkinEnergy = 0.5_dp * FsSigmaRef**2 * ABS(imag_value)**2 * &
+                   SUM(wvec**2) * AIMAG(1._dp / CMat_ip(3,3)) / Omega
+               imag_value = -FsSigmaRef * imag_value / CMat_ip(3,3)
+               E(1,:) = E(1,:) + REAL(imag_value) * wvec
+               E(2,:) = E(2,:) + AIMAG(imag_value) * wvec
+             END IF
+             localV(1) = LagrangeVar % Values(VvarId+2*FsK) * CircEqVoltageFactor
+             localV(2) = LagrangeVar % Values(VvarId+2*FsK+1) * CircEqVoltageFactor
+           END IF
+
          CASE ('foil winding')
            localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 
            DO k = 1, VvarDofs-1
@@ -1608,9 +1930,23 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
          END SELECT
          
+         ! DEV-1491: -grad v for coil components that solve the nodal potential.
+         ! The DEFAULT (plain conductor) case above already does this; the coil
+         ! cases used to skip it because the nodal dofs were eliminated.
+         ! ------------------------------------------------------------------
+         IF (ConstraintActive .AND. dim == 3 .AND. np > 0) THEN
+           SELECT CASE (CoilType)
+           CASE ('massive','foil winding','flat wire')
+             E(1,:) = E(1,:) - MATMUL(SOL(1,1:np), dBasisdx(1:np,:))
+             E(2,:) = E(2,:) - MATMUL(SOL(2,1:np), dBasisdx(1:np,:))
+           END SELECT
+         END IF
+
        ELSE   ! Real case (transient case)
          E(1,:) = 0._dp
-         IF (CoilType /= 'stranded') THEN 
+         ! A foil sheet strand dof already carries the induced part, exactly as a
+         ! stranded coil current does, so -dA/dt must not be added on top of it.
+         IF (CoilType /= 'stranded' .AND. CoilType /= 'foil sheet') THEN
            SELECT CASE(dim)
            CASE(2)
              E(1,3) = -SUM(PSOL(1:nd) * Basis(1:nd))
@@ -1625,13 +1961,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            SELECT CASE(dim)
            CASE(2)
              wvec = [0._dp, 0._dp, 1._dp]
+             WindingWsq = 1._dp
              IF(CMat_ip(1,1) /= 0._dp ) &
                E(1,:) = E(1,:)+ LagrangeVar % Values(IvarId) * N_j * wvec / CMat_ip(1,1)
            CASE(3)
              IF (CoilUseWvec) THEN
                wvec = ListGetElementVectorSolution( Wvec_h, Basis, Element, dofs = dim )
+               WindingWsq = SUM(wvec**2)
              ELSE
                wvec = -MATMUL(Wbase(1:np), dBasisdx(1:np,:))
+               WindingWsq = SUM(wvec**2)
                wvec = wvec/SQRT(SUM(wvec**2._dp))
              END IF
              IF(CMat_ip(3,3) /= 0._dp ) THEN
@@ -1642,6 +1981,21 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
                ItoJCoeffFound = .TRUE.
              END IF
            END SELECT
+           IF (SkinLt /= 0._dp) THEN
+             SkinHeat = SkinGain * LagrangeVar % Values(IvarId) + SkinHist
+             SkinHeat = SkinLt * N_j**2 * SUM(wvec**2) * SkinHeat**2
+           END IF
+           ! The inductor energy takes the circuit's weight N_j^2 |w|^2 (K): it is the
+           ! inductance the circuit sees. The heat above keeps wvec, normalized for a
+           ! W potential, like the DC and the harmonic loss it is compared with
+           ! (DEV-1548); with a nonuniform |grad W| it is not the circuit's heat.
+           IF (SkinL /= 0._dp) THEN
+             ! The skin inductor carries chi = I - tau q, including at y0 = 0
+             ! (a pure series inductance, with no stage heat).
+             SkinChi = LagrangeVar % Values(IvarId) - &
+                 SkinTau * (SkinGain * LagrangeVar % Values(IvarId) + SkinHist)
+             SkinEnergy = 0.5_dp * SkinL * N_j**2 * WindingWsq * SkinChi**2
+           END IF
 
          CASE ('massive')
            localV(1) = localV(1) + LagrangeVar % Values(VvarId) * CircEqVoltageFactor
@@ -1651,6 +2005,31 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            CASE(3)
              E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
            END SELECT
+
+         CASE ('flat wire')
+           k = FlatWireCellIndex(FwStack, FwAcross, SUM(alpha(1:np)*Basis(1:np)), SUM(beta(1:np)*Basis(1:np)))
+           localV(1) = LagrangeVar % Values(VvarId+k) * CircEqVoltageFactor
+           E(1,:) = E(1,:)-localV(1) * MATMUL(Wbase(1:np), dBasisdx(1:np,:))
+
+         CASE ('foil sheet')
+           CALL FoilSheetLayoutQuadStrand(FsQ, FsCells, FsSegments, FsSublayers, FsFillFactor, &
+               j, alpha, beta, Basis, np, FsK, FsJ)
+           SkinEnergy = 0._dp
+           IF (FsK > 0) THEN
+             FsDof = FoilSheetStrandDof(FsCells, FsSegments, FsK, FsJ)
+             ! The strand index of the circuit's skin ladder (Add_foil_sheet).
+             FsStrand = (FsK-1) * FsSegments + FsJ
+             FsK = FoilSheetLayerCell(FsSublayers, FsK)
+             wvec = FoilSheetQuadDirection(FsQ, j, alpha, beta, dBasisdx, n, FsSign)
+             FsY = LagrangeVar % Values(VvarId+FsDof) / FsDofScale
+             IF (REAL(CMat_ip(3,3)) /= 0._dp) &
+                 E(1,:) = E(1,:) - FsSigmaRef * FsY / REAL(CMat_ip(3,3)) * wvec
+             IF (SheetSkinStored) THEN
+               IF (FsStrand <= SIZE(SheetSkinB,1)) SkinEnergy = FsSigmaRef**2 * SUM(wvec**2) / FsSigmaDc * &
+                   (SheetSkinA * FsY**2 + SheetSkinB(FsStrand,1) * FsY + SheetSkinC(FsStrand,1))
+             END IF
+             localV(1) = LagrangeVar % Values(VvarId+FsK) * CircEqVoltageFactor
+           END IF
 
          CASE ('foil winding')
            localAlpha = coilthickness *SUM(alpha(1:np) * Basis(1:np)) 
@@ -1708,6 +2087,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
 
          END SELECT
+
+         ! DEV-1491: -grad v for coil components that solve the nodal potential
+         ! (transient counterpart of the harmonic branch above).
+         ! ------------------------------------------------------------------
+         IF (ConstraintActive .AND. dim == 3 .AND. np > 0) THEN
+           SELECT CASE (CoilType)
+           CASE ('massive','foil winding','flat wire')
+             E(1,:) = E(1,:) - MATMUL(SOL(1,1:np), dBasisdx(1:np,:))
+           END SELECT
+         END IF
        END IF
 
        
@@ -1738,12 +2127,27 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              GaussPoint = j, Rdim=mudim, Rtensor=MuTensor, DummyVals = B(1,:) )             
          Nu(1:3,1:3) = muTensor(1:3,1:3)                           
          w_dens = 0.5*SUM(B(1,:)*MATMUL(REAL(Nu), B(1,:)))
-       ELSE IF (HomogenizationLoss .AND. CoilType == 'stranded' .and. HomogenizationModel) THEN
+       ELSE IF (StrandedHarmonicHomog .OR. SheetHarmonicHomog) THEN
          DO k=1,3
            DO l=1,3
              Nu(k,l) = SUM( Nu_el(k,l,1:n) * Basis(1:n) )
            END DO
          END DO
+         IF (StrandedHarmonicHomog .AND. dim == 3) THEN
+           DO k=1,3
+             DO l=1,3
+               RotMip(k,l) = SUM( RotM(k,l,1:n) * Basis(1:n) )
+             END DO
+           END DO
+           Nu = MATMUL(MATMUL(RotMip, Nu), TRANSPOSE(RotMip))
+         END IF
+         ! No scalar reluctivity for the Maxwell stress, as for any tensor below.
+         R_ip = 0.0_dp
+         ! The homogenized block (litz or foil sheet) still stores magnetic energy; without
+         ! this the coil drops out of 'res: Magnetic Field Energy' (and hence L). Twice
+         ! the time average, like the other harmonic densities.
+         w_dens = 0.5*( SUM(MATMUL(REAL(Nu), B(1,:)) * B(1,:)) + &
+             SUM(MATMUL(REAL(Nu), B(2,:)) * B(2,:)) )
        ELSE
          IF (HasTensorReluctivity) THEN
            IF (SIZE(Reluct_Z,2) == 1) THEN
@@ -1770,6 +2174,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            ! part will be ignored.
            !
            R_ip = REAL(R_ip_Z)
+           IF (LayeredLaminate) THEN
+             Nu = LaminateLayeredReluctivity(Omega, R_ip_Z, LamLayerCond, LamLayerThick, &
+                 LamLayerFill, LamLayerNormal, LamLayerHasNormal)
+             R_ip = 0.0_dp
+           END IF
          END IF
          IF (RealField) THEN
            w_dens = 0.5*SUM(B(1,:)*MATMUL(REAL(Nu), B(1,:)))
@@ -1839,11 +2248,44 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
        END IF
        
+       IF (StrandedTransientHomog) THEN
+         BLOCK
+           REAL(KIND=dp) :: b_local(3)
+           DO k = 1,3
+             DO l = 1,3
+               RotMip(k,l) = SUM(RotM(k,l,1:n) * Basis(1:n))
+             END DO
+           END DO
+           b_local = MATMUL(TRANSPOSE(RotMip), B(1,:))
+           ! H = y0 B + sum r xi, T xi_dot + xi = B. The storage is
+           ! w = y0 B^2/2 + sum r (B xi - xi^2/2), so
+           ! H B_dot = w_dot - sum r T xi_dot^2 (r < 0 for a passive fit).
+           ! Equivalently w = nu_DC B^2/2 - sum r (B-xi)^2/2. Its sinusoidal
+           ! average is Re(nu) |B|^2/4, half of what the harmonic densities above
+           ! give from peak phasors.
+           w_dens = 0.5_dp * SUM(HomogY0 * b_local**2)
+           DO k = 1,2
+             w_dens = w_dens + SUM(HomogR(1:HomogOrder,k) * HomogXi(1:HomogOrder,k) * &
+                 (b_local(HomogDir(k)) - 0.5_dp * HomogXi(1:HomogOrder,k)))
+           END DO
+           ! The coenergy of this linear model includes the conjugate products of
+           ! the internal states, not just the macroscopic H.B, and equals the
+           ! energy. Only the totals take it; the forces above keep H.B.
+           HdotB = 2._dp * w_dens
+         END BLOCK
+       END IF
+
+       ! The skin ladder's inductor (transient) or the reactance of a complex sigma
+       ! 33 (harmonic) of a stranded coil or a foil sheet strand stores energy
+       ! outside B, linearly.
+       w_dens = w_dens + SkinEnergy
+       HdotB = HdotB + 2._dp * SkinEnergy
+
        Energy(1) = Energy(1) + s*0.5*ABS(PR_ip)*SUM(E**2)
        Energy(2) = Energy(2) + s*w_dens
        Energy(3) = Energy(3) + (HdotB - w_dens) * s
 
-       IF (ElementalFields .OR. .NOT. ConstantMassMatrixInUse) THEN
+       IF ((ElementalFields .OR. .NOT. ConstantMassMatrixInUse) .AND. .NOT. FsExact) THEN
          DO p=1,eq_n
            DO q=1,eq_n
              MASS(p,q)=MASS(p,q)+s*Basis(p)*Basis(q)
@@ -2040,6 +2482,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              Coeff = SUM( MATMUL( REAL(CMat_ip(1:3,1:3)), TRANSPOSE(E(1:1,1:3)) ) * &
                  TRANSPOSE(E(1:1,1:3)) ) * Basis(p) * s
            END IF
+           ! The stranded skin ladder stage beyond the DC conductivity.
+           IF (SkinLt /= 0._dp) Coeff = Coeff + SkinHeat * Basis(p) * s
            !
            !
            ! No need for a "HasVelocity" check: the effect of v x B is already inbuilt into 
@@ -2076,15 +2520,19 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
 
          Power = Power + Coeff
+         IF ( Transient .AND. CoilType == 'foil sheet' ) THEN
+           SheetPower = SheetPower + Coeff
+           SheetPowerSeen = 1
+         END IF
          IF ( ASSOCIATED(JH) .OR. ASSOCIATED(EL_JH) .OR. ASSOCIATED(NJH) ) THEN           
            FORCE(p,k+1) = FORCE(p,k+1) + Coeff
            k = k+1
            jh_k = k
          END IF
          
-         !-------------------------------------------------
-         ! Compute a loss estimate for cos and sin modes:
-         !-------------------------------------------------
+         !-------------------------------------------------------
+         ! Compute a loss estimate on the principal axes of B:
+         !-------------------------------------------------------
          IF (LossEstimation) THEN
            BodyLoss(3,BodyId) = BodyLoss(3,BodyId) + Coeff
 
@@ -2105,14 +2553,34 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            
            ! No losses to add if loss coefficient is not given
            IF( Found .OR. MaterialExponents ) THEN
+             ! The loss law holds for a unidirectional sinusoidal B. Re B and Im B are two instants of an
+             ! elliptical B whose time origin is arbitrary, so each mode on its own depends on the source phase;
+             ! the principal axes of the ellipse do not: Bmaj^2 + Bmin^2 = |Re B|^2 + |Im B|^2 and
+             ! Bmaj * Bmin = |Re B x Im B|. Per axis into ComponentLoss, both axes once into BodyLoss and the field.
+             BSq(1) = SUM( B(1,1:3) ** 2 )
+             BSq(2) = SUM( B(2,1:3) ** 2 )
+             IF( BSq(1) == 0.0_dp .OR. BSq(2) == 0.0_dp ) THEN
+               ! A real-valued field (transient runs) keeps exactly the values of the per-mode sum
+               AxisSq(1) = BSq(1) + BSq(2)
+               AxisSq(2) = 0.0_dp
+             ELSE
+               ! Scaled by the largest component, so that no fourth power over- or underflows
+               BScale = MAXVAL( ABS( B(1:2,1:3) ) )
+               BRe = B(1,1:3) / BScale
+               BIm = B(2,1:3) / BScale
+               AxisSq(1) = 0.5_dp * ( SUM( BRe ** 2 ) + SUM( BIm ** 2 ) ) &
+                   + SQRT( 0.25_dp * ( SUM( BRe ** 2 ) - SUM( BIm ** 2 ) ) ** 2 + SUM( BRe * BIm ) ** 2 )
+               AxisSq(2) = SUM( CrossProduct( BRe, BIm ) ** 2 ) / AxisSq(1) * BScale ** 2
+               AxisSq(1) = AxisSq(1) * BScale ** 2
+             END IF
              ElemLoss = 0.0_dp
              DO l=1,2
-               ValAtIP = SUM( B(l,1:3) ** 2 )
-               ElemLoss(1) = ElemLoss(1) + s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( ValAtIp ** FieldPower(1) )
-               ElemLoss(2) = ElemLoss(2) + s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( ValAtIp ** FieldPower(2) )
-               ComponentLoss(:,l) = ComponentLoss(:,l) + ElemLoss
-               BodyLoss(1:2,BodyId) = BodyLoss(1:2,BodyId) + ElemLoss
+               ModeLoss(1) = s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( AxisSq(l) ** FieldPower(1) )
+               ModeLoss(2) = s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( AxisSq(l) ** FieldPower(2) )
+               ComponentLoss(:,l) = ComponentLoss(:,l) + ModeLoss
+               ElemLoss = ElemLoss + ModeLoss
              END DO
+             BodyLoss(1:2,BodyId) = BodyLoss(1:2,BodyId) + ElemLoss
            ELSE
              ElemLoss = 0.0_dp
            END IF
@@ -2127,7 +2595,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END IF
          END IF
 
-         IF ( HomogenizationLoss .AND. CoilType == 'stranded' .and. HomogenizationModel) THEN
+         IF ( (StrandedHarmonicHomog .AND. HomogenizationLoss) .OR. SheetHarmonicHomog &
+             .OR. LayeredLaminate ) THEN
            ! homogenization loss should be real part of im omega b . conj(h)/2
            BLOCK
              COMPLEX(KIND=dp) :: Bloc(3)=0._dp
@@ -2137,6 +2606,25 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              Hloc = MATMUL(Nu(1:3, 1:3), Bloc)
              Coeff = s * Basis(p) * REAL(im * Omega * SUM(Bloc * CONJG(Hloc))/2._dp)
            END BLOCK
+
+           ! For a foil sheet the Im(Nu) loss is the intra-foil proximity loss of
+           ! the winding: it belongs to 'res: Eddy current power' together with
+           ! the sheet Joule loss, or Re(V/I) and 4P/|I|^2 would disagree.
+           IF (CoilType == 'foil sheet') THEN
+             Power = Power + Coeff
+             HomogPower = HomogPower + Coeff
+             HomogPowerSeen = 1
+           END IF
+
+           ! The Im(Nu) loss of a 'layered' laminate stack is the eddy current
+           ! loss inside its laminations; their net currents are in the thin
+           ! sheets ('res: Thin sheet current power').
+           IF (LayeredLaminate) THEN
+             ! Coeff above is the time average; HarmPowerCoeff gives the peak when asked
+             Power = Power + 2 * HarmPowerCoeff * Coeff
+             LamStackPower = LamStackPower + 2 * HarmPowerCoeff * Coeff
+             LamStackPowerSeen = 1
+           END IF
 
            IF ( ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL) ) THEN
              FORCE(p,k+1) = FORCE(p,k+1) + Coeff
@@ -2681,6 +3169,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    ! Perform parallel reductions 
    IF(Parallel) THEN
      Power = ParallelReduction(Power) / NoSlices
+     HomogPower = ParallelReduction(HomogPower) / NoSlices
+     LamStackPower = ParallelReduction(LamStackPower) / NoSlices
+     SheetPower = ParallelReduction(SheetPower) / NoSlices
      IF( LayerBC ) SurfPower = ParallelReduction( SurfPower ) / NoSlices
 
      Energy(1) = ParallelReduction(Energy(1)) / NoSlices
@@ -2694,12 +3185,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END DO
        END DO
 
-       TotalLoss = 0._dp
        DO j=1,3
          DO i=1,Model % NumberOfBodies
            BodyLoss(j,i) = ParallelReduction(BodyLoss(j,i)) / NoSlices
          END DO
-         TotalLoss(j) = SUM( BodyLoss(j,:) )
        END DO
      END IF
 
@@ -2718,6 +3207,31 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    WRITE(Message,'(A,ES15.6)') 'Eddy current power: ', Power
    CALL Info( Caller, Message )
    CALL ListAddConstReal( Model % Simulation, 'res: Eddy current power', Power )
+
+   ! The Im(Nu) homogenization loss of foil sheet blocks. It is already inside
+   ! 'res: Eddy current power'; this splits it out so that the strand Joule loss
+   ! can be read off as the difference. Published only when a foil sheet block
+   ! produced it, so that every other model keeps the scalars it had before.
+   IF( Parallel ) HomogPowerSeen = ParallelReduction(HomogPowerSeen, 2)
+   IF( HomogPowerSeen > 0 ) THEN
+     WRITE(Message,'(A,ES15.6)') 'Homogenization loss: ', HomogPower
+     CALL Info( Caller, Message )
+     CALL ListAddConstReal( Model % Simulation, 'res: Homogenization loss', HomogPower )
+   END IF
+
+   ! A transient foil sheet block is in Power with its strand currents at the DC
+   ! sheet conductivity only. CircuitsOutput puts its whole loss, strand skin
+   ! ladder and reluctivity ladder included, into 'res: Eddy current power' and
+   ! takes every other conductor from here.
+   IF( Transient ) THEN
+     CALL ListAddConstReal( Model % Simulation, 'Eddy current power outside foil sheets', &
+         Power - SheetPower )
+     IF( Parallel ) SheetPowerSeen = ParallelReduction(SheetPowerSeen, 2)
+     IF( SheetPowerSeen > 0 ) THEN
+       WRITE(Message,'(A,ES15.6)') 'Foil sheet Joule loss at the DC sheet conductivity: ', SheetPower
+       CALL Info( Caller, Message, Level=5 )
+     END IF
+   END IF
 
    IF( LayerBC ) THEN
      WRITE(Message,*) 'Surface current power (the Joule effect): ', SurfPower
@@ -2743,6 +3257,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    
    
    IF (LossEstimation) THEN
+     DO j=1,3
+       TotalLoss(j) = SUM( BodyLoss(j,:) )
+     END DO
      CALL ListAddConstReal( Model % Simulation,'res: harmonic loss linear',TotalLoss(1) )
      CALL ListAddConstReal( Model % Simulation,'res: harmonic loss quadratic',TotalLoss(2) )
      CALL ListAddConstReal( Model % Simulation,'res: joule loss',TotalLoss(3) )
@@ -2753,9 +3270,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        ELSE
          CALL Info(Caller,'Harmonic Loss Quadratic by components',Level=6)
        END IF
-       WRITE( Message,'(A,ES15.6)') 'Loss for cos mode: ', ComponentLoss(k,1)
+       WRITE( Message,'(A,ES15.6)') 'Loss along the major axis: ', ComponentLoss(k,1)
        CALL Info(Caller, Message, Level=6 )
-       WRITE( Message,'(A,ES15.6)') 'Loss for sin mode: ', ComponentLoss(k,2)
+       WRITE( Message,'(A,ES15.6)') 'Loss along the minor axis: ', ComponentLoss(k,2)
        CALL Info(Caller, Message, Level=6 )
        WRITE( Message,'(A,ES15.6)') 'Total loss: ',TotalLoss(k)
        CALL Info(Caller,Message, Level=5 )
@@ -3055,7 +3572,8 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
   ! postprocessing of surface currents generated by Thin sheet BCs (in time-harmonic cases): 
   !
 
-  Found = ListCheckPresentAnyBC(Model,'Thin Sheet Thickness')
+  Found = ListCheckPresentAnyBC(Model,'Thin Sheet Thickness') .OR. &
+      ListCheckPresentAnyBC(Model,'Thin Sheet Laminate Thickness')
   IF(Found) THEN
     ALLOCATE(SheetThickness(n), ThinLineCond(n))
     Power = 0.0_dp
@@ -3065,14 +3583,28 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
       IF (.NOT. ASSOCIATED(BC)) CYCLE
 
       SheetThickness = GetConstReal( BC, 'Thin Sheet Thickness', Found)
-      IF (Found) THEN
+      SheetLamThick = GetCReal( BC, 'Thin Sheet Laminate Thickness', LamSheet)
+      IF (Found .OR. LamSheet) THEN
         ! Technically, there is no skin but why create yet another conductivity variable?
         ThinLineCond = GetConstReal(BC, 'Thin Sheet Electric Conductivity', Found)
         IF (.NOT. Found) ThinLineCond = 1.0_dp ! if not found default to "air" property
+        SheetImagCond = 0.0_dp
+        IF (LamSheet) THEN
+          ! a lamination sheet of a 'layered' stack, with the complex conductance of the solver
+          SheetMu = GetCReal(BC, 'Thin Sheet Relative Permeability', Found)
+          IF (.NOT. Found) SheetMu = 1.0_dp
+          SheetThickness = SheetLamThick
+          Omega = GetAngularFrequency(pSolver % Values, Found)
+          SheetFactor = LaminateSheetFactor(Omega, &
+              CMPLX(VacuumPermeability() * SheetMu, 0.0_dp, KIND=dp), ThinLineCond(1), SheetLamThick)
+          SheetImagCond = ThinLineCond(1) * AIMAG(SheetFactor)
+          ThinLineCond = ThinLineCond * REAL(SheetFactor)
+        END IF
       ELSE
         CYCLE
       END IF
-      
+
+      ! The same mesh edge or face as in the sheet assembly of the solver
       SELECT CASE(GetElementFamily())
       CASE(1)
         CYCLE
@@ -3087,27 +3619,31 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
       Model % CurrentElement => Element
 
-      nd = GetElementNOFDOFs(Element)
+      ! The DOFs are those of the potential solver, not of this one: with this
+      ! solver's counts the nodal and edge parts of SOL were split wrongly.
+      nd = GetElementNOFDOFs(uElement=Element, uSolver=pSolver)
       n  = GetElementNOFNodes(Element)
       CALL GetElementNodes(Nodes, Element)
 
       CALL GetLocalSolution(SOL, Pname, uElement=Element, uSolver=pSolver)
-      IF (Transient) THEN 
+      IF (Transient) THEN
         CALL GetLocalSolution(PSOL,Pname,uSolver=pSolver,Tstep=-1)
         PSOL(1:nd)=(SOL(1,1:nd)-PSOL(1:nd))/dt
       END IF
 
       ! Numerical integration:
       !-----------------------
-      IP = GaussPoints(Element)
+      ! Same rule and edge basis as the sheet assembly in WhitneyAVHarmonicSolver
+      ! (the Piola basis was hard-coded here, wrong for the default edge elements)
+      IP = GaussPoints(Element, EdgeBasis=.TRUE., PReferenceElement=PiolaVersion, &
+          EdgeBasisDegree=EdgeBasisDegree)
 
-      np = n*MAXVAL(Solver % Def_Dofs(GetElementFamily(Element),:,1))
+      np = n*MAXVAL(pSolver % Def_Dofs(GetElementFamily(Element),:,1))
 
       DO j=1,IP % n
-         stat = EdgeElementInfo( Element, Nodes, IP % U(j), IP % V(j), &
-              IP % W(j), DetF = DetJ, Basis = Basis, EdgeBasis = WBasis, &
-              dBasisdx = dBasisdx, BasisDegree = 1, &
-              ApplyPiolaTransform = .TRUE.)
+         stat = ElementInfo( Element, Nodes, IP % U(j), IP % V(j), &
+              IP % W(j), detJ, Basis, dBasisdx, EdgeBasis = WBasis, RotBasis = RotWBasis, &
+              USolver = pSolver )
    
          C_ip  = SUM(Basis(1:n) * ThinLineCond(1:n))
          localThickness = SUM(Basis(1:n) * SheetThickness(1:n))
@@ -3139,18 +3675,47 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
 
          Power = Power + Coeff
+         IF (LamSheet) THEN
+           LamSheetPower = LamSheetPower + Coeff
+           ! reactive part of the complex sheet conductance, as twice the time
+           ! average energy like the field energies of this solver
+           IF (vDOFS == 2) LamSheetEnergy = LamSheetEnergy - localThickness * SheetImagCond * &
+               SUM(E(1,:)**2 + E(2,:)**2) / (2 * Omega) * s
+         END IF
 
       END DO
     END DO
     
     IF( Parallel ) THEN
       Power = ParallelReduction(Power) / NoSlices
+      LamSheetPower = ParallelReduction(LamSheetPower) / NoSlices
+      LamSheetEnergy = ParallelReduction(LamSheetEnergy) / NoSlices
     END IF
       
     WRITE(Message,*) 'Thin sheet current power (the Joule effect): ', Power
     CALL Info( Caller, Message )
     CALL ListAddConstReal(Model % Simulation, 'res: Thin sheet current power', Power)
 
+  END IF
+
+  ! Loss of 'layered' laminate stacks: Im(Nu) of the stack bodies plus their
+  ! lamination sheets. Only the sum is the lamination loss: the sheet conductance
+  ! compensates a part of the net-current impedance held by the bodies, so the
+  ! sheet part alone can be negative.
+  IF( Parallel ) LamStackPowerSeen = ParallelReduction(LamStackPowerSeen, 2)
+  IF( LamStackPowerSeen > 0 .AND. ABS(LamSheetEnergy) > 0.0_dp ) THEN
+    ! The field energies were published before the sheets were integrated
+    Energy(2) = Energy(2) + LamSheetEnergy
+    IF ( ListGetLogical( SolverParams,'Separate Magnetic Energy',Found ) ) THEN
+      CALL ListAddConstReal(Model % Simulation,'res: Magnetic Field Energy',Energy(2))
+    ELSE
+      CALL ListAddConstReal(Model % Simulation,'res: ElectroMagnetic Field Energy',SUM(Energy(1:2)))
+    END IF
+  END IF
+  IF( LamStackPowerSeen > 0 ) THEN
+    WRITE(Message,'(A,ES15.6)') 'Laminate stack loss: ', LamStackPower + LamSheetPower
+    CALL Info( Caller, Message )
+    CALL ListAddConstReal( Model % Simulation, 'res: Laminate stack loss', LamStackPower + LamSheetPower )
   END IF
 
   IF (EigenAnalysis .AND. .NOT. VtuStyle ) THEN
@@ -3191,7 +3756,35 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
 CONTAINS
 
-  
+!-------------------------------------------------------------------
+!> The Foster ladder of local direction HomogDir(k) of the element at hand and
+!> its current states, which WhitneyAVSolver publishes after its solve in the
+!> -elem variable XiName, into slot k of HomogR and HomogXi.
+!-------------------------------------------------------------------
+  SUBROUTINE GetHomogLadderState(k, XiName)
+!-------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: k
+    CHARACTER(*) :: XiName
+    TYPE(Variable_t), POINTER :: XiVar
+    REAL(KIND=dp) :: taus(MaxHomogLadderOrder)
+    INTEGER :: ep, off
+
+    CALL GetFosterLadder(CompParams, HomogNuKey(HomogDir(k)), HomogOrder, &
+        HomogY0(HomogDir(k)), HomogR(1:HomogOrder,k), taus(1:HomogOrder))
+    XiVar => VariableGet(pSolver % Mesh % Variables, XiName)
+    IF (.NOT. ASSOCIATED(XiVar)) CALL Fatal(Caller, 'Transient homogenization: '// &
+        XiName//' not found; run WhitneyAVSolver before CalcFields.')
+    ep = Element % ElementIndex
+    IF (ASSOCIATED(XiVar % Perm)) ep = XiVar % Perm(ep)
+    off = (ep-1) * XiVar % DOFs
+    IF (ep <= 0 .OR. XiVar % DOFs < HomogOrder .OR. off + HomogOrder > SIZE(XiVar % Values)) &
+        CALL Fatal(Caller, 'Transient homogenization: invalid '//XiName//' element slot.')
+    HomogXi(1:HomogOrder,k) = XiVar % Values(off+1:off+HomogOrder)
+!-------------------------------------------------------------------
+  END SUBROUTINE GetHomogLadderState
+!-------------------------------------------------------------------
+
 !-------------------------------------------------------------------
   SUBROUTINE SumElementalVariable(Var, Values, BodyId, uAdditive)
 !-------------------------------------------------------------------
@@ -3473,7 +4066,7 @@ CONTAINS
     
     DEALLOCATE( LeftFORCE, RightFORCE, RightMap, LeftMap, AirGapForce )
 
-    IF (HomogenizationLoss) DEALLOCATE (Nu_el)
+    DEALLOCATE (Nu_el)
 !-------------------------------------------------------------------
   END SUBROUTINE CalcBoundaryModels
 !-------------------------------------------------------------------

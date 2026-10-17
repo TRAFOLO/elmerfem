@@ -154,7 +154,10 @@ SUBROUTINE LoadFields( Model,Solver,dt,TransientSimulation )
         IF(.NOT.ASSOCIATED(Frequencies)) THEN
           CALL Fatal ('LoadFields', 'Frequencies array not provided for harmonic mode')
         ELSE
-          WRITE( Message, *) 'Frequencies: ', Frequencies
+          IF( SIZE(Frequencies) < 1 ) CALL Fatal( 'LoadFields', 'Frequencies array is empty' )
+          ! One line for any number of harmonics: the whole list overran Message at 64 (End of record).
+          WRITE( Message, '(A,I0,A,I0,A,I0)') 'Frequencies: ', SIZE(Frequencies), ' result files, h', &
+              Frequencies(1), ' to h', Frequencies(SIZE(Frequencies))
           CALL Info( 'LoadFields', Message, Level=4 )
         END IF
         

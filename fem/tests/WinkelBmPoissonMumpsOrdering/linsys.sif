@@ -1,0 +1,4 @@
+Linear System Solver = Direct
+Linear System Direct Method = "Mumps"
+! WinkelBmPoissonMumps with the AMD ordering: the analysis must use it (INFOG(7) = 0).
+Mumps Ordering = String "amd"

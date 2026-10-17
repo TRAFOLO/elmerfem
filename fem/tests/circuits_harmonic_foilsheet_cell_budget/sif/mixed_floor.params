@@ -1,0 +1,14 @@
+! Default counts reserve cells x segments: the inner winding of 40 turns without "Sheet Cells" and "Sheet
+! Segments" is 40 cells x 16 segments = 640 strands, more than the whole budget. The automatic outer winding
+! (10 turns, 50 strands wanted) gets no share and takes the skin depth floor, 2 cells.
+! expect: Component 1 foil sheet: 40 cells x 1 sub-layers x 16 segments
+! expect: Component 2 foil sheet: 2 cells x 1 sub-layers x 5 segments
+Simulation 1 :: Frequency = Real 50
+Component 1 :: Number of Turns = Real 40
+Component 1 :: Foil Thickness = Real 0.0002
+Component 2 :: Number of Turns = Real 10
+Component 2 :: Foil Thickness = Real 0.0008
+Component 2 :: Sheet Cells = Integer 0
+Component 2 :: Sheet Segments = Integer 0
+Solver 10 :: Reference Norm = Real 1.09066693E-02
+Solver 10 :: Reference Norm Tolerance = Real 1E-6

@@ -1,0 +1,23 @@
+! 1200 turns in a scan of 0 Hz then 50 Hz: one cell per turn, so an 8.5 mm
+! element spans hundreds of cells and the strand piece buffer lowers the
+! automatic layout, segments first, then cells. The lowered layout given
+! explicitly (Sheet Cells = 600, Sheet Segments = 4) gives the same power.
+! expect: lowered from 1200 x 1 x 40 to 600 x 1 x 4
+! expect: foil sheet: 600 cells x 1 sub-layers x 4 segments
+! expect: Sheet Cells = 600, Sheet Segments = 4 (406 block elements)
+Simulation
+  Simulation Type = Scanning
+  Timestep Intervals = 2
+  Timestep Sizes = 1
+  Angular Frequency = Variable Time
+    Real
+      0 0
+      1.5 0
+      1.5001 314.159265359
+      3 314.159265359
+    End
+End
+Component 1 :: Number of Turns = Real 1200
+Component 1 :: Foil Thickness = Real 6.25e-6
+Solver 9 :: Reference Norm = Real 8.570816856076E+00
+Solver 9 :: Reference Norm Tolerance = Real 1E-6

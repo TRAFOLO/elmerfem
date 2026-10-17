@@ -1,0 +1,141 @@
+! Harmonic loss with field exponents other than 2 does not depend on the source phase (DEV-1599).
+! The unit cube of mgdyn_harmonic_loss, driven at 45 degrees: P = i exp(i pi/4) on boundary 5. The
+! problem is linear, so B turns with the source; the reference norms are the losses of the same case
+! driven at 0 degrees (P = i). The loss of each mode on its own changed by -16 % (exponent 2.5) and
+! +14 % (exponent 1.6) between the two.
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "mesh3d"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = "Cartesian"
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Output Intervals(1) = 1
+End
+
+Body 1
+  Equation = 1
+  Material = 1
+End
+
+! The loss keywords as TRAFOLO writes them: a Steinmetz term and an eddy term, here with
+! field exponents 2.5 and 1.6
+Material 1
+  Reluctivity  = Real 1
+  Electric Conductivity = Real 1
+  Harmonic Loss Linear Coefficient = Real 1.0
+  Harmonic Loss Quadratic Coefficient = Real 0.1
+  Harmonic Loss Linear Frequency Exponent = Real 1.0
+  Harmonic Loss Linear Exponent = Real 2.5
+  Harmonic Loss Quadratic Exponent = Real 1.6
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+$ w=1
+
+Solver 1
+  Equation = "MGDynamics"
+  Variable = P[P re:1 P im:1]
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Angular Frequency = Real $w
+  Linear System Symmetric = True
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = Ilu
+  Linear System Residual Output = 10
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+  Steady State Convergence Tolerance = 1e-09
+End
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Linear System Symmetric = True
+  Potential Variable = String "P"
+  Calculate Harmonic Loss = Logical True
+  Angular Frequency = Real $w
+  Calculate Elemental Fields = Logical True
+  Steady State Convergence Tolerance = 1
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Residual Output = 0
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+
+Boundary Condition 1
+  Target Boundaries(4) = 1 2 3 4
+  P re {e} = Real 0
+  P im {e} = Real 0
+End
+
+Boundary Condition 2
+  Target Boundaries(1) = 5
+  P re = Real -0.70710678118654752
+  P im = Real 0.70710678118654752
+  P re {e} = Real 0
+  P im {e} = Real 0
+End
+
+Boundary Condition 3
+  Target Boundaries(1) = 6
+  P re = Real 0
+  P im = Real 0
+  P re {e} = Real 0
+  P im {e} = Real 0
+End
+
+! The element fields TRAFOLO reads, and the logged totals
+Solver 3
+  Exec Solver = After Timestep
+  Equation = "LinearLossField"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = linear.dat
+  Variable 1 = Harmonic Loss Linear E
+  Operator 1 = int
+  Show Norm Index = 1
+End
+
+Solver 4
+  Exec Solver = After Timestep
+  Equation = "QuadraticLossField"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = quadratic.dat
+  Variable 1 = Harmonic Loss Quadratic E
+  Operator 1 = int
+  Show Norm Index = 1
+End
+
+Solver 5
+  Exec Solver = After Timestep
+  Equation = "LoggedLinearLoss"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = totals.dat
+  Show Norm Name = String "res: harmonic loss linear"
+End
+
+Solver 6
+  Exec Solver = After Timestep
+  Equation = "LoggedQuadraticLoss"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = totals2.dat
+  Show Norm Name = String "res: harmonic loss quadratic"
+End
+
+Solver 3 :: Reference Norm = 2.583923120315E-003
+Solver 3 :: Reference Norm Tolerance = 1e-6
+Solver 4 :: Reference Norm = 1.658172966468E-004
+Solver 4 :: Reference Norm Tolerance = 1e-6
+Solver 5 :: Reference Norm = 2.583923120315E-003
+Solver 5 :: Reference Norm Tolerance = 1e-6
+Solver 6 :: Reference Norm = 1.658172966468E-004
+Solver 6 :: Reference Norm Tolerance = 1e-6

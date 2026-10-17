@@ -11047,19 +11047,119 @@ END FUNCTION SearchNodeL
   END SUBROUTINE UpdateDependentObjects
 
 
-  
+!------------------------------------------------------------------------------
+!> L2 change of curl(x) from x0 to x for an edge element solver, real (one dof)
+!> or complex (two dofs), relative to the L2 norm of curl(x) unless Absolute.
+!> Gradient parts of x have no curl.
+!------------------------------------------------------------------------------
+  FUNCTION CurlChange( Solver, x, x0, Absolute ) RESULT( Change )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t), TARGET :: Solver
+    REAL(KIND=dp) :: x(:), x0(:)
+    LOGICAL :: Absolute
+    REAL(KIND=dp) :: Change
+!------------------------------------------------------------------------------
+    TYPE(Solver_t), POINTER :: pSolver
+    TYPE(Element_t), POINTER :: Element
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Basis(:), dBasisdx(:,:), WBasis(:,:), RotWBasis(:,:)
+    REAL(KIND=dp) :: detJ, Sums(2), Cur(3,2), Dif(3,2), Sgn
+    INTEGER, ALLOCATABLE :: Indexes(:)
+    INTEGER :: t, i, j, k, l, n, nd, np, Dofs, EdgeBasisDegree, EdgeDofs
+    LOGICAL :: PiolaVersion, SecondOrder, Flip, Parallel, Stat
+!------------------------------------------------------------------------------
+    pSolver => Solver
+    ! Not with 'Single Mesh': then every rank solves a whole mesh of its own
+    Parallel = Solver % Parallel
+    Flip = Solver % Variable % PeriodicFlipActive
+    Dofs = Solver % Variable % Dofs
+    IF( Dofs > 2 ) CALL Fatal('CurlChange','Expected a real or complex edge element field')
+    CALL EdgeElementStyle( Solver % Values, PiolaVersion, QuadraticApproximation = SecondOrder )
+    EdgeBasisDegree = 1
+    IF( SecondOrder ) EdgeBasisDegree = 2
+
+    n = Solver % Mesh % MaxElementNodes
+    nd = Solver % Mesh % MaxElementDOFs
+    ALLOCATE( Basis(n), dBasisdx(n,3), WBasis(nd,3), RotWBasis(nd,3), Indexes(nd) )
+
+    Sums = 0.0_dp
+    EdgeDofs = 0
+    DO t=1,Solver % NumberOfActiveElements
+      Element => Solver % Mesh % Elements( Solver % ActiveElements(t) )
+      IF( Parallel ) THEN
+        IF( Element % PartIndex /= ParEnv % MyPe ) CYCLE
+      END IF
+      n = Element % TYPE % NumberOfNodes
+      nd = mGetElementDOFs( Indexes, Element, Solver )
+      np = n * Solver % Def_Dofs( Element % TYPE % ElementCode / 100, Element % BodyId, 1 )
+      IF( nd <= np ) CYCLE
+      EdgeDofs = EdgeDofs + nd - np
+
+      CALL CopyElementNodesFromMesh( Nodes, Solver % Mesh, n, Element % NodeIndexes )
+      IP = GaussPoints( Element, EdgeBasis=.TRUE., PReferenceElement=PiolaVersion, &
+          EdgeBasisDegree=EdgeBasisDegree )
+      DO j=1,IP % n
+        Stat = ElementInfo( Element, Nodes, IP % U(j), IP % V(j), IP % W(j), detJ, &
+            Basis, dBasisdx, EdgeBasis=WBasis, RotBasis=RotWBasis, USolver=pSolver )
+        Cur = 0.0_dp
+        Dif = 0.0_dp
+        DO i=np+1,nd
+          IF( Indexes(i) <= 0 .OR. Indexes(i) > SIZE(Solver % Variable % Perm) ) CYCLE
+          k = Solver % Variable % Perm( Indexes(i) )
+          IF( k <= 0 ) CYCLE
+          ! Same sign convention as GetLocalSolution for conforming (periodic) edges
+          Sgn = 1.0_dp
+          IF( Flip ) THEN
+            IF( Solver % Mesh % PeriodicFlip( Indexes(i) ) ) Sgn = -1.0_dp
+          END IF
+          DO l=1,Dofs
+            Cur(:,l) = Cur(:,l) + Sgn * x(Dofs*(k-1)+l) * RotWBasis(i-np,:)
+            Dif(:,l) = Dif(:,l) + Sgn * ( x(Dofs*(k-1)+l) - x0(Dofs*(k-1)+l) ) * RotWBasis(i-np,:)
+          END DO
+        END DO
+        Sums(1) = Sums(1) + SUM( Dif(:,1:Dofs)**2 ) * detJ * IP % s(j)
+        Sums(2) = Sums(2) + SUM( Cur(:,1:Dofs)**2 ) * detJ * IP % s(j)
+      END DO
+    END DO
+
+    IF( Parallel ) THEN
+      EdgeDofs = NINT( ParallelReduction( 1.0_dp * EdgeDofs ) )
+      Sums(1) = ParallelReduction( Sums(1) )
+      Sums(2) = ParallelReduction( Sums(2) )
+    END IF
+    IF( EdgeDofs == 0 ) THEN
+      CALL Fatal('CurlChange','Convergence measure "flux density" needs an edge element solver')
+    END IF
+
+    IF( Absolute ) THEN
+      Change = SQRT( Sums(1) )
+    ELSE IF( Sums(2) > 0.0_dp ) THEN
+      Change = SQRT( Sums(1) / Sums(2) )
+    ELSE IF( Sums(1) > 0.0_dp ) THEN
+      Change = 1.0_dp
+    ELSE
+      Change = 0.0_dp
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION CurlChange
+!------------------------------------------------------------------------------
+
+
+
 !------------------------------------------------------------------------------
 !> When a new field has been computed compare it to the previous one.
 !> Different convergence measures may be used. 
 !> Also performs relaxation if a non-unity relaxation factor is given.
 !------------------------------------------------------------------------------
-  SUBROUTINE ComputeChange(Solver,SteadyState,nsize,values,values0,Matrix,RHS)
+  SUBROUTINE ComputeChange(Solver,SteadyState,nsize,values,values0,Matrix,RHS,Residual)
 !------------------------------------------------------------------------------
     TYPE(Solver_t), TARGET :: Solver
     LOGICAL :: SteadyState
     TYPE(Matrix_t), OPTIONAL, TARGET :: Matrix
     INTEGER, OPTIONAL :: nsize
     REAL(KIND=dp), OPTIONAL, TARGET :: values(:), values0(:), RHS(:)
+    REAL(KIND=dp), OPTIONAL :: Residual  !< 'residual' measure of a system the caller holds
 !------------------------------------------------------------------------------
     INTEGER :: i, n, nn, RelaxAfter, IterNo, MinIter, MaxIter, dofs
     TYPE(Matrix_t), POINTER :: A
@@ -11339,9 +11439,10 @@ END FUNCTION SearchNodeL
     !--------------------------------------------------------------------------
     ! The norm should be bounded in order to reach convergence
     !--------------------------------------------------------------------------
-    IF( Norm /= Norm ) THEN
-      PRINT *,'Norm:',Norm,PrevNorm, n
-      CALL NumericalError(Caller,'Norm of solution appears to be NaN')
+    IF( Norm /= Norm .OR. ABS(Norm) > HUGE(Norm) ) THEN
+      WRITE( Message,'(A,ES12.5)') 'Norm of the solution of "'//SolverDisplayName(Solver)// &
+          '" is NaN or Inf; previous norm ',PrevNorm
+      CALL NumericalError(Caller,Message)
     END IF
 
     IF( SteadyState ) THEN
@@ -11364,51 +11465,17 @@ END FUNCTION SearchNodeL
       ! x is solution of A(x0)x=b(x0) thus residual should really be r=b(x)-A(x)x
       ! Instead we use r=b(x0)-A(x0)x0 which unfortunately is one step behind.
       !--------------------------------------------------------------------------
-      IF(PRESENT(RHS)) THEN
-        b => RHS
+      IF( PRESENT(Residual) ) THEN
+        Change = Residual
       ELSE
-        b => A % rhs
-      END IF
-      
-      ALLOCATE(r(n))
-      r=0._dp
-
-      IF (Parallel) THEN
-        ALLOCATE( TmpRHSVec(n), TmpXVec(n) )
-
-        nn = A % ParMatrix % SplittedMatrix % InsideMatrix % NumberOfRows
-
-        TmpRhsVec = b
-        CALL ParallelInitSolve( A, tmpXVec, TmpRhsVec, r)
-
-        tmpXvec = x0(1:n)
-        CALL ParallelVector(a,TmpXvec)
-        CALL ParallelVector(A,tmpRhsvec)
-
-        CALL ParallelMatrixVector(A, TmpXvec, r)
-        DO i=1,nn
-          r(i) = r(i) - tmprhsvec(i)
-        END DO
-
-        Change = ParallelNorm(nn,r)
-        bNorm =  ParallelNorm(nn,tmpRhsVec)
-      ELSE
-        CALL MatrixVectorMultiply( A, x0, r)
-        DO i=1,n
-          r(i) = r(i) - b(i)
-        END DO
-        Change = ComputeNorm(Solver, n, r)
-        bNorm  = ComputeNorm(Solver, n, b)
-      END IF
-
-
-      IF(.NOT. ConvergenceAbsolute) THEN
-        IF(bNorm > 0.0) THEN
-          Change = Change / bNorm
+        IF(PRESENT(RHS)) THEN
+          b => RHS
+        ELSE
+          b => A % rhs
         END IF
+        Change = LaggedResidual( Solver, A, b, x0, n, Parallel, ConvergenceAbsolute )
       END IF
-      DEALLOCATE(r)
-      
+
     CASE('linear system residual')
       !--------------------------------------------------------------------------
       ! Here the true linear system residual r=b(x0)-A(x0)x is computed.
@@ -11476,7 +11543,12 @@ END FUNCTION SearchNodeL
       IF( .NOT. ConvergenceAbsolute .AND. Norm + PrevNorm > 0.0) THEN
         Change = Change * 2.0_dp/ (Norm+PrevNorm)
       END IF
-      
+
+    CASE('flux density')
+      ! Edge element solvers: the gradient part of an ungauged potential changes from solve
+      ! to solve without changing B = curl(x), so 'norm' and 'solution' may never settle.
+      Change = CurlChange( Solver, x, x0, ConvergenceAbsolute )
+
     CASE DEFAULT
       CALL Warn(Caller,'Unknown convergence measure: '//TRIM(ConvergenceType))    
       
@@ -11536,11 +11608,28 @@ END FUNCTION SearchNodeL
           Solver % Variable % NonlinConverged = 1
         ELSE IF( IterNo >= MaxIter ) THEN
           IF( ListGetLogical( SolverParams,'Nonlinear System Abort Not Converged',Stat ) ) THEN
-            CALL Fatal(Caller,'Nonlinear iteration did not converge to tolerance')
-          ELSE
-            CALL Info(Caller,'Nonlinear iteration did not converge to tolerance',Level=6)
-            ! Solver % Variable % NonlinConverged = 2            
+            CALL Fatal(Caller,'Nonlinear iteration of "'//SolverDisplayName(Solver)// &
+                '" did not converge to tolerance in '//I2S(MaxIter)//' iterations')
+          ELSE IF( MaxIter > 1 ) THEN
+            WRITE( Message,'(A,I0,A,ES10.3,A,ES10.3)') 'NOT CONVERGED: nonlinear solver="'// &
+                SolverDisplayName(Solver)//'" iterations=',IterNo,' change=',Change, &
+                ' tolerance=',Tolerance
+            CALL Warn(Caller,Message)
+            ! Solver % Variable % NonlinConverged = 2
           END IF
+        END IF
+      END IF
+
+      ! A single iteration is a plain linear solve whose change is measured from the
+      ! initial guess, so it is not a convergence failure, unless it is relaxed: then
+      ! the result is the solution blended with the initial guess. Once per solver.
+      IF( MaxIter <= 1 .AND. Relax ) THEN
+        IF( .NOT. ListGetLogical( SolverParams,'Relaxed Single Iteration Warned',Stat ) ) THEN
+          WRITE( Message,'(A,ES10.3,A)') 'NOT CONVERGED: nonlinear solver="'// &
+              SolverDisplayName(Solver)//'" iterations=1 relaxation=',Relaxation, &
+              ': one relaxed iteration does not reach the solution'
+          CALL Warn(Caller,Message)
+          CALL ListAddLogical( SolverParams,'Relaxed Single Iteration Warned',.TRUE. )
         END IF
       END IF
 
@@ -11740,6 +11829,65 @@ END FUNCTION SearchNodeL
 !------------------------------------------------------------------------------
   END SUBROUTINE ComputeChange
 !------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Norm of the residual A*x0-b of the previous iterate x0 in the system of the
+!> new solution, relative to the norm of b unless Absolute.
+!------------------------------------------------------------------------------
+  FUNCTION LaggedResidual( Solver, A, b, x0, n, Parallel, Absolute ) RESULT( Change )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    TYPE(Matrix_t), POINTER :: A
+    REAL(KIND=dp), TARGET :: b(:), x0(:)
+    INTEGER :: n
+    LOGICAL :: Parallel, Absolute
+    REAL(KIND=dp) :: Change
+!------------------------------------------------------------------------------
+    REAL(KIND=dp), ALLOCATABLE, TARGET :: r(:)
+    REAL(KIND=dp), ALLOCATABLE :: TmpXVec(:), TmpRHSVec(:)
+    REAL(KIND=dp) :: bNorm
+    INTEGER :: i, nn
+!------------------------------------------------------------------------------
+    ALLOCATE(r(n))
+    r=0._dp
+
+    IF (Parallel) THEN
+      ALLOCATE( TmpRHSVec(n), TmpXVec(n) )
+
+      nn = A % ParMatrix % SplittedMatrix % InsideMatrix % NumberOfRows
+
+      TmpRhsVec = b(1:n)
+      CALL ParallelInitSolve( A, tmpXVec, TmpRhsVec, r)
+
+      tmpXvec = x0(1:n)
+      CALL ParallelVector(a,TmpXvec)
+      CALL ParallelVector(A,tmpRhsvec)
+
+      CALL ParallelMatrixVector(A, TmpXvec, r)
+      DO i=1,nn
+        r(i) = r(i) - tmprhsvec(i)
+      END DO
+
+      Change = ParallelNorm(nn,r)
+      bNorm =  ParallelNorm(nn,tmpRhsVec)
+    ELSE
+      CALL MatrixVectorMultiply( A, x0, r)
+      DO i=1,n
+        r(i) = r(i) - b(i)
+      END DO
+      Change = ComputeNorm(Solver, n, r)
+      bNorm  = ComputeNorm(Solver, n, b)
+    END IF
+
+    IF(.NOT. Absolute) THEN
+      IF(bNorm > 0.0) THEN
+        Change = Change / bNorm
+      END IF
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaggedResidual
+!------------------------------------------------------------------------------
     
 
 
@@ -11763,18 +11911,51 @@ END FUNCTION SearchNodeL
     CHARACTER(:), ALLOCATABLE :: VarName, GaussDef
     TYPE(Solver_t), POINTER :: pSolver, prevSolver => NULL()
     TYPE(Variable_t), POINTER :: IntegVar
-    INTEGER :: AdaptOrder, AdaptNp, Np, RelOrder
+    INTEGER :: AdaptOrder, AdaptNp, Np, RelOrder, BaseNp, BaseRelOrder
     REAL(KIND=dp) :: MinLim, MaxLim, MinV, MaxV, V
     LOGICAL :: UseAdapt, Found,ElementalRule
     INTEGER :: i,j,n,ElementalNp(8),prevVisited = -1
-    LOGICAL :: Debug, InitDone, pRef, IsBC, prevIsBC, AdaptSplit, UseNameSpace
+    LOGICAL :: Debug, InitDone, pRef, IsBC, prevIsBC, AdaptSplit, UseNameSpace, EdgePRef
     INTEGER :: EdgeBasisDegree
     REAL(KIND=dp) :: ElemPhi(27)
     LOGICAL :: ElemCut(8)
     TYPE(Nodes_t) :: ElemNodes
-    
-    SAVE prevSolver, UseAdapt, MinLim, MaxLim, IntegVar, AdaptOrder, AdaptNp, RelOrder, Np, &
-        ElementalRule, ElementalNp, prevVisited, pRef, prevIsBC, AdaptSplit, ElemPhi, ElemNodes
+
+    ! NOTE: pRef, Np, RelOrder and ElemPhi are deliberately NOT in the SAVE
+    ! list. They are element-dependent (written per element in the rule
+    ! selection at the bottom of this function) and must be per-call locals so
+    ! that concurrent threads each get their own copy.
+    !
+    ! pRef used to be SAVEd shared state written only inside the init block;
+    ! when several threads hit their first element concurrently they all
+    ! re-ran the init, which transiently toggled the shared pRef
+    ! .FALSE. -> .TRUE. while other threads were already reading it for the
+    ! rule selection at the bottom of this function. A p-element could then
+    ! rarely be integrated with the non-p rule: slightly wrong local matrix,
+    ! or - with too few points for the bubble basis - a singular block in
+    ! CondensateP (the intermittent "LUDecomp: Matrix is singular" failure
+    ! in e.g. Step_stokes_heat_vec / SD_Step_stokes_heat_vec).
+    !
+    ! Np and RelOrder are the same hazard class: they hold a solver-level
+    ! default (captured once during init) that is then overwritten per element
+    ! for the elemental / adaptive integration rules. The persistent default
+    ! lives in the SAVEd BaseNp/BaseRelOrder; the per-call Np/RelOrder are
+    ! re-seeded from those after the init block on every call. ElemPhi is
+    ! pure per-element scratch (nodal values of the adaptive variable).
+    !
+    ! REMAINING HAZARD (not fixed here): the "Adaptive Integration Split"
+    ! sub-branch below still uses SAVEd scratch with shared state - ElemNodes
+    ! (POINTER components, lazy-allocated) and, in its inner BLOCK,
+    ! PieceElement / IPtmp / PieceNodes. This 2D-only path is exercised for
+    ! correctness by the ModelPDEipsplit test, but only serially: its solver
+    ! (ModelPDEhandle / AdvDiffSolver) has no !$OMP PARALLEL assembly, so the
+    ! SAVEd scratch is never actually contended there. It remains latently
+    ! thread-unsafe and would race if a threaded (*Vec-style) solver ever used
+    ! Adaptive Integration Split; rework it to per-call scratch before doing
+    ! so. ElemNodes is left SAVE here (its POINTER components would leak on
+    ! every call as a plain non-SAVE local) pending that rework.
+    SAVE prevSolver, UseAdapt, MinLim, MaxLim, IntegVar, AdaptOrder, AdaptNp, BaseRelOrder, BaseNp, &
+        ElementalRule, ElementalNp, prevVisited, EdgePRef, prevIsBC, AdaptSplit, ElemNodes
 
     IF( PRESENT( Solver ) ) THEN
       pSolver => Solver
@@ -11787,8 +11968,37 @@ END FUNCTION SearchNodeL
    
     InitDone = ASSOCIATED( pSolver, prevSolver ) .AND. &
         ( prevVisited == pSolver % TimesVisited ) .AND. (.NOT. (IsBC .NEQV. PrevIsBC) )
-    
+
     IF( .NOT. InitDone ) THEN
+      ! Unsynchronized double-checked-lock, same anti-pattern already fixed
+      ! elsewhere this session (EnsureStores, Ip2DgFieldInElement): the fast
+      ! InitDone check above happens with no lock, so several threads hitting
+      ! their first element of a parallel assembly concurrently (no serial
+      ! warm-up call exists before e.g. StatElecSolve's BulkAssembly) can all
+      ! enter this block together. Unlike the already-fixed pRef/Np/RelOrder
+      ! hazard, the danger here is not that the *values* differ across
+      ! threads (for a plain SIF with no adaptive/elemental/namespace keys
+      ! they are deterministic) -- it is that nothing orders or flushes the
+      ! writes to BaseNp/BaseRelOrder/ElementalRule/UseAdapt/MinLim/MaxLim/
+      ! EdgePRef/ElementalNp/AdaptNp/AdaptOrder/AdaptSplit relative to the
+      ! terminal "prevSolver => pSolver" / "prevVisited = ..." publish below.
+      ! A third thread can observe InitDone flip to TRUE (via those two
+      ! writes becoming visible) while an earlier field is still stale or
+      ! mid-write under compiler/CPU store reordering, then read garbage into
+      ! the per-element rule selection just below this block. Re-checking
+      ! InitDone inside the critical section restores real double-checked
+      ! locking: cheap in the common (already-initialized) case, since the
+      ! unlocked fast path above still avoids the lock entirely once done.
+      ! NOTE: this MUST stay an unnamed CRITICAL. A named variant
+      ! (GaussPointsAdaptInit) deterministically SIGSEGVs several MPI tests
+      ! (radiation*/radiator*/mgdyn_torus/pointload _np4) on the Windows
+      ! MSYS2/UCRT MinGW gomp runtime -- a toolchain bug in the named-critical
+      ! machinery, unrelated to the logic here (removing the name, or the
+      ! directive entirely, makes them pass; the unnamed lock behaves).
+      !$OMP CRITICAL
+      InitDone = ASSOCIATED( pSolver, prevSolver ) .AND. &
+          ( prevVisited == pSolver % TimesVisited ) .AND. (.NOT. (IsBC .NEQV. PrevIsBC) )
+      IF( .NOT. InitDone ) THEN
       PrevIsBC = IsBC
 
       IF(IsBC ) THEN
@@ -11805,10 +12015,10 @@ END FUNCTION SearchNodeL
         END IF
       END IF
                     
-      RelOrder = ListGetInteger( pSolver % Values,'Relative Integration Order',Found )
+      BaseRelOrder = ListGetInteger( pSolver % Values,'Relative Integration Order',Found )
       AdaptNp = 0
       AdaptSplit = .FALSE.
-      Np = ListGetInteger( pSolver % Values,'Number of Integration Points',Found )
+      BaseNp = ListGetInteger( pSolver % Values,'Number of Integration Points',Found )
 
       ! Elemental explicit rule will dominate over all other rules
       GaussDef = ListGetString( pSolver % Values,'Element Integration Points',ElementalRule )
@@ -11856,21 +12066,25 @@ END FUNCTION SearchNodeL
       
       
       pRef = .FALSE.
-      
+
       EdgeBasisDegree = 0
       IF( PRESENT(EdgeBasis) ) THEN
         IF( EdgeBasis ) THEN
 
           CALL EdgeElementStyle(pSolver % Values, pRef, BasisDegree=EdgeBasisDegree)
+          ! Store the solver-constant edge-basis reference-element flag for
+          ! the per-call pRef selection below (single same-value store; the
+          ! local pRef is used within this init block only).
+          EdgePRef = pRef
 
           ! If elemental rule has not been given then use special edge basis rules
           ! to overrule any other rule for the gauss points. 
           IF(.NOT. ElementalRule ) THEN
-            ! We can alter between the two explicit rules of edge basis using relative integration order. 
-            IF( RelOrder /= 0 ) THEN
-              IF( RelOrder == 1 .AND. EdgeBasisDegree == 1 ) THEN
+            ! We can alter between the two explicit rules of edge basis using relative integration order.
+            IF( BaseRelOrder /= 0 ) THEN
+              IF( BaseRelOrder == 1 .AND. EdgeBasisDegree == 1 ) THEN
                 EdgeBasisDegree = 2
-              ELSE IF( RelOrder == -1 .AND. EdgeBasisDegree == 2 ) THEN
+              ELSE IF( BaseRelOrder == -1 .AND. EdgeBasisDegree == 2 ) THEN
                 EdgeBasisDegree = 1
               ELSE
                 CALL Warn('GaussPointsAdapt','Relative integration order does not have any effect for Edge Basis')
@@ -11891,20 +12105,37 @@ END FUNCTION SearchNodeL
             CALL Fatal('GaussPointsAdapt','Adaptive rules not yet compatible with EdgeBasis')
           END IF
         END IF
-      ELSE
-        ! Apart from edge elements we may have p-elements defined.
-        ! If not specified check from the current solver. 
-        IF( PRESENT(pReferenceElement) ) THEN
-          pRef = pReferenceElement 
-        ELSE
-          pRef = isActivePElement(Element,pSolver)
-        END IF
       END IF
-      
+
       prevSolver => pSolver
       prevVisited = pSolver % TimesVisited
+      END IF
+      !$OMP END CRITICAL
     END IF
-    
+
+    ! Select the reference-element style for THIS call/element. Computed as a
+    ! local on every call - never cached in shared SAVE state - to stay
+    ! race-free when concurrent threads re-run the init block above (see the
+    ! NOTE at the SAVE statement). isActivePElement is only a flag check plus
+    ! a small array scan, so this costs next to nothing per element.
+    IF( PRESENT(EdgeBasis) ) THEN
+      pRef = .FALSE.
+      IF( EdgeBasis ) pRef = EdgePRef
+    ELSE IF( PRESENT(pReferenceElement) ) THEN
+      pRef = pReferenceElement
+    ELSE
+      ! Apart from edge elements we may have p-elements defined.
+      ! If not specified check from the current solver.
+      pRef = isActivePElement(Element,pSolver)
+    END IF
+
+    ! Re-seed the per-call rule parameters from the solver-level defaults
+    ! captured during init. These may be overwritten per element just below;
+    ! keeping them as call-locals (seeded from the SAVEd base each call)
+    ! avoids threads clobbering each other's rule selection.
+    Np = BaseNp
+    RelOrder = BaseRelOrder
+
     IF( ElementalRule ) THEN
       ! Elemental explicit rule always has the prevalance
       Np = ElementalNp( Element % TYPE % ElementCode / 100 )
@@ -11948,7 +12179,14 @@ END FUNCTION SearchNodeL
       IF( .NOT. ( MaxV < MinLim .OR. MinV > MaxLim ) ) THEN
 
         IF( AdaptSplit ) THEN
-          ElemPhi(1:n) = ElemPhi(1:n) - MinLim 
+          ! THREADING: this adaptive-split branch is SERIAL-ONLY. ElemNodes
+          ! (below) and the PieceElement/IPtmp/PieceNodes SAVEd scratch in the
+          ! inner BLOCK are shared across calls, so calling this from an OMP
+          ! parallel assembly loop would race. Currently safe only because its
+          ! solver (ModelPDEhandle/AdvDiffSolver) assembles serially. Rework
+          ! this scratch to per-call locals before using adaptive-split with a
+          ! threaded (*Vec-style) solver. See the NOTE at the SAVE statement.
+          ElemPhi(1:n) = ElemPhi(1:n) - MinLim
           IF(.NOT. ASSOCIATED(ElemNodes % x)) THEN
             ALLOCATE(ElemNodes % x(2*n),ElemNodes % y(2*n), ElemNodes % z(2*n))
           END IF
@@ -12171,6 +12409,11 @@ END FUNCTION SearchNodeL
     !----------------------------------------------------
     IF( FirstIter ) THEN
       CALL Info('CheckStepSize','Initializing step-size search',Level=6)
+
+      ! The line search measures the change of the solution norm itself.
+      IF( ListGetString(SolverParams,'Nonlinear System Convergence Measure',Stat) == 'flux density' ) &
+          CALL Fatal('CheckStepSize','Convergence measure "flux density" is not available with '//&
+          '"Nonlinear System Linesearch"')
 
       IF(PRESENT(nsize)) THEN
         n = nsize
@@ -15454,6 +15697,12 @@ END FUNCTION SearchNodeL
     ComputeChangeScaled = ListGetLogical(Params,&
         'Nonlinear System Compute Change in Scaled System',GotIt)
     IF(.NOT.GotIt) ComputeChangeScaled = .FALSE.
+    ! Diagonal scaling does not keep gradients curl free.
+    IF( ComputeChangeScaled ) THEN
+      IF( ListGetString(Params,'Nonlinear System Convergence Measure',GotIt) == 'flux density' ) &
+          CALL Fatal(Caller,'Convergence measure "flux density" needs the unscaled solution: '//&
+          'do not combine it with "Nonlinear System Compute Change in Scaled System"')
+    END IF
 
     IF(ComputeChangeScaled) THEN
       ALLOCATE(NonlinVals(SIZE(x)))
@@ -16743,7 +16992,7 @@ END FUNCTION SearchNodeL
     IF(.NOT. NeedPrevSol ) THEN
       Method = ListGetString( Params, &
         'Nonlinear System Convergence Measure', Found ) 
-      NeedPrevSol = ( Method == 'residual' .OR. Method == 'solution' )
+      NeedPrevSol = ( Method == 'residual' .OR. Method == 'solution' .OR. Method == 'flux density' )
     END IF
 
     IF( NeedPrevSol ) THEN
@@ -19920,6 +20169,8 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
   REAL(KIND=dp), ALLOCATABLE, TARGET :: CollectionSolution(:)
   INTEGER :: NumberOfRows, NumberOfValues, MultiplierDOFs, istat, NoEmptyRows 
   INTEGER :: i, j, k, l, m, n, p,q, ix, Loop, colj, nIter
+  INTEGER :: RelaxAfter
+  LOGICAL :: GotIt
   TYPE(Variable_t), POINTER :: MultVar, iterV
   REAL(KIND=dp) :: scl, rowsum, Relax, val
   LOGICAL :: Found, ExportMultiplier, NotExplicit, Refactorize, EnforceDirichlet, &
@@ -19989,15 +20240,38 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
       CALL Info( Caller,'Trying to keep previous collection matrix structures',Level=10)
     END IF
   ELSE
-    IF(ASSOCIATED(Solver % ParEnv % Active)) THEN
-      DEALLOCATE(Solver % ParEnv % Active)
-      Solver % ParEnv % Active => Null()
-    END IF
+    ! These two arrays are shared: ParEnv_Common is structure copied into a
+    ! solver's ParEnv (ParallelUtils) and back (SolveEquations), so several
+    ! ParEnv_t hold the same target. Freeing it here left the others pointing
+    ! at freed memory, and their readers (SParIterActive, FindActivePEs) test
+    ! ASSOCIATED, which a dangling pointer passes: they then write PEs logicals
+    ! through it into whatever the allocator has since handed out. Free only
+    ! what nobody else references - the same guard FreeMatrix already uses.
+    BLOCK
+      LOGICAL :: Shared
+      INTEGER :: si
+      IF(ASSOCIATED(Solver % ParEnv % Active)) THEN
+        Shared = ASSOCIATED(ParEnv_Common % Active, Solver % ParEnv % Active)
+        DO si=1,CurrentModel % NumberOfSolvers
+          IF(CurrentModel % Solvers(si) % SolverId == Solver % SolverId) CYCLE
+          IF(ASSOCIATED(Solver % ParEnv % Active, &
+              CurrentModel % Solvers(si) % ParEnv % Active)) Shared = .TRUE.
+        END DO
+        IF(.NOT. Shared) DEALLOCATE(Solver % ParEnv % Active)
+        Solver % ParEnv % Active => Null()
+      END IF
 
-    IF(ASSOCIATED(Solver % ParEnv % IsNeighbour)) THEN
-      DEALLOCATE(Solver % ParEnv % IsNeighbour)
-      Solver % ParEnv % Isneighbour => Null()
-    END IF
+      IF(ASSOCIATED(Solver % ParEnv % IsNeighbour)) THEN
+        Shared = ASSOCIATED(ParEnv_Common % IsNeighbour, Solver % ParEnv % IsNeighbour)
+        DO si=1,CurrentModel % NumberOfSolvers
+          IF(CurrentModel % Solvers(si) % SolverId == Solver % SolverId) CYCLE
+          IF(ASSOCIATED(Solver % ParEnv % IsNeighbour, &
+              CurrentModel % Solvers(si) % ParEnv % IsNeighbour)) Shared = .TRUE.
+        END DO
+        IF(.NOT. Shared) DEALLOCATE(Solver % ParEnv % IsNeighbour)
+        Solver % ParEnv % Isneighbour => Null()
+      END IF
+    END BLOCK
   END IF
 
   IF(.NOT.ASSOCIATED(CollectionMatrix)) THEN
@@ -20550,6 +20824,16 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
             j=j+MAX(0,AddMatrix % NumberOfRows - StiffMatrix % NumberOFRows)
 
         Relax = ListGetCReal( Params,'Lagrange Multiplier Relaxation Factor', Found )
+        IF( .NOT. Found ) THEN
+          ! Follow the relaxation of the field in ComputeChange so that the exported
+          ! multiplier (e.g. circuit voltages and currents) is the same iterate as
+          ! the relaxed solution.
+          Relax = ListGetCReal( Params,'Nonlinear System Relaxation Factor', Found )
+          IF( Found ) THEN
+            RelaxAfter = ListGetInteger( Params,'Nonlinear System Relaxation After', GotIt )
+            IF( GotIt ) Found = ( RelaxAfter < nIter )
+          END IF
+        END IF
         IF( ResidualMode .AND. nIter > 1 ) THEN
           IF( Found ) THEN          
             MultiplierValues(1:j) = MultiplierValues(1:j) + &
@@ -20575,7 +20859,28 @@ RECURSIVE SUBROUTINE SolveWithLinearRestriction( StiffMatrix, ForceVector, &
     IF( SkipConstraints ) THEN
       CALL ListAddLogical( Params,'Skip Advance Nonlinear iter',.FALSE.)
       CALL ListAddLogical( Params,'Skip Compute Nonlinear Change',.FALSE.)
-      CALL ComputeChange(Solver,.FALSE.,StiffMatrix % NumberOfRows,Matrix=StiffMatrix,Rhs=ForceVector)
+      IF( ListGetString(Params,'Nonlinear System Convergence Measure',Found) == 'residual' .AND. &
+          ASSOCIATED( Solver % Variable % NonlinValues ) .AND. .NOT. EliminateConstraints .AND. &
+          .NOT. ( ResidualMode .AND. nIter > 1 ) ) THEN
+        ! The field rows alone leave out the constraint forces, and their right-hand side is
+        ! zero when the constraints (a circuit) drive the field: the first iterate then has
+        ! zero residual. Take the whole system, with the previous field and the new
+        ! multipliers, as ComputeChange does when the constraints are not skipped.
+        BLOCK
+          REAL(KIND=dp), ALLOCATABLE, TARGET :: PrevSolution(:)
+          LOGICAL :: Absolute
+          Absolute = ListGetLogical(Params,'Nonlinear System Convergence Absolute',Found)
+          IF(.NOT. Found) Absolute = ListGetLogical(Params,'Use Absolute Norm for Convergence',Found)
+          j = StiffMatrix % NumberOfRows
+          PrevSolution = CollectionSolution
+          PrevSolution(1:j) = Solver % Variable % NonlinValues(1:j)
+          CALL ComputeChange(Solver,.FALSE.,j,Matrix=StiffMatrix,Rhs=ForceVector, &
+              Residual=LaggedResidual(Solver,CollectionMatrix,CollectionVector,PrevSolution, &
+              CollectionMatrix % NumberOfRows,Parallel,Absolute))
+        END BLOCK
+      ELSE
+        CALL ComputeChange(Solver,.FALSE.,StiffMatrix % NumberOfRows,Matrix=StiffMatrix,Rhs=ForceVector)
+      END IF
     END IF
         
     DEALLOCATE(CollectionSolution)
@@ -24723,7 +25028,7 @@ CONTAINS
          row = row + Ctmp % NumberOfRows
          Ctmp => Ctmp % ConstraintMatrix
 
-         IF( InfoActive(32) ) THEN           
+         IF( InfoActive(32) .AND. ASSOCIATED(Ctmp) ) THEN           
            CALL VectorValuesRange(Ctmp % Values,SIZE(Ctmp % Values),'Ctmp'//I2S(mcount))
            IF( ASSOCIATED( Ctmp % InvPerm ) ) THEN
              PRINT *,'InvPerm range:',MINVAL(Ctmp % InvPerm), MAXVAL(Ctmp % InvPerm), SUM(Ctmp % InvPerm)
