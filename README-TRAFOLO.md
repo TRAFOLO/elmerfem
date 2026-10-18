@@ -363,8 +363,12 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   minor semi-axes of the elliptical B, which do not depend on the phase; a unidirectional field
   gives the Steinmetz law at its peak B, exponent 2 and real fields (transient runs) give the
   previous values exactly. `ComponentLoss` and its log lines refer to the two axes. Upstream Elmer
-  (devel) and `FourierLoss` (for each harmonic's cos/sin pair) have the same per-mode sum. Test:
-  `mgdyn_harmonic_loss_phase`.
+  fixed the same dependence in `CalcFields` and `FourierLoss` on 2026-10-07 (5216c95d2), with one
+  amplitude, |B|^2 = |Re B|^2 + |Im B|^2: a circular field gives 2^(n/2) times the alternating loss
+  at its peak, where the fork gives 2; the two agree for a unidirectional field, and neither is
+  checked against measured rotational loss. The fork's `FourierLoss` keeps the per-mode sum
+  (TRAFOLO does not run it). Test: `mgdyn_harmonic_loss_phase` (upstream has a different test of
+  the same name).
 - `layered` laminate stack model of the harmonic A-V solver (DEV-1600), for stacks of insulated
   laminations whose thickness d exceeds the skin depth. A body with `Laminate Stack Model =
   "layered"`, `Laminate Thickness` d, `Laminate Stack Conductivity` sigma, `Laminate Stacking
@@ -391,6 +395,17 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   the edge basis of the potential solver, on the same mesh face as the assembly (DEV-1600). Before,
   it took its own solver's counts and a Piola basis and reported about 1e9 W instead of 1e-2 W in a
   3-D harmonic model with the default edge elements.
+- Transient core loss of `ProcessFields` without the switch-on step (DEV-1607). The first step
+  starts from the zero initial field, not from the excitation at t = 0; its dB/dt was taken against
+  that zero field and the iGSE DeltaB bounds started at B = 0, and without `Averaging Start Time`
+  (TRAFOLO with no skipped periods) both went into the averages. A field of 0.5 + 0.1 cos(wt) T over
+  one period gave 25 times (GSE) and 109 times (iGSE) the steady core loss. Now the first step has
+  no dB/dt, so no core loss, and the bounds start at its field; the Joule averages are unchanged. A
+  waveform that does start from zero loses that one step, up to about 2/K of the core loss averaged
+  over K steps. `Averaging Start Time` is also read without `Calculate Harmonic Loss`: models
+  without core loss ignored it and averaged from t = 0. Tests: `mgdyn_transient_loss_start_gse`,
+  `mgdyn_transient_loss_start_igse`; `circuits_transient_foilsheet_skinloss` and
+  `circuits_transient_stranded_skinladder_rl` / `_sine` now get their start time without core loss.
 
 ## Building the distributed bundle
 
