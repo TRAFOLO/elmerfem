@@ -130,9 +130,6 @@ Solver 9  !---- ProcessFields, ProcessFields
    Equation = "post process data"
    Procedure = "ProcessFields" "ProcessFields"
    Update Exported Variables = Logical True
-   ! ProcessFields reads the start time only with the core loss on; the
-   ! materials give no core loss coefficients.
-   Calculate Harmonic Loss = Logical True
    Averaging Start Time = Real 0.02
 End
 Solver 10  !---- SaveData, SaveScalars
