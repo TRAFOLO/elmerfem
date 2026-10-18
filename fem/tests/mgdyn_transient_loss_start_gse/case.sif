@@ -1,0 +1,107 @@
+!---------------------------------------------------------------------
+! Transient GSE core loss averaged without 'Averaging Start Time', as
+! TRAFOLO runs it with no skipped periods. A uniform B = 0.5 + 0.1 cos(2 pi t)
+! along x is imposed through the tangential vector potential on all faces of
+! a unit cube (conductivity 1e-6, so no eddy current disturbs it), 200 steps
+! per period: the first step and one full period after it.
+! The first step starts from the zero initial field, not from B(0) = 0.6.
+! Its dB/dt against that field went into the average: 1.1057 W, 25 times
+! the steady loss. That step now adds no core loss, so the norm is the GSE
+! loss of the period after it averaged over all 201 steps: 0.0435615 W from
+! the law with the same backward differences (hysteresis 0.0425666, eddy
+! 0.0009949), plus 2.4e-5 W of Joule heat, mostly from the switch-on step.
+!---------------------------------------------------------------------
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "cube"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Transient
+  Timestepping Method = implicit euler
+  Timestep Intervals(1) = 201
+  Timestep Sizes(1) = 0.005
+  Steady State Max Iterations = 1
+End
+
+Body 1
+  Equation = 1
+  Material = 1
+End
+
+Material 1
+  Reluctivity = Real 1
+  Electric Conductivity = Real 1e-6
+  Density = Real 1
+  Harmonic Loss Linear Coefficient = Real 1.0
+  Harmonic Loss Quadratic Coefficient = Real 0.1
+  Harmonic Loss Linear Frequency Exponent = Real 1.4
+  Harmonic Loss Linear Exponent = Real 2.4
+End
+
+Equation 1
+  Active Solvers(4) = 1 2 3 4
+End
+
+Solver 1
+  Equation = "MGDynamics"
+  Variable = P
+  Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+  Linear System Symmetric = True
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = ILU0
+  Linear System Residual Output = 0
+  Linear System Max Iterations = 10000
+  Linear System Iterative Method = BiCGStabL
+  Linear System Convergence Tolerance = 1.0e-10
+  Steady State Convergence Tolerance = 1e-09
+End
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Linear System Symmetric = True
+  Potential Variable = String "P"
+  Calculate Elemental Fields = Logical True
+  Calculate Nodal Fields = Logical False
+  Calculate Joule Heating = Logical True
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+
+Solver 3
+  Procedure = "ProcessFields" "ProcessFields"
+  Equation = post process data
+  Update Exported Variables = Logical True
+  Calculate Harmonic Loss = Logical True
+  Transient Core Loss Method = String gse
+End
+
+Solver 4
+  Equation = "sv"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = loss.dat
+  Variable 1 = String "LoadWm3Avg"
+  Operator 1 = String "int"
+  Show Norm Index = Integer 1
+End
+
+Boundary Condition 1
+  Target Boundaries(6) = 1 2 3 4 5 6
+  P = Real 0
+  P {e} 1 = Real 0
+  P {e} 2 = Real 0
+  P {e} 3 = Variable Coordinate 2, Time
+    Real MATC "tx(0)*(0.5 + 0.1*cos(2*pi*tx(1)))"
+End
+
+Solver 4 :: Reference Norm = 4.35854973E-02
+Solver 4 :: Reference Norm Tolerance = 1e-5
