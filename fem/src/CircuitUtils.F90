@@ -940,6 +940,89 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Dynamic part of the in-plane reluctivity of a 'layered' lamination stack,
+!>   nu(s) - nu(0) = Kappa s - sum_k r_k s T_k / (1 + s T_k),
+!> from the lamination modes of g = tanh(x)/x = sum_n c_n/(1 + s tau_n):
+!>   mu(s) = mu0 [ (1-F) + F mu_r g(s) ],  c_n = 2/a_n^2,  tau_n = tau0/a_n^2,
+!>   a_n = (n-1/2) pi,  tau0 = mu sigma d^2/4.
+!> With LumpedTail the first N-1 modes are kept and all the others are lumped
+!> into one pole that carries their DC weight and their first moment, so that the
+!> DC value, the low-frequency eddy term nu'(0) = sigma d^2/(12F) (F mu_r/(1-F+F
+!> mu_r))^2 (sigma d^2/12 at F = 1) and the s -> infinity limit (1-F) mu0 are
+!> those of all modes; without it N modes and a constant DC tail.
+!> The poles of nu are the zeros of mu(s): one between each pair of mode poles,
+!> found by bisection, and one beyond the last while mu(infinity) > 0. When
+!> mu(infinity) = 0 (F = 1 with LumpedTail) nu grows as Kappa s instead, and the
+!> last slot (r = T = 0) is left for the state of that term. r_k = T_k/mu'(s_k)
+!> is negative. A non-conducting stack (tau0 = 0) has no dynamic part.
+!------------------------------------------------------------------------------
+  SUBROUTINE LaminateNuFoster(tau0, Fill, mur, mu0, n_ladder, LumpedTail, Kappa, res, taus)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN)  :: tau0, Fill, mur, mu0
+    INTEGER, INTENT(IN)        :: n_ladder
+    LOGICAL, INTENT(IN)        :: LumpedTail
+    REAL(KIND=dp), INTENT(OUT) :: Kappa, res(n_ladder), taus(n_ladder)
+
+    ! geometric bisection halves log(b/a): 200 steps reach the double precision limit
+    INTEGER, PARAMETER :: MaxBisections = 200
+    REAL(KIND=dp) :: c(n_ladder), tau(n_ladder), cst, a, b, u, fu, dmu
+    INTEGER :: nm, k, it, nroots
+
+    Kappa = 0._dp
+    res = 0._dp
+    taus = 0._dp
+    IF (n_ladder < 1 .OR. n_ladder > MaxHomogLadderOrder) CALL Fatal('LaminateNuFoster', &
+        '"Laminate Ladder Order" must be between 1 and '//I2S(MaxHomogLadderOrder)//'!')
+    IF (tau0 <= 0._dp) RETURN
+
+    nm = n_ladder
+    IF (LumpedTail) nm = n_ladder - 1
+    DO k = 1, nm
+      c(k) = 2._dp / (((REAL(k,dp) - 0.5_dp)*PI)**2)
+      tau(k) = tau0 / (((REAL(k,dp) - 0.5_dp)*PI)**2)
+    END DO
+    IF (LumpedTail) THEN
+      c(n_ladder) = 1._dp - SUM(c(1:nm))
+      tau(n_ladder) = (tau0/3._dp - SUM(c(1:nm)*tau(1:nm))) / c(n_ladder)
+      cst = 1._dp - Fill
+    ELSE
+      cst = (1._dp - Fill) + Fill * mur * (1._dp - SUM(c))
+    END IF
+
+    ! mu(s)/mu0 = cst + F mu_r sum c/(1 + s tau) rises monotonically in u = -s
+    ! between its poles 1/tau_k (ascending), from -infinity to +infinity.
+    nroots = n_ladder - 1
+    IF (cst > 0._dp) nroots = n_ladder
+    DO k = 1, nroots
+      a = 1._dp / tau(k)
+      IF (k < n_ladder) THEN
+        b = 1._dp / tau(k+1)
+      ELSE
+        ! beyond the last pole mu/mu0 rises to cst; it is positive here
+        b = 2._dp * (a + Fill * mur * SUM(c/tau) / cst)
+      END IF
+      DO it = 1, MaxBisections
+        u = SQRT(a*b)
+        IF (u <= a .OR. u >= b) EXIT
+        fu = cst + Fill * mur * SUM(c / (1._dp - u*tau))
+        IF (fu < 0._dp) THEN
+          a = u
+        ELSE
+          b = u
+        END IF
+      END DO
+      u = SQRT(a*b)
+      taus(k) = 1._dp / u
+      dmu = -mu0 * Fill * mur * SUM(c * tau / (1._dp - u*tau)**2)
+      res(k) = taus(k) / dmu
+    END DO
+    IF (cst <= 0._dp) Kappa = 1._dp / (mu0 * Fill * mur * SUM(c/tau))
+!------------------------------------------------------------------------------
+  END SUBROUTINE LaminateNuFoster
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
   FUNCTION FindSolverWithKey(key) RESULT (Solver)
 !------------------------------------------------------------------------------
     IMPLICIT NONE

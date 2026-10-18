@@ -1,0 +1,152 @@
+! DEV-1606: the 'layered' laminate stack model in the transient WhitneyAVSolver. A quarter of one
+! lamination width and of an infinite stack (0.35 mm laminations, sigma 2 MS/m, mu_r 2000, stacking
+! factor 0.96), uniform along the flux x; the faces y = Y and z = top carry the tangential A of a
+! sinusoidal mean flux density at 2 kHz (0.78 of the first lamination mode), a thin air layer on top
+! shows the surface field. The stack block holds the static stack tensor and, in the lamination plane,
+! the eddy current ladder of order 6 (5 lamination modes and a moment-matched tail pole). Two periods,
+! 40 steps each, BDF2. At its sinusoidal steady state this model gives the complex permeability and
+! the eddy loss of the harmonic layered model within 0.02 % / 0.07 % (200 steps per period).
+! Columns of transient.dat: time, mean B_x of the stack, mean B_x of the air layer, eddy current
+! power, electric field energy, magnetic field energy, magnetic coenergy, laminate stack loss.
+! Norms at the last step: the laminate stack loss (W, solver 3), the magnetic field energy (solver 4)
+! and the air layer B_x (solver 5).
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "mesh"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = "Cartesian"
+  Simulation Type = Transient
+  Timestepping Method = BDF
+  BDF Order = 2
+  Timestep Sizes = Real 1.25e-05
+  Timestep Intervals = Integer 80
+  Output Intervals = 0
+  Steady State Max Iterations = 1
+End
+
+Body 1
+  Equation = 1
+  Material = 1
+  stack = Logical True
+End
+
+Body 2
+  Equation = 1
+  Material = 2
+  surface air = Logical True
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+Material 2
+  Relative Permeability = 1.0
+  Electric Conductivity = 0.0
+End
+
+Material 1
+  Relative Permeability = Real 2000.0
+  Electric Conductivity = 0.0
+  Laminate Stack Model = String "layered"
+  Laminate Stacking Factor = Real 0.96
+  Laminate Normal(3) = Real 0 0 1
+  Laminate Thickness = Real 0.00035
+  Laminate Stack Conductivity = Real 2000000.0
+  Harmonic Loss Linear Coefficient = Real 0.0
+  Harmonic Loss Linear Frequency Exponent = Real 1.0
+  Harmonic Loss Linear Exponent = Real 2.0
+  Harmonic Loss Quadratic Coefficient = Real 0.403008846378
+  Harmonic Loss Quadratic Frequency Exponent = Real 2.0
+  Harmonic Loss Quadratic Exponent = Real 2.0
+End
+
+Solver 1
+  Equation = "MGDynamics"
+  Variable = "AV"
+  Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+  Linear System Symmetric = True
+  Linear System Solver = "Direct"
+  Linear System Direct Method = "MUMPS"
+  Use Tree Gauge = Logical False
+  Mumps Diagonal Regularization = Real 1e-09
+  Newton-Raphson Iteration = Logical True
+  Nonlinear System Relaxation Factor = Real 1.0
+  Nonlinear System Max Iterations = 1
+  Nonlinear System Convergence Tolerance = 1e-07
+  Nonlinear System Convergence Measure = String "flux density"
+End
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "AV"
+  Calculate Current Density = Logical True
+  Calculate Nodal Fields = Logical False
+  Calculate Elemental Fields = Logical True
+  Separate Magnetic Energy = Logical True
+  Linear System Solver = "Iterative"
+  Linear System Iterative Method = CG
+  Linear System Preconditioning = None
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-8
+End
+
+Solver 3
+  Equation = "SaveScalars"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = transient.dat
+  Parallel Reduce = Logical True
+  Variable 1 = Time
+  Variable 2 = Magnetic Flux Density e 1
+  Operator 2 = body int mean
+  Mask Name 2 = String "stack"
+  Variable 3 = Magnetic Flux Density e 1
+  Operator 3 = body int mean
+  Mask Name 3 = String "surface air"
+  Show Norm Index = 8
+End
+
+Solver 4
+  Equation = "SaveEnergy"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = energy.dat
+  Show Norm Index = 3
+End
+
+Solver 5
+  Equation = "SaveSurfaceField"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = surface.dat
+  Parallel Reduce = Logical True
+  Variable 1 = Magnetic Flux Density e 1
+  Operator 1 = body int mean
+  Mask Name 1 = String "surface air"
+  Show Norm Index = 1
+End
+
+Boundary Condition 1
+  Target Boundaries(1) = 1
+  AV {e} = Real 0.0
+  AV = Real 0.0
+End
+
+Boundary Condition 2
+  Target Boundaries(1) = 2
+  AV {e} 1 = Real 0.0
+  AV {e} 2 = Variable Coordinate 3, Time
+    Real LUA "-0.41950503355704694*math.sin(12566.370614359172*tx[1])*tx[0]"
+  AV {e} 3 = Real 0.0
+End
+
+Solver 3 :: Reference Norm = Real 5.92970676E-03
+Solver 3 :: Reference Norm Tolerance = Real 1.0e-6
+Solver 4 :: Reference Norm = Real 2.97391025E-08
+Solver 4 :: Reference Norm Tolerance = Real 1.0e-6
+Solver 5 :: Reference Norm = Real 1.65286651E-04
+Solver 5 :: Reference Norm Tolerance = Real 1.0e-6
