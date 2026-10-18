@@ -1,0 +1,359 @@
+! The BUCK CELL: a time-driven PWM switch and a solution-driven freewheel diode
+! in the same transient circuit-coupled magnetodynamics run.
+!
+! WHY THIS TEST EXISTS
+! --------------------
+! This is the test the whole slice exists for. The two new lumped elements are
+! stamped by completely different mechanisms -- the switch from the clock, the
+! diode from the coupled Newton iterate -- and this case makes them share one
+! circuit and hand the inductor current back and forth to each other every
+! switching period. It is also the first test in the suite whose circuit is NOT
+! a single series loop: three components, two meshes, eight circuit variables.
+!
+! CIRCUIT (topology and sign conventions are drawn out in the companion
+! switch_diode_freewheel_circuit.definitions)
+!
+!            +--- switch(2) ---+---------+
+!            |    S         A  |         |
+!   source --+                 |       coil(1)
+!            |                 |         |
+!            +-----------------+         |
+!            |         diode(3)|         |
+!            +-----------------+---------+
+!                     G (return rail)
+!
+! Switch CLOSED: the source drives the coil, node A sits at ~+9.4 V, the diode
+! sees its own voltage at ~-9.4 V and blocks (i_diode ~ -9.4e-5 A).
+! Switch OPEN: the coil current has nowhere to go through the switch (Roff), so
+! it pulls node A below the return rail until the diode conducts; the diode then
+! carries 99.99% of the coil current and the coil freewheels down through
+! Rcoil + R_diode instead of being forced through Roff. Contrast the sibling
+! circuits2D_transient_switch_pwm, which has NO freewheel path: there the same
+! opening edge collapses the coil current by a factor 2010 in a single step
+! (measured on its own, finer, dt). Here the current only drops from 5.893 A to
+! 5.627 A across the edge and then decays with the freewheel time constant.
+!
+! WHY THE FREEWHEEL IS VISIBLE AT ALL: the on-state and freewheel time constants
+! are L/(Rcoil + Ron) = 2.396/1.1 = 2.18 s against an on-time of 2 s and an
+! off-time of 3 s, so the current ramps and decays by a large fraction of its
+! own value inside every period instead of sitting flat. Three switching periods
+! are run.
+!
+! WHAT IS ASSERTED, AND WHY TWO INSTANTS
+! Both switch states are pinned separately, which a single instant cannot do
+! here (unlike the pure-PWM sibling, where one open-phase current is 96% carried
+! by the preceding closed phase). The run is therefore split into two timestep
+! intervals of 120 + 30 steps of the SAME step size, and two SaveScalars solvers
+! are gated with "Exec Intervals": Solver 5 runs only in the first interval, so
+! the norm it leaves behind is the coil current at step 120 = the END OF AN ON
+! PHASE; Solver 6 runs only in the second, so its norm is the coil current at
+! step 150 = the END OF AN OFF PHASE. Same run, same solve, two instants.
+!
+! SWITCH MODEL (time driven)
+!   s(t) = t*fsw - phase/360 ;  closed iff MODULO(s,1) < duty
+! dt = Tsw/50 is the coarsest grid the switch documentation recommends, and it is
+! used here on purpose: the number of coupled iterations this case needs scales
+! with L*I/dt (see THE FALSE-CONVERGENCE HOLE), so a finer grid would only make the test
+! slower without changing what it asserts. phase = 3.6 deg = 0.01 of a period
+! puts both edges (closing at s = 0.01, opening at s = 0.41) exactly halfway
+! between grid points, so the closed/open decision has half a timestep of margin
+! and cannot be flipped by round-off in the accumulated time.
+! Schedule: steps n mod 50 = 1..20 closed, 21..50 open.
+!
+! DIODE MODEL (built in, smoothed, VOLTAGE controlled)
+!   R(V) = Ron + 0.5*(Roff - Ron)*(1 - TANH((V - Vf)/Vs))
+! with Vf = 0, Ron = 0.1, Roff = 1e5, Vs = 0.1 -- the same numbers as
+! circuits2D_transient_diode_component_rectifier, so this test adds a new
+! TOPOLOGY, not a new parameter regime. In the freewheel state the operating
+! point settles at V ~ +0.62..0.75 V and R ~ 0.13..0.51 ohm, i.e. the same knee
+! the rectifier test sits on.
+!
+! THE FALSE-CONVERGENCE HOLE, AND HOW IT IS CLOSED NOW.
+! Only the diode needs the coupled loop; the switch resistance is a function of
+! time alone and is exact at the first iteration.
+! At the opening edge the previous timestep leaves the diode iterate at the
+! BLOCKING voltage (-9.4 V), so the first coupled iteration sees both the switch
+! and the diode at 1e5 ohm and produces the inductive kick V ~ L*I/dt ~ +130 V at
+! this dt. The iterate therefore starts the timestep tens of volts above its true
+! value of +0.75 V, and TANH saturates for every one of those values: R is
+! stamped at exactly Ron, the linear system is identical from one iteration to
+! the next, the FIELD stops changing, and a coupled loop whose only convergence
+! monitor is the field solver declares success at a point that is NOT a fixed
+! point. It costs 0.2 to 26% on the coil current and still reports zero
+! non-converged timesteps. That is a hole in the coupled-loop machinery, not in
+! the switch or the diode, and it will bite any converter model with a hard
+! switching edge.
+!
+! The PREVIOUS (Picard) version of this test papered over it with
+! "Steady State Min Iterations = 40" -- enough forced iterations to outlast the
+! saturated phase, since the relaxed iterate needs
+! ln(w*L*I/dt / V_on)/ln(1/(1-w)) ~ 27 of them at w = 0.10 just to walk back down
+! into the range where R responds again. That crutch cost every timestep in the
+! run (min 41 / median 41 / max 55 coupled iterations, 29.5 s wall clock) and had
+! to be re-tuned for every dt.
+!
+! Slice 4 replaces it with a real criterion: "Nonlinear Circuit Residual
+! Tolerance" on the circuits solver (Solver 1). The circuits solver publishes
+!   max over solution-dependent lumped components of
+!       |R(V)*I - V| / (|V| + |R*I| + 1e-30)
+! evaluated at the UNRELAXED latest circuit dofs, and blocks the coupled exit
+! while it exceeds the tolerance. The loop can no longer stop where the diode
+! still violates its own equation, whatever the field norm is doing, so
+! "Steady State Min Iterations" goes back to 3 -- a floor, not the criterion.
+! Together with the Newton stamp ("Diode Newton Linearization", default True)
+! the relaxation factor is no longer needed at all here. MEASURED over the full
+! 150-step run with Min Iterations = 3 and the residual gate at 1e-8
+! (timesteps exhausting "Steady State Max Iterations = 100" / min / median / max
+! coupled iterations / wall clock):
+!   w = 1.0  ->  0/150   4/ 4/11    2.9 s   <== used here (no relaxation)
+!   w = 0.7  ->  0/150   4/ 6/14    3.7 s
+!   w = 0.5  ->  0/150   4/ 9/22    5.5 s
+!   w = 0.3  ->  0/150   4/16/39    7.6 s
+! All four reproduce the reference. Note that the OLD w = 0.10 does NOT: with the
+! residual gate demanding a true fixed point, 4 of 150 timesteps exhaust the
+! 100-iteration limit and the coil current lands 3.0% low (5.714 A against
+! 5.893 A). Heavy damping and a strict residual criterion do not mix -- the
+! damping was only ever there to make Picard contract, and Newton does not need
+! it. The remaining "Circuit Variable Relaxation Factor" keyword is therefore
+! absent from Solver 1 (the default is 1.0, i.e. none).
+!
+! LINEAR SYSTEM: a DIRECT solve, as in the diode tests. STEADY STATE CONVERGENCE
+! IS RELATIVE here -- unlike the diode rectifier, whose field norm passes exactly
+! through zero at the source zero crossings and therefore needs an absolute
+! criterion. A freewheeling buck cell has no zero crossing at all: the coil
+! current stays between 1.1 and 5.9 A after the first period, so a relative
+! tolerance is well defined at every step.
+!
+! REFERENCE VALUES
+! From the companion freewheel_reference.py in this directory, which shares no
+! code with Elmer: per step it solves the implicit BDF1 relation for the diode
+! voltage by scanning the residual for sign changes and bisecting, never by
+! Picard. The scan confirms EXACTLY ONE fixed point at every one of the 150
+! steps, so the switch/diode pair has not introduced a second operating mode.
+!   step 120, t = 12.00 s, END OF AN ON PHASE:
+!     i_coil = 5.8933886201 A, i_switch = 5.893483 A, i_diode = -9.411e-05 A,
+!     v_diode = -9.41065 V, R_diode = 1e5     (diode blocking)
+!   step 150, t = 15.00 s, END OF AN OFF PHASE:
+!     i_coil = 1.2581799855 A, i_switch = 1.062e-04 A, i_diode = 1.258074 A,
+!     v_diode = +0.62215 V, R_diode = 0.4945  (diode carrying 99.99% of it)
+! Period-to-period drift of those two quantities (the reference prints it):
+!   end of ON  phase: 5.3867611447 -> 5.8410884254 -> 5.8933886201 A
+!   end of OFF phase: 1.1150346928 -> 1.2433926718 -> 1.2581799855 A
+! i.e. ~1% between the second and third period -- the cell is close to, but not
+! exactly in, its periodic steady state, which is why the assertion is against a
+! step-by-step reference and not against a steady-state formula.
+!
+! Based on circuits2D_transient_diode_component_rectifier and
+! circuits2D_transient_switch_pwm.
+Check Keywords "Warn"
+INCLUDE sif/switch_diode_freewheel_circuit.definitions
+INCLUDE 1381/mesh.names
+Header 1
+   Mesh DB "." "1381"
+End
+
+$ V0 = 10        ! DC source [V]
+$ fsw = 0.2      ! switching frequency [Hz]
+$ Tsw = 1/fsw
+$ nper = 50      ! timesteps per switching period; dt = Tsw/50 is the coarsest
+                 ! grid the switch documentation recommends -- see SWITCH MODEL
+$ dt = Tsw/nper
+! Interval 1 ends at the last CLOSED step of period 3, interval 2 at the last
+! OPEN step of period 3. They must be given to Elmer as a single MATC VECTOR:
+! an inline "$" substitution consumes the rest of the line, so
+! "Timestep Intervals(2) = $ non $ noff" leaves the second name unsubstituted
+! and the sif parser rejects it.
+$ nn = zeros(1,2)
+$ nn(0,0) = 120
+$ nn(0,1) = 30
+$ duty = 0.4     ! duty cycle
+$ phase = 3.6    ! [deg] = 0.01 period, puts both edges midway between steps
+$ Rons = 0.1     ! switch on-state resistance [ohm]
+$ Roffs = 1.0e5  ! switch off-state resistance [ohm]
+$ Vf = 0.0       ! diode forward voltage [V]
+$ Ron = 0.1      ! diode on-state resistance [ohm]
+$ Roff = 1.0e5   ! diode off-state resistance [ohm]
+$ Vs = 0.1       ! diode smoothing voltage [V]
+$ crtres = 1.0e-8 ! circuit-residual tolerance, see the section above
+$ sstol = 1.0e-9
+
+Simulation 1
+   Max Output Level = 5
+   Coordinate System = Axi symmetric
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+!  Two intervals of the SAME step size; the split exists only so that the two
+!  SaveScalars solvers below can be gated to different instants.
+   Timestep Sizes(2) = $ dt*ones(1,2)
+   Timestep Intervals(2) = $ nn
+!  > 1 enables the within-timestep coupled loop over the diode resistance.
+!  Measured: min 4, median 4, max 11 iterations per timestep, 0 of 150 exhaust
+!  this limit.
+   Steady State Max Iterations = 100
+!  A FLOOR, not the convergence criterion -- that is the circuit residual on
+!  Solver 1. It was 40 in the Picard version of this test, purely to outlast the
+!  saturated phase after a switching edge; see the section above.
+   Steady State Min Iterations = 3
+End
+Solver 1
+   Exec Solver = Always
+   Equation = Circuits
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+!  NOTE: "Export Circuit Variables" is deliberately NOT set. Neither new element
+!  needs it -- the diode reads its own branch voltage from the solver's internal
+!  iterate and the switch reads the clock.
+!  NOTE: no "Circuit Variable Relaxation Factor" either. With the Newton stamp
+!  this case converges undamped in 4 iterations a step; the old w = 0.10 now
+!  actively hurts (see the section above).
+!  The coupled loop cannot exit while the diode still violates R*I - V = 0 by
+!  more than this (scaled) amount. "Exec Solver = Always" above is required for
+!  it to have any effect.
+   Nonlinear Circuit Residual Tolerance = Real $ crtres
+End
+Solver 2
+   Equation = "Mag"
+   Variable = A
+   Procedure = "MagnetoDynamics2D" "MagnetoDynamics2D"
+   NonLinear System Relaxation Factor=1
+   Export Lagrange Multiplier = Logical True
+   Linear System Solver = Direct
+   Linear System Direct Method = UMFPACK
+!  Relative, see LINEAR SYSTEM above: the coil current never passes through zero
+!  in a freewheeling buck cell.
+   Steady State Convergence Tolerance = $ sstol
+End
+Solver 3 ! Result output
+   Exec Solver = Never
+   Equation = "ResultOutput"
+   Procedure = "ResultOutputSolve" "ResultOutputSolver"
+   Output File Name = 1381-results
+   Vtu format = Logical True
+   Save Geometry Ids = Logical True
+End
+Solver 4
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 5
+   Exec Solver = After Timestep
+!  Runs during the FIRST timestep interval only, so the norm it leaves behind is
+!  the one from its last execution: step 120, the end of an ON phase.
+   Exec Intervals(2) = 1 0
+   Equation = "sv on"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/freewheel_on.dat
+   Show Norm Name = String "res: i_component(1)"
+End
+Solver 6
+   Exec Solver = After Timestep
+!  Runs during the SECOND timestep interval only: last execution is step 150,
+!  the end of an OFF phase.
+   Exec Intervals(2) = 0 1
+   Equation = "sv off"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/freewheel_off.dat
+   Show Norm Name = String "res: i_component(1)"
+End
+Equation 1
+   Active Solvers(2) = 2 3
+End
+Equation 2
+   Active Solvers(3) = 1 2 3
+End
+Material 1
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+End
+Material 2
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+End
+Material 3
+   Name = aluminium
+   Relative Permeability = 1
+   Electric Conductivity = 1e7
+End
+Body 1
+   Name = Core
+   Target Bodies(6) = 1 2 3 4 5 6
+   Equation = 1
+   Material = 1
+End
+Body 2
+   Name = air
+   Target Bodies(2) = 9 7
+   Equation = 1
+   Material = 2
+End
+Body 3
+   Name = test 1
+   Target Bodies = 8
+   Equation = 2
+   Material = 3
+End
+Component 1
+   Name = String test inductor
+   Master Bodies = Integer 3
+   Coil Type = String stranded
+   Number of Turns = Real 1000
+!  Explicit coil resistance: suppresses the FEM sigma-based resistance so that
+!  the freewheel loop resistance is exactly 1 ohm + R_diode.
+   Resistance = Real 1.0
+End
+Component 2
+   Name = String pwm switch
+   Component Type = String Switch
+   Switch Frequency = Real $ fsw
+   Switch Duty Cycle = Real $ duty
+   Switch Phase = Real $ phase
+   Switch On Resistance = Real $ Rons
+   Switch Off Resistance = Real $ Roffs
+End
+Component 3
+   Name = String freewheel diode
+   Component Type = String Diode
+!  No "Diode Breakdown Voltage": this is the plain single-knee law. The
+!  reverse voltage it sees while the switch is closed is only ~9.4 V, so a
+!  breakdown knee would have to be added deliberately -- see the sibling
+!  circuits2D_transient_zener_clamp.
+   Diode Forward Voltage = Real $ Vf
+   Diode On Resistance = Real $ Ron
+   Diode Off Resistance = Real $ Roff
+   Diode Smoothing Voltage = Real $ Vs
+End
+Body Force 1
+   Name = "Circuit"
+!  Constant DC drive: all the structure in the waveform comes from the switch.
+   testsource = Real $ V0
+End
+Boundary Condition 1
+   Target Boundaries(4) = $ center0 center1 center2 center3
+   A = Real 0
+End
+Boundary Condition 2
+   Target Boundaries(2) = 4 6
+   Name = "Air Gap"
+   Air Gap = logical True
+   Air Gap Length = Real 0.0001
+   Air Gap Relative Permeability = Real 1
+End
+Boundary Condition 3
+   Target Boundaries(7) = 10 13 14 17 18 19 27
+   Infinity BC = Logical True
+End
+
+! The Solver 2 norm at the final step. It is the nonlinear-system norm over the
+! Lagrange-augmented solution vector (field dofs plus the eight circuit dofs).
+Solver 2 :: Reference Norm = 3.14564521E-03
+Solver 2 :: Reference Norm Tolerance = Real 1E-04
+! Independent lumped BDF1 references, see REFERENCE VALUES above.
+! Solver 5: coil current at step 120, the end of an ON phase.
+Solver 5 :: Reference Norm = 5.8933886201
+Solver 5 :: Reference Norm Tolerance = Real 1E-03
+! Solver 6: coil current at step 150, the end of an OFF phase.
+Solver 6 :: Reference Norm = 1.2581799855
+Solver 6 :: Reference Norm Tolerance = Real 1E-03

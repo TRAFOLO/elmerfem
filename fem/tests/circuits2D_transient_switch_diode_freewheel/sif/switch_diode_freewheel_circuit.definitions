@@ -1,0 +1,90 @@
+! Circuit definitions for circuits2D_transient_switch_diode_freewheel.
+!
+! This is the first circuit in the suite that is NOT a single series loop: it is
+! the buck (chopper) cell, so it has two meshes and three components.
+!
+!            +--- switch(2) ---+---------+
+!            |    S         A  |         |
+!   source --+                 |        coil(1)
+!            |                 |         |
+!            +-----------------+         |
+!            |         diode(3)|         |
+!            +-----------------+---------+
+!                     G (return rail)
+!
+! Branch directions (each component's voltage is the DROP in the direction of
+! its own positive current, which is the convention Elmer's component equations
+! R*I - V = 0 are written in):
+!   source   G -> S     v_testsource     = V(S) - V(G)
+!   switch   S -> A     v_component(2)   = V(S) - V(A)
+!   coil     A -> G     v_component(1)   = V(A) - V(G)
+!   diode    G -> A     v_component(3)   = V(G) - V(A) = -v_component(1)
+!
+! The diode therefore sees a POSITIVE own voltage exactly when node A is pulled
+! below the return rail, i.e. when the opening switch leaves the coil current
+! nowhere else to go. That is the freewheel state, and it needs no sign flip in
+! the sif: forward bias is v_component(3) > Vf, with Vf = 0 here.
+! While the switch is closed, V(A) ~ +10 V, so v_component(3) ~ -10 V and the
+! diode sits deep in its blocking window.
+!
+! 4 branches and 3 nodes give 2 independent KCL and 2 independent KVL relations;
+! they occupy rows 1, 2, 4 and 6. Row 0 carries the source definition and rows
+! 3, 5, 7 (the three v_component rows) are left empty for Elmer to write the
+! component equations into.
+$ Circuits = 1
+
+! ------------------------ Circuit 1 ------------------------
+! Define variable count and initialize circuit matrices.
+$ C.1.perm = zeros(8)
+$ C.1.perm(0) = 0
+$ C.1.perm(1) = 1
+$ C.1.perm(2) = 2
+$ C.1.perm(3) = 3
+$ C.1.perm(4) = 4
+$ C.1.perm(5) = 5
+$ C.1.perm(6) = 6
+$ C.1.perm(7) = 7
+
+$ C.1.variables = 8
+$ C.1.A = zeros(8,8)
+$ C.1.B = zeros(8,8)
+$ C.1.Mre = zeros(8,8)
+$ C.1.Mim = zeros(8,8)
+
+! Define variables.  Matrix indices are 0 based, the name.N counter is 1 based:
+!   name.1 -> index 0, name.2 -> index 1, ...
+!   crt i 1 = coil current,   crt i 2 = switch current,  crt i 3 = diode current
+!   crt v 1 = coil voltage,   crt v 2 = switch voltage,  crt v 3 = diode voltage
+$ C.1.name.1 = "i_testsource"
+$ C.1.name.2 = "v_testsource"
+$ C.1.name.3 = "i_component(1)" ! coil current
+$ C.1.name.4 = "v_component(1)" ! coil voltage   -- row 3, coil equation
+$ C.1.name.5 = "i_component(2)" ! switch current
+$ C.1.name.6 = "v_component(2)" ! switch voltage -- row 5, R(t)*I - V = 0
+$ C.1.name.7 = "i_component(3)" ! diode current
+$ C.1.name.8 = "v_component(3)" ! diode voltage  -- row 7, R(V)*I - V = 0
+
+! Define sources:
+!------------------
+$ C.1.B(0,1) = 1
+$ C.1.source.1 = "testsource"
+
+! Define network cycles:
+!-------------------------
+! Voltage relations.
+! Row 1, source-switch-coil loop:   -v_src + v_switch + v_coil = 0
+$ C.1.B(1,1) = -1
+$ C.1.B(1,5) = 1
+$ C.1.B(1,3) = 1
+! Row 6, freewheel loop (diode up into A, coil back down to G): v_diode + v_coil = 0
+$ C.1.B(6,7) = 1
+$ C.1.B(6,3) = 1
+
+! Current relations.
+! Row 2, node S:  i_source - i_switch = 0
+$ C.1.B(2,0) = 1
+$ C.1.B(2,4) = -1
+! Row 4, node A:  i_switch + i_diode - i_coil = 0
+$ C.1.B(4,4) = 1
+$ C.1.B(4,6) = 1
+$ C.1.B(4,2) = -1

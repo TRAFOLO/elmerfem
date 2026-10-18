@@ -1,0 +1,254 @@
+! PWM chopper: the first-class TIME-DRIVEN switch circuit element,
+! "Component Type = String Switch", in a transient circuit-coupled
+! magnetodynamics run.
+!
+! WHY THIS TEST EXISTS
+! --------------------
+! The sibling diode tests exercise a SOLUTION-dependent lumped element, which
+! needs the coupled Picard loop. A switch is the opposite case: its resistance
+! is a prescribed square wave of TIME and does not depend on the solution at
+! all, so it must work with NO coupled iterations whatsoever. This test is run
+! with "Steady State Max Iterations = 1" on purpose -- that setting is part of
+! what is being asserted. If the switch resistance were ever evaluated from the
+! solution (or one timestep late), the chopped waveform below would not match
+! the independent reference.
+!
+! CIRCUIT
+!   ideal DC source (10 V) -- stranded FEM coil (component 1) -- switch (2)
+! all in series. The coil is given an explicit "Resistance = Real 1.0", which
+! makes Add_stranded skip the sigma-based FEM resistance, so the loop resistance
+! is exactly 1 ohm + R_switch(t). There is NO freewheel path, so when the switch
+! opens the coil current is forced through Roff -- see the sibling
+! circuits2D_transient_switch_diode_freewheel for the buck cell that adds one.
+!
+! SWITCH MODEL (time driven, no solution dependence)
+!   s(t) = t*f - phase/360 ;  closed iff MODULO(s,1) < duty
+!   R = Ron when closed, Roff when open
+! Ron = 0.1, Roff = 1e5 (the same decade window the diode tests use; kept
+! <= ~1e6 to protect the conditioning of the linear system).
+!
+! EDGE PLACEMENT. The switching edges are quantised to the timestep grid: R is
+! constant across a whole step and is evaluated at the step's END time, which is
+! the BDF1 implicit point. With f = 0.2 Hz and dt = T/100 the grid points sit at
+! s = n/100. A phase of 1.8 deg = 0.005 of a period moves BOTH edges (the
+! closing edge at s = 0.005 and the opening edge at s = 0.405) exactly HALFWAY
+! between two grid points, so no grid point ever sits on an edge and the
+! closed/open decision can never be flipped by round-off in the accumulated
+! time. The resulting schedule is: steps n mod 100 = 1..40 closed, 41..100 open.
+! Without the phase offset the closing edge would land exactly on s = 0 and the
+! comparison MODULO(s,1) < duty would be a coin flip there.
+!
+! LINEAR SYSTEM: a DIRECT solve is used, as in the diode tests. The asserted
+! instant is an OPEN-phase step where the current is ~2.7e-3 A and the field
+! norm is ~5e-6; with an iterative solver that sits at the level of the solve's
+! own noise. The same UMFPACK direct solve is used by circuits2D_transient_foil
+! under the identical HAVE_UMFPACK/HAVE_MUMPS guard.
+!
+! CALIBRATION. L is not a free parameter. The identical case with component 2
+! replaced by a fixed 1 ohm resistor and the sinusoidal drive of the diode tests
+! was run for 250 steps; solving the BDF1 recurrence
+! L*(I_n - I_{n-1})/dt = V(t_n) - R_tot*I_n for L step by step gives
+! min 2.395782954 H, max 2.395782960 H, median 2.3957829546 H, and replaying the
+! recurrence with that constant L reproduces the Elmer currents to 8.1e-13 A on
+! an amplitude of 3.17 A. That is an independent re-derivation of the same coil
+! inductance the diode tests calibrated (2.3957829553 H, agreeing to 6.8e-10 H).
+!
+! REFERENCE VALUE
+! From the companion switch_pwm_reference.py in this directory, which shares no
+! code with Elmer: it replays the scalar BDF1 recurrence
+!   I_n = (V0 + a*I_{n-1}) / (a + Rcoil + R_switch(t_n)),   a = L/dt
+! on the same time grid. The run stops at step 241 (t = 12.05 s), which is the
+! FIRST step of the open phase of the third switching period:
+!   I = 2.6975967638e-03 A
+! That single number pins BOTH switch states at once, which is why this instant
+! was chosen rather than a mid-conduction one:
+!   * the numerator is V0 + a*I_240 = 10 + 259.88, i.e. 96.3% of it is the
+!     current the CLOSED phase built up (I_240 = 5.4239393974 A), so a wrong
+!     on-state or a wrong on-ramp moves the answer almost proportionally;
+!   * the denominator is a + Rcoil + Roff = 1.00049e5, i.e. it is Roff that
+!     collapses the current by a factor 2010 in a single step -- the open state
+!     is asserted directly and quantitatively, not merely as "small".
+! For orientation, the reference trajectory around the asserted step is
+!   n = 239  t = 11.95  closed  I = 5.3397567578 A
+!   n = 240  t = 12.00  closed  I = 5.4239393974 A   (last closed step)
+!   n = 241  t = 12.05  open    I = 2.6975967638e-03 A   <== asserted
+!   n = 242  t = 12.10  open    I = 1.0124304757e-04 A   (pure Ohm's-law
+!                                 leakage V0/(Rcoil+Roff) = 9.99990e-05 A)
+! The trajectory is periodic to 10 digits by the third period (step 141 gives
+! the same 2.6975967638e-03), so the asserted value is a steady-state property
+! of the chopper and not a transient accident.
+!
+! Based on circuits2D_transient_diode_rectifier.
+Check Keywords "Warn"
+INCLUDE sif/switch_pwm_circuit.definitions
+INCLUDE 1381/mesh.names
+Header 1
+   Mesh DB "." "1381"
+End
+
+$ V0 = 10        ! DC source [V]
+$ fsw = 0.2      ! switching frequency [Hz]
+$ Tsw = 1/fsw
+$ nper = 100     ! timesteps per switching period
+$ dt = Tsw/nper
+$ nsteps = 241   ! first step of the open phase of the third period
+$ duty = 0.4     ! duty cycle
+$ phase = 1.8    ! [deg] = 0.005 period, puts both edges midway between steps
+$ Ron = 0.1      ! switch on-state resistance [ohm]
+$ Roff = 1.0e5   ! switch off-state resistance [ohm]
+$ sstol = 1.0e-10
+
+Simulation 1
+   Max Output Level = 5
+   Coordinate System = Axi symmetric
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+   Timestep Sizes(1) = $ dt
+   Timestep Intervals(1) = $ nsteps
+!  ONE coupled iteration per timestep. The switch resistance is a function of
+!  time only, so there is no fixed point to iterate -- this is the point of the
+!  test. Contrast the diode tests, which need 100 here plus relaxation.
+   Steady State Max Iterations = 1
+End
+Solver 1
+   Exec Solver = Always
+   Equation = Circuits
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+!  NOTE: neither "Export Circuit Variables" nor
+!  "Circuit Variable Relaxation Factor" is set. The switch needs no exported
+!  circuit variable and no relaxation; that absence is part of the test.
+End
+Solver 2
+   Equation = "Mag"
+   Variable = A
+   Procedure = "MagnetoDynamics2D" "MagnetoDynamics2D"
+   NonLinear System Relaxation Factor=1
+   Export Lagrange Multiplier = Logical True
+   Linear System Solver = Direct
+   Linear System Direct Method = UMFPACK
+   Steady State Convergence Tolerance = $ sstol
+   Steady State Convergence Absolute = Logical True
+End
+Solver 3 ! Result output
+   Exec Solver = Never
+   Equation = "ResultOutput"
+   Procedure = "ResultOutputSolve" "ResultOutputSolver"
+   Output File Name = 1381-results
+   Vtu format = Logical True
+   Save Geometry Ids = Logical True
+End
+Solver 4
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 5
+   Exec Solver = After Timestep
+   Equation = "sv"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/switch_pwm.dat
+!  The asserted quantity is the SOLVED circuit dof published by CircuitsOutput.
+   Show Norm Name = String "res: i_component(2)"
+End
+Equation 1
+   Active Solvers(2) = 2 3
+End
+Equation 2
+   Active Solvers(3) = 1 2 3
+End
+Material 1
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+End
+Material 2
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+End
+Material 3
+   Name = aluminium
+   Relative Permeability = 1
+   Electric Conductivity = 1e7
+End
+Body 1
+   Name = Core
+   Target Bodies(6) = 1 2 3 4 5 6
+   Equation = 1
+   Material = 1
+End
+Body 2
+   Name = air
+   Target Bodies(2) = 9 7
+   Equation = 1
+   Material = 2
+End
+Body 3
+   Name = test 1
+   Target Bodies = 8
+   Equation = 2
+   Material = 3
+End
+Component 1
+   Name = String test inductor
+   Master Bodies = Integer 3
+   Coil Type = String stranded
+   Number of Turns = Real 1000
+!  Explicit coil resistance: suppresses the FEM sigma-based resistance so that
+!  the loop resistance is exactly 1 ohm + R_switch.
+   Resistance = Real 1.0
+End
+Component 2
+   Name = String pwm switch
+!  The first-class switch. No Master Bodies (it is a pure lumped element) and no
+!  dependence on any solution variable.
+   Component Type = String Switch
+   Switch Frequency = Real $ fsw
+   Switch Duty Cycle = Real $ duty
+   Switch Phase = Real $ phase
+   Switch On Resistance = Real $ Ron
+   Switch Off Resistance = Real $ Roff
+End
+Body Force 1
+   Name = "Circuit"
+!  Constant DC drive: all the structure in the waveform comes from the switch.
+   testsource = Real $ V0
+End
+Boundary Condition 1
+   Target Boundaries(4) = $ center0 center1 center2 center3
+   A = Real 0
+End
+Boundary Condition 2
+   Target Boundaries(2) = 4 6
+   Name = "Air Gap"
+   Air Gap = logical True
+   Air Gap Length = Real 0.0001
+   Air Gap Relative Permeability = Real 1
+End
+Boundary Condition 3
+   Target Boundaries(7) = 10 13 14 17 18 19 27
+   Infinity BC = Logical True
+End
+
+! NOTE on the Solver 2 norm. It is NOT the plain A-field norm that the diode
+! tests assert. Those run "Steady State Max Iterations = 100", so a steady-state
+! ComputeChange runs for the field solver and leaves the FIELD-ONLY norm in the
+! variable. Here there is only one coupled iteration, no steady-state
+! ComputeChange runs for "mag" at all (only "sv" gets one, see the log), and the
+! norm carried into the comparison is the nonlinear-system norm taken over the
+! Lagrange-AUGMENTED solution vector, i.e. field dofs plus the six circuit dofs.
+! At the asserted open-phase step those circuit dofs dominate it completely:
+! v_switch = Roff*I = 269.76 V and v_coil = V0 - v_switch = -259.76 V, and
+! sqrt((269.7596763788^2 + 259.7596763788^2 + 10^2)/412) = 18.4565464793 over
+! the N = 412 dofs of the augmented system reproduces the value below to 9
+! digits -- the field contribution is below the last printed digit. The quantity
+! is therefore just as deterministic as the asserted current (it is the same
+! solve), and it is the reason the norm jumps by 22.5x at the switch edge
+! (0.82154324 at step 240, RELC 1.83 at step 241 -- both visible in the log).
+Solver 2 :: Reference Norm = 1.84565465E+01
+Solver 2 :: Reference Norm Tolerance = Real 1E-04
+! Independent lumped BDF1 reference at t = 12.05 s, see REFERENCE VALUE above.
+! Observed deviation: 4.5e-12.
+Solver 5 :: Reference Norm = 2.6975967638E-03
+Solver 5 :: Reference Norm Tolerance = Real 1E-04

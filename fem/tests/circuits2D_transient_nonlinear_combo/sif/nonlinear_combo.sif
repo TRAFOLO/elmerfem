@@ -1,0 +1,462 @@
+! ALL THREE nonlinear lumped elements in one transient circuit: a PWM SWITCH, a
+! DIODE and a ZENER, wired as a zener-clamped buck (demagnetization) cell.
+!
+! WHY THIS TEST EXISTS
+! --------------------
+! The three elements are stamped by three different mechanisms -- the switch
+! from the clock, the diode from the coupled Newton iterate through the
+! single-knee law, the zener through the two-knee law -- and each of the
+! sibling tests exercises them one or two at a time in a circuit that has at
+! most one nonlinear branch. This is the first test where all three share one
+! circuit, where a single BRANCH holds two solution-dependent elements in
+! series (so they must agree on one current while their voltages are solved
+! separately), and where the circuit has FOUR nodes and TEN circuit variables.
+!
+! CIRCUIT (topology and sign conventions are drawn out in the companion
+! nonlinear_combo_circuit.definitions)
+!
+!            +--- switch(2) ---+-------------+
+!            |    S         A  |             |
+!   source --+                 |           coil(1)
+!            |                 |             |
+!            |         zener(4)|             |
+!            +------- M -------+             |
+!            |  diode(3)                     |
+!            +-------------------------------+
+!                     G (return rail)
+!
+! EVERY ELEMENT HAS A DISTINCT, LOAD-BEARING JOB, and the companion reference
+! script computes what happens when each is taken away:
+!  * SWITCH: makes the ON/OFF phases at all. Closed, the source drives the coil
+!    and node A sits at ~+9.2 V; open, the coil current has nowhere to go
+!    through the switch (Roff) and pulls node A far below the return rail.
+!  * DIODE: blocks the clamp branch during the ON phase. Without it the zener
+!    sits straight across the coil and its Vf = 0 forward knee SHORTS the ON
+!    phase -- the reference measures 52.0 A of shoot-through through the switch
+!    and a coil that reaches only 4.05 A instead of 8.08 A.
+!  * ZENER: opens the clamp branch during the OFF phase, in REVERSE BREAKDOWN
+!    (not forward conduction -- it points the opposite way to the diode, see
+!    the definitions file). Delete its "Diode Breakdown Voltage" and the two
+!    elements become plain diodes in ANTI-SERIES: the branch cannot conduct in
+!    either direction, node A is thrown to -61.4 V at the opening edge and the
+!    coil current is gone within four steps.
+!
+! WHAT THE CLAMP DOES, AND WHY IT IS NOT JUST A FREEWHEEL. During the OFF phase
+! the coil current commutates into the clamp branch, which holds node A at
+!   -(Vz + Vf + I*(Ron_d + Ron_z)) = -6.31 V (ideal) / -6.88 V (solved)
+! instead of the single forward drop -1.37 V a plain freewheel diode would
+! give. The coil therefore demagnetizes MUCH faster: the reference measures
+! 62.4% of the coil current removed in the 1 s OFF window against 39.1% for
+! the single-diode freewheel of the sibling
+! circuits2D_transient_switch_diode_freewheel, on the same mesh, same coil,
+! same switch schedule and the same 0.7 V diode.
+!
+! TIMING. dt = Tsw/50 is the coarsest grid the switch documentation recommends
+! and is used here on purpose (as in the freewheel sibling): the coupled
+! iteration count at a switching edge scales with L*I/dt, so a finer grid would
+! only make the test slower. phase = 3.6 deg = 0.01 of a period puts BOTH edges
+! (opening at s = 0.81, closing at s = 1.01) exactly halfway between grid
+! points, so the closed/open decision has half a timestep of margin and cannot
+! be flipped by round-off in the accumulated time. Schedule: steps
+! n mod 50 = 1..40 closed, 41..50 open. Three switching periods are run.
+!
+! DUTY = 0.8, NOT THE 0.4 OF THE FREEWHEEL SIBLING. A 5.7 V clamp against a
+! 10 V source demagnetizes the coil about five times faster than a 0.7 V
+! freewheel does, so at duty 0.4 (a 3 s OFF phase against L/R = 2.2 s) the coil
+! current would reach ZERO 15 steps into every OFF phase and the cell would sit
+! in discontinuous conduction: the "current at the end of an OFF phase"
+! assertion would then be pinned on a number that is zero to within the diode
+! leakage, and would assert nothing about the clamp. At duty 0.8 the cell stays
+! in CONTINUOUS conduction -- 8.08 A at the end of the ON phase, 3.04 A at the
+! end of the OFF phase -- so both asserted instants are far from zero and the
+! whole excursion is governed by the clamp.
+!
+! WHAT IS ASSERTED, AND WHY FOUR INSTANTS-AND-QUANTITIES
+! The run is split into two timestep intervals of 140 + 10 steps of the SAME
+! step size, and the four SaveScalars solvers are gated with "Exec Intervals",
+! exactly as in the freewheel sibling. Solvers 5 and 8 run only in the first
+! interval, so the norms they leave behind are from step 140 = the END OF AN ON
+! PHASE; solvers 6 and 7 run only in the second, so theirs are from step 150 =
+! the END OF AN OFF PHASE. Same run, same solve, four numbers:
+!   Solver 5  i_component(1) at step 140  -- the ON-phase coil current
+!   Solver 8  i_component(3) at step 140  -- the blocking-phase clamp leakage
+!   Solver 6  i_component(1) at step 150  -- the OFF-phase coil current, i.e.
+!             the accelerated decay through the clamp
+!   Solver 7  v_component(1) at step 150  -- the CLAMP VOLTAGE. The coil and
+!             the clamp branch are the two branches between nodes A and G, so
+!             the coil's own branch voltage IS the clamp branch voltage.
+!
+! ELEMENT MODELS (all three are the shipped laws, no new parameter regime)
+!   switch  R(t) = Ron if MODULO(t*fsw - phase/360, 1) < duty else Roff
+!   diode   R(V) = Ron + 0.5*(Roff-Ron)*(1 - TANH((V-Vf)/Vs))
+!   zener   R(V) = Ron + 0.25*(Roff-Ron)*(1-TANH((V-Vf)/Vs))*(1+TANH((V+Vz)/Vs))
+! Vs = 0.1 and Roff = 1e5 throughout, as in every sibling.
+!
+! SOLVER RECIPE: the Newton-era one. "Diode Newton Linearization" is left at
+! its default True and "Nonlinear Circuit Residual Tolerance" gates the coupled
+! exit on the components' own equations rather than on the field norm.
+!
+! THE RELAXATION FACTOR IS 0.3 HERE, NOT THE 0.7 OF THE ZENER SIBLING. Two
+! solution-dependent elements in ONE branch are harder than one: they must
+! agree on a shared current while each is linearized about its own relaxed
+! iterate, and at a commutation the diode has to travel from -9.0 V to +1.33 V
+! while the zener travels from +0.19 V to -5.55 V, both crossing saturated TANH
+! regions in the same iteration. MEASURED over the full 150-step run with
+! "Steady State Min Iterations = 3", the residual gate at 1e-8 and
+! "Steady State Max Iterations = 100" (timesteps exhausting that limit / min /
+! median / max coupled iterations / wall clock, OMP_NUM_THREADS = 1):
+!   w = 1.0  ->  3/150   4/ 4/100    6.1 s   opening edges 41/91/141 chatter
+!   w = 0.5  ->  9/150   4/ 6/100   11.7 s
+!   w = 0.4  ->  3/150   4/ 7/100    8.9 s
+!   w = 0.35 ->  2/150   5/ 7/100   10.4 s
+!   w = 0.3  ->  0/150   5/ 9/ 70   10.4 s   <== used here
+!   w = 0.25 ->  2/150   6/10/100   13.9 s   closing edges 51/101 run out of
+!   w = 0.2  ->  5/150   7/12/100   16.1 s   the 100-iteration budget
+!   w = 0.15 ->  5/150   8/16/100   19.7 s
+!   w = 0.1  ->  8/150  12/24/100   28.9 s
+!   w = 0.05 -> 44/150  21/46/100   52.3 s
+! There are TWO failure modes and w = 0.3 is the only value of the sweep that
+! clears both: above it the OPENING edges chatter in a limit cycle (too little
+! damping for the commutation), below it nothing chatters but the crawl is so
+! slow that the CLOSING edges exhaust the iteration budget instead. w = 0.3
+! therefore sits between two failure modes rather than on a plateau, and its
+! worst timestep (the closing edge, step 51) needs 70 of the 100 iterations --
+! a 30% margin. If a future change ever pushes a step over the limit, the
+! non-convergence WILL be reported: the residual gate turns a wrong operating
+! mode into a loud failure, as the w = 1.0 row above shows.
+! WHAT A FAILED OPENING EDGE COSTS, since the sweep makes it measurable: at
+! w = 1.0 and w = 0.4 the loop leaves the edge in the WRONG operating mode --
+! clamp branch still blocked -- and the coil current then sits on the 1.0e-04 A
+! leakage floor for the rest of the OFF phase instead of at 3.04 A. The
+! residual gate is what turns that into a reported non-convergence rather than
+! a quiet wrong answer.
+! LINEAR SYSTEM: a DIRECT solve. STEADY STATE CONVERGENCE IS RELATIVE, as in
+! the freewheel sibling: a clamped buck cell in continuous conduction has no
+! zero crossing (the coil current stays between 2.7 and 8.1 A after the first
+! period), so a relative tolerance is well defined at every step. The zener
+! sibling needs an ABSOLUTE one only because its sinusoidal source drives the
+! field norm through zero twice a period.
+!
+! REFERENCE VALUES
+! From the companion combo_reference.py in this directory, which shares no code
+! with Elmer. Per step it reduces the whole cell to ONE scalar equation in the
+! diode's own branch voltage, the clamp branch's shared current being obtained
+! by inverting each element's characteristic i = V/R(V) (which is strictly
+! monotone for both laws, so the inverse exists and is unique), and solves it
+! by scanning for sign changes and bisecting -- never by Picard. The scan
+! confirms EXACTLY ONE fixed point, and g strictly monotone, at every one of
+! the 150 steps: three nonlinear elements and two knees have not introduced a
+! second operating mode.
+!   step 140, t = 14.00 s, END OF AN ON PHASE (switch closed):
+!     i_coil = 8.0812231477 A, i_switch = 8.081313 A,
+!     i_clamp = -9.0004208071e-05 A, v_coil = +9.1918686848 V,
+!     v_diode = -9.000421 V (R = 1e5, blocking),
+!     v_zener = +0.191448 V (R = 2.127e3, on its forward knee)
+!   step 150, t = 15.00 s, END OF AN OFF PHASE (switch open):
+!     i_coil = 3.0415318831 A, i_switch = 1.687839e-04 A,
+!     i_clamp = +3.0413630992 A, v_coil = -6.8783891882 V,
+!     v_diode = +1.329985 V (R = 0.4373, conducting),
+!     v_zener = -5.548404 V (R = 1.824, in breakdown)
+! Period-to-period drift of the two coil currents (the reference prints it):
+!   end of ON  phase: 7.5816280142 -> 8.0320915159 -> 8.0812231477 A
+!   end of OFF phase: 2.7133057680 -> 3.0092434842 -> 3.0415318831 A
+! i.e. 0.6% and 1.1% between the second and third period -- the cell is close
+! to, but not in, its periodic steady state, which is why the assertions are
+! against a step-by-step reference and not against a steady-state formula.
+!
+! LIMITATIONS THIS TEST RECORDS RATHER THAN HIDES
+!  * THE CLAMP KNEE IS SOFT, and softer than a single zener's. The solved
+!    -6.8784 V sits 0.570 V = 5.7*Vs below the ideal
+!    -(Vz + Vf + I*(Ron_d+Ron_z)) = -6.3083 V, because BOTH elements are on a
+!    smoothed knee at once: the zener contributes 0.244 V and the series diode
+!    another 0.326 V (its R is 0.4373 ohm, not Ron = 0.1). The clamp-voltage
+!    assertion therefore carries a 2e-2 relative tolerance, twenty times looser
+!    than the current assertions.
+!  * THE BLOCKING IS CARRIED BY ONE Roff, NOT TWO. The naive estimate for two
+!    blocking elements in series, |i_clamp| = |v_A|/(2*Roff), is wrong by a
+!    factor 1.96 here: the zener's forward knee is at Vf = 0, so during the ON
+!    phase it is pushed slightly FORWARD (+0.191 V) and contributes only
+!    2.1e3 ohm against the diode's 1e5. The measured leakage is
+!    0.979*|v_A|/Roff. That is a property of the settled parameter set, not a
+!    defect -- it is recorded here because it is the kind of thing a reader
+!    would otherwise assume the other way round.
+!  * Ron is the same in both directions for both elements, and the same Vs
+!    smooths every knee (see the Fortran).
+!  * "r_component(N)" in the .dat files is the STAMPED resistance, i.e. R at
+!    the relaxed iterate, so it lags the converged V slightly. The asserted
+!    quantities are the solved dofs, not the stamped R.
+!
+! MEASURED COST over the full 150-step run: 0 of 150 timesteps exhaust "Steady
+! State Max Iterations = 100" and the solver emits no non-convergence message;
+! min 5 / median 9 / 90th percentile 20 / max 70 / mean 11.6 coupled iterations,
+! 9.9 s wall clock under ctest. Only the five SWITCHING EDGES cost more than 30
+! iterations -- opening 41/91/141 at 48/37/37 and closing 51/101 at 70/68 --
+! and every other step is in single or low double digits.
+!
+! Based on circuits2D_transient_switch_diode_freewheel and
+! circuits2D_transient_zener_clamp.
+Check Keywords "Warn"
+INCLUDE sif/nonlinear_combo_circuit.definitions
+INCLUDE 1381/mesh.names
+Header 1
+   Mesh DB "." "1381"
+End
+
+$ V0 = 10        ! DC source [V]
+$ fsw = 0.2      ! switching frequency [Hz]
+$ Tsw = 1/fsw
+$ nper = 50      ! timesteps per switching period; dt = Tsw/50 is the coarsest
+                 ! grid the switch documentation recommends -- see TIMING
+$ dt = Tsw/nper
+! Interval 1 ends at the last CLOSED step of period 3, interval 2 at the last
+! OPEN step of period 3. They must be given to Elmer as a single MATC VECTOR:
+! an inline "$" substitution consumes the rest of the line, so
+! "Timestep Intervals(2) = $ non $ noff" leaves the second name unsubstituted
+! and the sif parser rejects it.
+$ nn = zeros(1,2)
+$ nn(0,0) = 140
+$ nn(0,1) = 10
+$ duty = 0.8     ! duty cycle -- see DUTY = 0.8 above
+$ phase = 3.6    ! [deg] = 0.01 period, puts both edges midway between steps
+$ Rons = 0.1     ! switch on-state resistance [ohm]
+$ Roffs = 1.0e5  ! switch off-state resistance [ohm]
+$ Vfd = 0.7      ! series diode forward voltage [V]
+$ Rond = 0.1     ! series diode on-state resistance [ohm]
+$ Roffd = 1.0e5  ! series diode off-state resistance [ohm]
+$ Vz = 5.0       ! zener breakdown voltage [V]
+$ Vfz = 0.0      ! zener forward voltage [V]
+$ Ronz = 0.1     ! zener on-state resistance [ohm]
+$ Roffz = 1.0e5  ! zener blocking-window resistance [ohm]
+$ Vs = 0.1       ! smoothing voltage, both elements, every knee [V]
+$ wrel = 0.3     ! Circuit Variable Relaxation Factor, see SOLVER RECIPE
+$ crtres = 1.0e-8 ! circuit-residual tolerance, see Solver 1
+$ sstol = 1.0e-9
+
+Simulation 1
+   Max Output Level = 5
+   Coordinate System = Axi symmetric
+   Simulation Type = Transient
+   Timestepping Method = BDF
+   BDF Order = 1
+!  Two intervals of the SAME step size; the split exists only so that the four
+!  SaveScalars solvers below can be gated to two different instants.
+   Timestep Sizes(2) = $ dt*ones(1,2)
+   Timestep Intervals(2) = $ nn
+!  > 1 enables the within-timestep coupled loop over the two solution-dependent
+!  resistances. Measured: min 5, median 9, max 70 iterations per timestep, 0 of
+!  150 exhaust this limit.
+   Steady State Max Iterations = 100
+!  A FLOOR, not the convergence criterion -- that is the circuit residual on
+!  Solver 1.
+   Steady State Min Iterations = 3
+End
+Solver 1
+   Exec Solver = Always
+   Equation = Circuits
+   Procedure = "CircuitsAndDynamics" "CircuitsAndDynamics"
+!  NOTE: "Export Circuit Variables" is deliberately NOT set. None of the three
+!  elements needs it -- the diode and the zener read their own branch voltages
+!  from the solver's internal iterate and the switch reads the clock.
+   Circuit Variable Relaxation Factor = Real $ wrel
+!  The coupled loop cannot exit while EITHER solution-dependent component still
+!  violates its own equation R(V)*I - V = 0 by more than this (scaled) amount;
+!  the published residual is the MAX over components, so the diode and the
+!  zener are gated together. "Exec Solver = Always" above is required for this
+!  to have any effect at all.
+   Nonlinear Circuit Residual Tolerance = Real $ crtres
+End
+Solver 2
+   Equation = "Mag"
+   Variable = A
+   Procedure = "MagnetoDynamics2D" "MagnetoDynamics2D"
+   NonLinear System Relaxation Factor=1
+   Export Lagrange Multiplier = Logical True
+   Linear System Solver = Direct
+   Linear System Direct Method = UMFPACK
+!  Relative, see LINEAR SYSTEM above: the coil current never passes through
+!  zero in this cell.
+   Steady State Convergence Tolerance = $ sstol
+End
+Solver 3 ! Result output
+   Exec Solver = Never
+   Equation = "ResultOutput"
+   Procedure = "ResultOutputSolve" "ResultOutputSolver"
+   Output File Name = 1381-results
+   Vtu format = Logical True
+   Save Geometry Ids = Logical True
+End
+Solver 4
+   Exec Solver = Always
+   Equation = Circuits Output
+   Procedure = "CircuitsAndDynamics" "CircuitsOutput"
+End
+Solver 5
+   Exec Solver = After Timestep
+!  Runs during the FIRST timestep interval only, so the norm it leaves behind
+!  is the one from its last execution: step 140, the end of an ON phase.
+   Exec Intervals(2) = 1 0
+   Equation = "sv on"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/combo_on.dat
+   Show Norm Name = String "res: i_component(1)"
+End
+Solver 6
+   Exec Solver = After Timestep
+!  Runs during the SECOND timestep interval only: last execution is step 150,
+!  the end of an OFF phase.
+   Exec Intervals(2) = 0 1
+   Equation = "sv off"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/combo_off.dat
+   Show Norm Name = String "res: i_component(1)"
+End
+Solver 7
+   Exec Solver = After Timestep
+   Exec Intervals(2) = 0 1
+   Equation = "sv clamp"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/combo_clamp.dat
+!  THE CLAMP VOLTAGE. The coil and the clamp branch are the two branches
+!  between nodes A and G, so the coil's own branch voltage is the voltage
+!  across the clamp branch.
+   Show Norm Name = String "res: v_component(1)"
+End
+Solver 8
+   Exec Solver = After Timestep
+   Exec Intervals(2) = 1 0
+   Equation = "sv leak"
+   Procedure = "SaveData" "SaveScalars"
+   Filename = 1381/dat/combo_leak.dat
+!  THE BLOCKING-PHASE LEAKAGE of the clamp branch, taken on the diode, which is
+!  the element that does the blocking.
+   Show Norm Name = String "res: i_component(3)"
+End
+Equation 1
+   Active Solvers(2) = 2 3
+End
+Equation 2
+   Active Solvers(3) = 1 2 3
+End
+Material 1
+   Name = iron
+   Electric Conductivity = 0
+   Relative Permeability = 2000
+End
+Material 2
+   Name = air
+   Electric Conductivity = 0
+   Relative Permeability = 1
+End
+Material 3
+   Name = aluminium
+   Relative Permeability = 1
+   Electric Conductivity = 1e7
+End
+Body 1
+   Name = Core
+   Target Bodies(6) = 1 2 3 4 5 6
+   Equation = 1
+   Material = 1
+End
+Body 2
+   Name = air
+   Target Bodies(2) = 9 7
+   Equation = 1
+   Material = 2
+End
+Body 3
+   Name = test 1
+   Target Bodies = 8
+   Equation = 2
+   Material = 3
+End
+Component 1
+   Name = String test inductor
+   Master Bodies = Integer 3
+   Coil Type = String stranded
+   Number of Turns = Real 1000
+!  Explicit coil resistance: suppresses the FEM sigma-based resistance so that
+!  the clamp loop resistance is exactly 1 ohm + R_diode + R_zener.
+   Resistance = Real 1.0
+End
+Component 2
+   Name = String pwm switch
+   Component Type = String Switch
+   Switch Frequency = Real $ fsw
+   Switch Duty Cycle = Real $ duty
+   Switch Phase = Real $ phase
+   Switch On Resistance = Real $ Rons
+   Switch Off Resistance = Real $ Roffs
+End
+Component 3
+   Name = String series diode
+   Component Type = String Diode
+!  The PLAIN single-knee law: no "Diode Breakdown Voltage". Its job is to block
+!  the clamp branch during the ON phase, where it sees only -9.0 V, so a
+!  breakdown knee would have to be added deliberately.
+   Diode Forward Voltage = Real $ Vfd
+   Diode On Resistance = Real $ Rond
+   Diode Off Resistance = Real $ Roffd
+   Diode Smoothing Voltage = Real $ Vs
+End
+Component 4
+   Name = String clamp zener
+   Component Type = String Diode
+!  The TWO-knee law: "Diode Breakdown Voltage" is the only keyword that
+!  separates a zener from the plain diode of component 3. This element points
+!  the OPPOSITE way round in the branch (see the definitions file), so it is
+!  the breakdown knee, not the forward knee, that carries the clamp current.
+   Diode Forward Voltage = Real $ Vfz
+   Diode Breakdown Voltage = Real $ Vz
+   Diode On Resistance = Real $ Ronz
+   Diode Off Resistance = Real $ Roffz
+   Diode Smoothing Voltage = Real $ Vs
+End
+Body Force 1
+   Name = "Circuit"
+!  Constant DC drive: all the structure in the waveform comes from the switch.
+   testsource = Real $ V0
+End
+Boundary Condition 1
+   Target Boundaries(4) = $ center0 center1 center2 center3
+   A = Real 0
+End
+Boundary Condition 2
+   Target Boundaries(2) = 4 6
+   Name = "Air Gap"
+   Air Gap = logical True
+   Air Gap Length = Real 0.0001
+   Air Gap Relative Permeability = Real 1
+End
+Boundary Condition 3
+   Target Boundaries(7) = 10 13 14 17 18 19 27
+   Infinity BC = Logical True
+End
+
+! The Solver 2 norm at the final step. It is the nonlinear-system norm over the
+! Lagrange-augmented solution vector (field dofs plus the ten circuit dofs).
+Solver 2 :: Reference Norm = 7.60430168E-03
+Solver 2 :: Reference Norm Tolerance = Real 1E-04
+! Independent lumped BDF1 references, see REFERENCE VALUES above. SaveScalars
+! reports the norm of the saved value, so negative quantities are asserted as
+! MAGNITUDES -- exactly as in the sibling circuits2D_transient_zener_clamp.
+! Solver 5: coil current at step 140, the end of an ON phase.
+Solver 5 :: Reference Norm = 8.0812231477
+Solver 5 :: Reference Norm Tolerance = Real 1E-03
+! Solver 6: coil current at step 150, the end of an OFF phase. This is the one
+! that pins the ACCELERATED DECAY: the single-diode freewheel of the sibling
+! test would still be at 5.13 A here.
+Solver 6 :: Reference Norm = 3.0415318831
+Solver 6 :: Reference Norm Tolerance = Real 1E-03
+! Solver 7: the CLAMP VOLTAGE at step 150, -6.8783891882 V against an ideal
+! -(Vz + Vf + I*(Ron_d+Ron_z)) = -6.3083 V. The 0.570 V gap is the smoothed
+! knees of BOTH clamp elements, hence the looser tolerance -- see LIMITATIONS.
+Solver 7 :: Reference Norm = 6.8783891882
+Solver 7 :: Reference Norm Tolerance = Real 2E-02
+! Solver 8: the clamp-branch leakage at step 140, -9.0004208071e-05 A. This is
+! a MAGNITUDE/CEILING check on a quantity whose whole point is that it stays in
+! the |v_A|/Roff decade (= 9.19e-05 A here), so the tolerance is deliberately
+! loose. Elmer's framework offers only a two-sided relative band, so a 10%
+! band is what "ceiling" is expressed as.
+Solver 8 :: Reference Norm = 9.0004208071E-05
+Solver 8 :: Reference Norm Tolerance = Real 1E-01

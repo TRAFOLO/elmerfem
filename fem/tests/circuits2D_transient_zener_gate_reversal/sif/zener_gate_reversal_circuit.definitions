@@ -1,0 +1,47 @@
+! Circuit definitions for circuits2D_transient_zener_gate_reversal.
+! A purely lumped series loop: ideal voltage source, a 1 ohm Resistor component
+! and a zener (Diode component with a breakdown voltage). No FEM component is
+! part of the circuit, so the field stays zero and the field solver cannot
+! catch a wrong circuit iterate - only the circuit residual gate can.
+$ Circuits = 1
+
+! ------------------------ Circuit 1 ------------------------
+$ C.1.perm = zeros(6)
+$ C.1.perm(0) = 0
+$ C.1.perm(1) = 1
+$ C.1.perm(2) = 2
+$ C.1.perm(3) = 3
+$ C.1.perm(4) = 4
+$ C.1.perm(5) = 5
+
+$ C.1.variables = 6
+$ C.1.A = zeros(6,6)
+$ C.1.B = zeros(6,6)
+$ C.1.Mre = zeros(6,6)
+$ C.1.Mim = zeros(6,6)
+
+! Define variables. Elmer writes each component equation (R*I - V = 0) on the
+! row of the component's voltage variable (rows 3 and 5).
+$ C.1.name.1 = "i_testsource"
+$ C.1.name.2 = "v_testsource"
+$ C.1.name.3 = "i_component(1)" ! the 1 ohm resistor
+$ C.1.name.4 = "v_component(1)"
+$ C.1.name.5 = "i_component(2)" ! the zener
+$ C.1.name.6 = "v_component(2)"
+
+! Define sources:
+!------------------
+$ C.1.B(0,1) = 1
+$ C.1.source.1 = "testsource"
+
+! Define network cycles:
+!-------------------------
+! Voltage relation: v_testsource = v_resistor + v_zener.
+$ C.1.B(1,1) = -1
+$ C.1.B(1,3) = 1
+$ C.1.B(1,5) = 1
+! Current relations: one series current.
+$ C.1.B(2,0) = 1
+$ C.1.B(2,2) = -1
+$ C.1.B(4,0) = 1
+$ C.1.B(4,4) = -1
