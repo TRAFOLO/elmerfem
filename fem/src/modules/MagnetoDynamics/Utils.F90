@@ -415,6 +415,152 @@ CONTAINS
   END FUNCTION LaminateLayeredReluctivity
 !------------------------------------------------------------------------------
 
+
+!------------------------------------------------------------------------------
+!> Flux density in the laminations of a 'layered' stack whose homogenized field
+!> is B: the laminations carry the in-plane flux of the stack, B_par/F, and all
+!> of the normal flux B_perp. Without a normal every component is in-plane.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateMetalFlux(B, StackingFactor, Normal, HasNormal) RESULT(Bs)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    COMPLEX(KIND=dp), INTENT(IN) :: B(3)
+    REAL(KIND=dp), INTENT(IN) :: StackingFactor, Normal(3)
+    LOGICAL, INTENT(IN) :: HasNormal
+    COMPLEX(KIND=dp) :: Bs(3)
+!------------------------------------------------------------------------------
+    COMPLEX(KIND=dp) :: Bperp(3)
+!------------------------------------------------------------------------------
+    Bperp = 0.0_dp
+    IF (HasNormal) Bperp = Normal * SUM(Normal * B)
+    Bs = (B - Bperp) / StackingFactor + Bperp
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateMetalFlux
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Peak flux density |B_s| in the laminations of a 'layered' stack (see
+!> LaminateMetalFlux). Weight = B_par/F^2 + B_perp, the map applied twice,
+!> gives its change with B, dB_s = conj(Weight).dB/B_s, in the form the Newton
+!> term of an H-B curve uses.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateMetalFluxDensity(B, StackingFactor, Normal, HasNormal, Weight) RESULT(BsAbs)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    COMPLEX(KIND=dp), INTENT(IN) :: B(3)
+    REAL(KIND=dp), INTENT(IN) :: StackingFactor, Normal(3)
+    LOGICAL, INTENT(IN) :: HasNormal
+    COMPLEX(KIND=dp), INTENT(OUT), OPTIONAL :: Weight(3)
+    REAL(KIND=dp) :: BsAbs
+!------------------------------------------------------------------------------
+    COMPLEX(KIND=dp) :: Bs(3)
+!------------------------------------------------------------------------------
+    Bs = LaminateMetalFlux(B, StackingFactor, Normal, HasNormal)
+    BsAbs = SQRT(SUM(ABS(Bs)**2))
+    IF (PRESENT(Weight)) Weight = LaminateMetalFlux(Bs, StackingFactor, Normal, HasNormal)
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateMetalFluxDensity
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Derivative of the 'layered' stack tensor with respect to the reluctivity of
+!> the lamination material, by a relative step: the material reluctivity also
+!> enters through the skin factor g. For the Newton term of an H-B curve.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateLayeredReluctivityDerivative(Omega, NuMaterial, Sigma, Thickness, &
+      StackingFactor, Normal, HasNormal) RESULT(dNu)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: Omega, Sigma, Thickness, StackingFactor, Normal(3)
+    COMPLEX(KIND=dp), INTENT(IN) :: NuMaterial
+    LOGICAL, INTENT(IN) :: HasNormal
+    COMPLEX(KIND=dp) :: dNu(3,3)
+!------------------------------------------------------------------------------
+    REAL(KIND=dp), PARAMETER :: RelativeStep = 1.0e-6_dp
+    COMPLEX(KIND=dp) :: Step
+!------------------------------------------------------------------------------
+    Step = RelativeStep * NuMaterial
+    dNu = ( LaminateLayeredReluctivity(Omega, NuMaterial + Step, Sigma, Thickness, &
+        StackingFactor, Normal, HasNormal) - LaminateLayeredReluctivity(Omega, &
+        NuMaterial, Sigma, Thickness, StackingFactor, Normal, HasNormal) ) / Step
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateLayeredReluctivityDerivative
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Reluctivity of the lamination steel at a lamination sheet of a 'layered'
+!> stack: H(|B_s|)/|B_s| averaged over the volume of the face's parent elements
+!> that are layered bodies with an H-B curve, from the potential of PSolver.
+!> The sheet conductance then holds for the same permeability as the body.
+!> Found is false when no parent has a curve.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateSheetSteelReluctivity(Face, PSolver, PiolaVersion, EdgeBasisDegree, &
+      Found) RESULT(NuSteel)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Face
+    TYPE(Solver_t), POINTER :: PSolver
+    LOGICAL, INTENT(IN) :: PiolaVersion
+    INTEGER, INTENT(IN) :: EdgeBasisDegree
+    LOGICAL, INTENT(OUT) :: Found
+    REAL(KIND=dp) :: NuSteel
+!------------------------------------------------------------------------------
+    TYPE(Element_t), POINTER :: Parent
+    TYPE(ValueList_t), POINTER :: Material
+    TYPE(Nodes_t), SAVE :: Nodes
+    TYPE(GaussIntegrationPoints_t) :: IP
+    REAL(KIND=dp), ALLOCATABLE :: Pot(:,:), Basis(:), dBasisdx(:,:), WBasis(:,:), RotWBasis(:,:)
+    REAL(KIND=dp) :: Thickness, Sigma, Fill, Normal(3), detJ, BsAbs, NuSum, Volume
+    COMPLEX(KIND=dp) :: B(3)
+    INTEGER :: side, t, n, nd, np
+    LOGICAL :: HasNormal, Stat, GotMaterial
+    !$OMP THREADPRIVATE(Nodes)
+!------------------------------------------------------------------------------
+    Found = .FALSE.
+    NuSteel = 0.0_dp
+    NuSum = 0.0_dp
+    Volume = 0.0_dp
+    IF (.NOT. ASSOCIATED(Face % BoundaryInfo)) RETURN
+    DO side = 1, 2
+      IF (side == 1) Parent => Face % BoundaryInfo % Left
+      IF (side == 2) Parent => Face % BoundaryInfo % Right
+      IF (.NOT. ASSOCIATED(Parent)) CYCLE
+      Material => GetMaterial(Parent, GotMaterial)
+      IF (.NOT. GotMaterial) CYCLE
+      IF (.NOT. ListCheckPresent(Material, 'H-B Curve')) CYCLE
+      IF (GetString(Material, 'Laminate Stack Model', Stat) /= 'layered') CYCLE
+      CALL GetLaminateLayeredParameters(Material, Thickness, Sigma, Fill, Normal, HasNormal)
+
+      n = GetElementNOFNodes(Parent)
+      nd = GetElementNOFDOFs(Parent, PSolver)
+      np = n * PSolver % Def_Dofs(GetElementFamily(Parent), Parent % BodyId, 1)
+      ALLOCATE(Pot(2,nd), Basis(nd), dBasisdx(nd,3), WBasis(nd,3), RotWBasis(nd,3))
+      CALL GetElementNodes(Nodes, Parent, PSolver)
+      CALL GetLocalSolution(Pot, UElement=Parent, USolver=PSolver)
+
+      IP = GaussPoints(Parent, EdgeBasis=.TRUE., PReferenceElement=PiolaVersion, &
+          EdgeBasisDegree=EdgeBasisDegree)
+      DO t = 1, IP % n
+        Stat = ElementInfo(Parent, Nodes, IP % U(t), IP % V(t), IP % W(t), detJ, Basis, &
+            dBasisdx, EdgeBasis=WBasis, RotBasis=RotWBasis, USolver=PSolver)
+        B = MATMUL(CMPLX(Pot(1,np+1:nd), Pot(2,np+1:nd), KIND=dp), RotWBasis(1:nd-np,:))
+        BsAbs = MAX(LaminateMetalFluxDensity(B, Fill, Normal, HasNormal), 1.0d-8)
+        NuSum = NuSum + ListGetFun(Material, 'h-b curve', BsAbs) / BsAbs * detJ * IP % s(t)
+        Volume = Volume + detJ * IP % s(t)
+      END DO
+      DEALLOCATE(Pot, Basis, dBasisdx, WBasis, RotWBasis)
+    END DO
+    IF (Volume > 0.0_dp) THEN
+      Found = .TRUE.
+      NuSteel = NuSum / Volume
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateSheetSteelReluctivity
+!------------------------------------------------------------------------------
+
 !> Get a real-valued reluctivity tensor. This subroutine seeks values which
 !> are strictly given as reluctivity (giving the permeability is not an option
 !> here).
