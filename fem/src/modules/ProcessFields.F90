@@ -35,6 +35,7 @@
 ! *                                  added iGSE assuming only major loop
 ! *                                  replaced BTmax with native spatial DeltaB tracking
 ! *                 September 30, 2026 - Steinmetz thermal factor per node (DEV-1537)
+! *                 October 18, 2026 - no core loss from the switch-on step; start time without core loss (DEV-1607)
 ! *
 ! *****************************************************************************/
 
@@ -240,13 +241,21 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
   IF (Transient) THEN
     IF (VISIT .EQ. 0)  THEN
       ALLOCATE( VarBoldX(NSIZE), VarBoldY(NSIZE), VarBoldZ(NSIZE), dbdt(NSIZE) )
-      VarBoldX = 0.0d0
-      VarBoldY = 0.0d0
-      VarBoldZ = 0.0d0
+      ! No dB/dt for step 1: against the zero initial field it is the switch-on, not the waveform
+      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 1', ThisOnly = .TRUE. )
+      VarBoldX = TmpVar % Values
+      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 2', ThisOnly = .TRUE. )
+      VarBoldY = TmpVar % Values
+      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 3', ThisOnly = .TRUE. )
+      VarBoldZ = TmpVar % Values
 
       LossMethodStr = GetString( SolverParams, 'Transient Core Loss Method', Found )
       IF (.NOT. Found) LossMethodStr = 'gse'
       CALL Info ('ProcessFields', 'Transient Core Loss Method: '//TRIM(LossMethodStr), Level=3 )
+
+      Tstart = GetCReal( SolverParams,'Averaging Start Time',Found )
+      WRITE(coeffStr , '(ES12.5)') Tstart
+      CALL Info ('ProcessFields', 'Averaging Start Time: '//TRIM(coeffStr), Level=3 )
     END IF
 
     VarBT % Values = 0.0d0
@@ -326,15 +335,6 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
         END DO
 
         CALL Info ('ProcessFields', 'Core loss coeffs: '//TRIM(coeffStr), Level=3 )
-
-        Tstart = GetCReal( SolverParams,'Averaging Start Time',Found )
-        IF( .NOT. Found ) THEN
-          CALL Info ('ProcessFields', 'Averaging Start Time: using default value 0.0s', Level=3 )
-          Tstart = 0.0d0
-        ELSE
-          WRITE(coeffStr , '(F9.5)') Tstart
-          CALL Info ('ProcessFields', 'Averaging Start Time: '//TRIM(coeffStr), Level=3 )
-        END IF
       END IF
 
 
@@ -452,8 +452,8 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
         VarBminComp => VariableGet( Mesh % Variables, 'Bmin '//TRIM(i2s(i)), ThisOnly = .TRUE. )
 
         IF (ASSOCIATED(VarBmaxComp) .AND. ASSOCIATED(VarBminComp) .AND. ASSOCIATED(TmpVar)) THEN
-          IF (Told + dt/2 <= Tstart) THEN
-            ! Pin min/max to current field vector before averaging kicks in
+          IF (Visit == 0 .OR. Told + dt/2 <= Tstart) THEN
+            ! Pin min/max to the current field until averaging starts, and at step 1 (not to B = 0)
             VarBmaxComp % Values = TmpVar % Values
             VarBminComp % Values = TmpVar % Values
           ELSE
