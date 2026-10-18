@@ -134,8 +134,9 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   steady-state flag (it also sets `Skip Compute Steady State Change` on that solver and needs
   `Exec Solver = Always`). Because the circuits solver runs before the field solver, the gate
   judges the previous iterate; so that the accepted solution is a judged one, an iterate that
-  passes becomes the next linearization point (no relaxation), and the first call of each
-  timestep never passes. Without the gate the field solver's steady-state norm, which
+  passes becomes the next linearization point (no relaxation), the first call of each
+  coupled solve attempt (timestep, substep or retry) never passes, and in parallel runs the
+  residual is reduced to its global maximum so every rank takes the same decision. Without the gate the field solver's steady-state norm, which
   includes the circuit dofs, is the only guard, and a saturated diode can stop at a
   non-fixed point (measured on the freewheel case). In iterative 3D field solves the gate
   pushes blocking-phase iterations into the solver's noise floor, which is why the TRAFOLO

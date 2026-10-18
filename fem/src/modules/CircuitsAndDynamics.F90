@@ -893,11 +893,11 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   ! TRAFOLO: circuit-residual convergence check state.
   REAL(KIND=dp) :: CrtResTol, CrtRes
   LOGICAL :: CrtResCheck
-  ! TRAFOLO: CrtResFresh - no iterate of the CURRENT timestep exists yet (the
-  ! Lagrange values still hold the previous step's solution); CrtResPassed - the
-  ! gate passed on this call; CrtResPublished - the gate was evaluated on this
-  ! call. See PublishCircuitResidual.
-  LOGICAL :: CrtResFresh, CrtResPassed, CrtResPublished
+  ! TRAFOLO: CrtResFresh - no iterate of the CURRENT coupled solve attempt exists
+  ! yet (the Lagrange values still hold the previous solution); CrtResPassed -
+  ! the gate passed on this call (same on every rank); HaveIterate - this call
+  ! has Lagrange values to work on. See PublishCircuitResidual.
+  LOGICAL :: CrtResFresh, CrtResPassed, HaveIterate
   TYPE(Variable_t), POINTER :: LagrangeVar
   INTEGER :: Tstep=-1
   LOGICAL :: Parallel
@@ -1148,25 +1148,42 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
   ! component would have seen; internal readers therefore inherit the same
   ! relaxation, which is intended (it is what makes the Picard loop contract).
   CrtResPassed = .FALSE.
-  CrtResPublished = .FALSE.
   LagrangeVar => VariableGet( Solver % Mesh % Variables, MultName )
-  IF( ASSOCIATED(LagrangeVar) ) THEN
-    IF( SIZE(LagrangeVar % Values) >= Model % Circuit_tot_n ) THEN
+  HaveIterate = ASSOCIATED(LagrangeVar)
+  IF( HaveIterate ) HaveIterate = ( SIZE(LagrangeVar % Values) >= Model % Circuit_tot_n )
+
+  ! (3) TRAFOLO: gate the coupled loop on the circuit residual when asked.
+  ! Evaluated BEFORE the relaxation below, because its verdict decides whether
+  ! to relax at all, and BEFORE the early RETURN on an unassociated circuit
+  ! matrix further down. Every rank calls PublishCircuitResidual (it reduces
+  ! the residual globally), whether or not it has an iterate.
+  IF( CrtResCheck ) THEN
+    ! TRAFOLO: every coupled solve attempt starts without an iterate of its own:
+    ! adaptive substeps and retried steps restart the coupled loop without
+    ! changing the timestep id that resets CrtResFresh above. Before: only a
+    ! new timestep id made the gate fresh, so a substep could pass on the
+    ! previous substep's solution (found in review). Limitation: transient only
+    ! ('coupled iter' is not advanced by SolveCoupled in steady state, where the
+    ! timestep-id reset covers the single solve).
+    IF( TransientSimulation ) THEN
+      IF( GetCoupledIter() == 1 ) CrtResFresh = .TRUE.
+    END IF
+    IF( HaveIterate ) THEN
+      ! TRAFOLO: keep the RAW values -- the residual check judges the true
+      ! (unrelaxed) iterate the coupled loop would accept, not the point the
+      ! stamp linearizes about. Export them before judging, so that diode
+      ! keywords depending on 'crt i'/'crt v' are evaluated at this candidate
+      ! too. Before: the check read whatever the previous call had exported
+      ! (found in review). The linearization point is exported again below.
+      CrtRaw = LagrangeVar % Values(1:Model % Circuit_tot_n)
+      CALL Circuits_ToMeshVariable(Solver,CrtRaw)
+    END IF
+    CALL PublishCircuitResidual(HaveIterate)
+  END IF
+
+  IF( HaveIterate ) THEN
       ! (1) always maintain the relaxed latest-iterate buffers
       CrtIter = LagrangeVar % Values(1:Model % Circuit_tot_n)
-      ! TRAFOLO: keep the RAW values before CrtIter is overwritten by the relaxed
-      ! combination -- the residual check needs the true (unrelaxed) iterate the
-      ! coupled loop is about to accept, not the point the stamp linearizes
-      ! about. Copied only when that check is on: it is dead weight otherwise.
-      ! (3) TRAFOLO: gate the coupled loop on the circuit residual when asked.
-      ! Evaluated BEFORE the relaxation below, because its verdict decides
-      ! whether to relax at all, and BEFORE the early RETURN on an unassociated
-      ! circuit matrix further down.
-      IF( CrtResCheck ) THEN
-        CrtRaw = CrtIter
-        CALL PublishCircuitResidual()
-        CrtResPublished = .TRUE.
-      END IF
       ! TRAFOLO: once the raw iterate passes the circuit residual gate it is a
       ! fixed point to tolerance, so the next stamp linearizes about IT and not
       ! about the relaxed blend. Why: the circuits solver runs BEFORE the field
@@ -1187,15 +1204,6 @@ SUBROUTINE CircuitsAndDynamics( Model,Solver,dt,TransientSimulation )
       CrtExp = CrtIter
       ! (2) export only if the user asked for it (checked inside the callee)
       CALL Circuits_ToMeshVariable(Solver,CrtIter)
-    END IF
-  END IF
-  ! TRAFOLO: no Lagrange values yet (first execution, before the field solver
-  ! has created them) means there is no iterate to judge, so the gate stays
-  ! closed. Before: the flag kept its initial "done" value on that call. The
-  ! next call already sees an iterate of this step, hence CrtResFresh is cleared.
-  IF( CrtResCheck .AND. .NOT. CrtResPublished ) THEN
-    IF( ASSOCIATED(Solver % Variable) ) Solver % Variable % SteadyConverged = 0
-    CrtResFresh = .FALSE.
   END IF
 
   max_element_dofs = Model % Mesh % MaxElementDOFs
@@ -1377,30 +1385,36 @@ CONTAINS
 !>    fem/tests/circuits2D_transient_zener_gate_reversal). Two guards make the
 !>    accepted iterate the judged one: once the gate passes, the next stamp
 !>    linearizes about the passed iterate itself (no relaxation, see the caller),
-!>    so that solve reproduces it; and the first call of each timestep never
-!>    passes (CrtResFresh), since its values are the previous step's solution.
+!>    so that solve reproduces it; and the first call of each coupled solve
+!>    attempt (timestep, substep or retry) never passes (CrtResFresh), since its
+!>    values are the previous solution.
 !>  * 'Steady State Min Iterations' still applies and still wins: while
 !>    i < CoupledMinIter the loop does not test convergence at all.
-!>  * No parallel reduction is done here; the residual is evaluated on the rank
-!>    that owns the diode's voltage dof (every rank holds every circuit dof:
-!>    CircMatInitMod makes all ranks neighbours of each circuit row). That is
-!>    correct for the exit decision (MainUtils does ParallelAllReduceAnd over
-!>    DoneThis, so any rank that is not converged blocks everyone) but the
-!>    PUBLISHED number is that rank's; the other ranks publish 0.
+!>  * Each diode is evaluated on the rank that owns its voltage dof (every rank
+!>    holds every circuit dof: CircMatInitMod makes all ranks neighbours of
+!>    each circuit row); the residual is then reduced to its global maximum,
+!>    so every rank publishes the same number and takes the same pass/fail
+!>    decision. That decision also switches the relaxation off (see the
+!>    caller), so it must be identical on all ranks or the exported
+!>    'crt i'/'crt v' values would differ between partitions. This routine is
+!>    therefore COLLECTIVE: every rank calls it whenever the keyword is set.
 !>  * Only the diode is covered. A future solution-dependent lumped type must be
 !>    added here as well as to IsLumpedComponent.
 !------------------------------------------------------------------------------
-   SUBROUTINE PublishCircuitResidual()
+   SUBROUTINE PublishCircuitResidual(GotIterate)
 !------------------------------------------------------------------------------
      IMPLICIT NONE
+     LOGICAL, INTENT(IN) :: GotIterate
      TYPE(Component_t), POINTER :: Comp
      TYPE(Valuelist_t), POINTER :: CompParams
      REAL(KIND=dp) :: Vf, Ron, Roff, Vs, Vz, Vd, Id, Rd, RI
-     LOGICAL :: HasBreakdown, IsActive
+     LOGICAL :: HasBreakdown, IsActive, AllHaveIterate
      INTEGER :: ci, ck
 !------------------------------------------------------------------------------
      CrtRes = 0._dp
-
+     ! TRAFOLO: no Lagrange values yet (first execution, before the field
+     ! solver has created them) means there is no iterate to judge.
+     IF (GotIterate) THEN
      DO ci = 1, Model % n_Circuits
        DO ck = 1, Model % Circuits(ci) % n_comp
          Comp => Model % Circuits(ci) % Components(ck)
@@ -1425,17 +1439,27 @@ CONTAINS
          CrtRes = MAX(CrtRes, ABS(RI - Vd) / (ABS(Vd) + ABS(RI) + 1.0e-30_dp))
        END DO
      END DO
+     END IF
 
-     ! TRAFOLO: the first call of a timestep reads the PREVIOUS step's solution
-     ! (no solve of this step has run yet), which satisfies the diode law but is
-     ! not a candidate for this step -- never pass on it. Before: it passed, so
-     ! the gate contributed nothing to the first coupled iteration of a step.
-     IF (CrtResFresh) THEN
+     ! TRAFOLO: one global verdict. Before: each rank decided on its own
+     ! residual, so ranks owning no diode passed with 0 while the owner failed,
+     ! skipped relaxation and exported different values (found in review).
+     AllHaveIterate = GotIterate
+     IF (Parallel) THEN
+       CrtRes = ParallelReduction(CrtRes, 2)
+       AllHaveIterate = ( ParallelReduction(MERGE(1, 0, GotIterate), 1) == 1 )
+     END IF
+
+     ! TRAFOLO: the first call of a coupled solve attempt reads the PREVIOUS
+     ! solution (no solve of this attempt has run yet), which satisfies the
+     ! diode law but is not a candidate -- never pass on it. Before: it passed,
+     ! so the gate contributed nothing to the first coupled iteration.
+     IF (CrtResFresh .OR. .NOT. AllHaveIterate) THEN
        CrtResPassed = .FALSE.
-       CrtResFresh = .FALSE.
      ELSE
        CrtResPassed = (CrtRes <= CrtResTol)
      END IF
+     CrtResFresh = .FALSE.
 
      IF (ASSOCIATED(Solver % Variable)) THEN
        Solver % Variable % SteadyChange = CrtRes
