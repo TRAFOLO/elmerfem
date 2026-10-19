@@ -467,17 +467,22 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   that give the result of one, tilted laminations with an H-B curve, ending in saturation; with
   the states of the first run kept the loss is 0.02 % off), `mgdyn_laminate_layered_transient_reload`
   (two one-step Run Control runs, the second at 0.8 of the flux: the norms of a single run at 0.8,
-  and an elemental `Proximity Loss` found again in the reloaded model),
+  also of an elemental `Proximity Loss`), `mgdyn_laminate_layered_transient_reinit` (a second
+  one-step simulation after `RUN` with the AV solver initialised again and 0.8 of the flux, whose
+  step, time, run counter and solver step count repeat those of the first: the norms of a restart
+  from the first one's result; with the ladders of the first kept the loss is 11 % off),
   `mgdyn_laminate_layered_transient_cubic` (an ordinary and a monotone cubic spline of the same
   curve in two stacks: each energy from its own table), `mgdyn_laminate_layered_transient_spd`
   (MUMPS reading one triangle, deep saturation at stacking factor 0.5: the symmetric Newton term
   gives the norms of the full one with a general solver; with the full term MUMPS's residual check
-  stops the run), `mgdyn_laminate_layered_transient_sheet` (a lamination sheet: the Fatal) and
+  stops the run), `mgdyn_laminate_layered_transient_sheet` (a lamination sheet: the Fatal),
   `mgdyn_transient_loss_layered_gse` / `_igse` (the fields of `mgdyn_transient_loss_start_gse` /
   `_igse` in a stack of stacking factor 0.5, the iGSE one with tilted laminations so that the flux
   has normal and in-plane parts: the GSE loss, the iGSE base and bounds of B_s on the metal
   fraction, as the law gives them to 9 digits; without layered bodies the loss is the same to the
-  last bit). Elmer as it is: an edge initial
+  last bit) and `mgdyn_transient_loss_layered_mixed` (that field in a stack without a normal in a
+  quarter of the cube next to plain steel: the loss of each body as the law gives it, to 9
+  digits). Elmer as it is: an edge initial
   condition needs the scalar `AV {e}` entry for `SetInitialConditions` to read its components,
   the masked means of `SaveScalars` need `Parallel Reduce` on ranks without that body, and the
   `int` operator of `SaveScalars` skips elements of an elemental (`-elem`) field.

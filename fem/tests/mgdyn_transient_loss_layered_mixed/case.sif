@@ -1,0 +1,141 @@
+!---------------------------------------------------------------------
+! Transient GSE core loss of a 'layered' laminate stack next to plain
+! steel (DEV-1606). The field of mgdyn_transient_loss_start_gse (a
+! uniform B = 0.5 + 0.1 cos(2 pi t) along x in a unit cube) in two
+! bodies: in x < 0.25 a stack of stacking factor 0.5 without a normal,
+! whose loss law takes B_s = B/F on the metal fraction F, in x > 0.25
+! plain steel with the same loss data at B. The interface is normal to B,
+! so B stays uniform. From the law with the same backward differences:
+! layered body 0.0285809 W, plain body 0.0326712 W, together
+! 0.0612521 W (solver 4, the layered body solver 5); with the nodes
+! of the two bodies mixed up 0.0966332 W.
+! No conductivity, so no Joule heat.
+!---------------------------------------------------------------------
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "cube2"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Transient
+  Timestepping Method = implicit euler
+  Timestep Intervals(1) = 201
+  Timestep Sizes(1) = 0.005
+  Steady State Max Iterations = 1
+End
+
+Body 1
+  Equation = 1
+  Material = 1
+  layered = Logical True
+End
+
+Body 2
+  Equation = 1
+  Material = 2
+  plain = Logical True
+End
+
+Material 1
+  Relative Permeability = Real 1000
+  Electric Conductivity = Real 0
+  Laminate Stack Model = String "layered"
+  Laminate Thickness = Real 0.00035
+  Laminate Stack Conductivity = Real 2000000
+  Laminate Stacking Factor = Real 0.5
+  Density = Real 1
+  Harmonic Loss Linear Coefficient = Real 1.0
+  Harmonic Loss Quadratic Coefficient = Real 0.1
+  Harmonic Loss Linear Frequency Exponent = Real 1.4
+  Harmonic Loss Linear Exponent = Real 2.4
+End
+
+Material 2
+  Relative Permeability = Real 1000
+  Electric Conductivity = Real 0
+  Density = Real 1
+  Harmonic Loss Linear Coefficient = Real 1.0
+  Harmonic Loss Quadratic Coefficient = Real 0.1
+  Harmonic Loss Linear Frequency Exponent = Real 1.4
+  Harmonic Loss Linear Exponent = Real 2.4
+End
+
+Equation 1
+  Active Solvers(5) = 1 2 3 4 5
+End
+
+Solver 1
+  Equation = "MGDynamics"
+  Variable = P
+  Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+  Linear System Symmetric = True
+  Linear System Solver = "Direct"
+  Linear System Direct Method = "MUMPS"
+  Use Tree Gauge = Logical False
+  Mumps Diagonal Regularization = Real 1e-09
+  Steady State Convergence Tolerance = 1e-09
+End
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Linear System Symmetric = True
+  Potential Variable = String "P"
+  Calculate Elemental Fields = Logical True
+  Calculate Nodal Fields = Logical False
+  Calculate Joule Heating = Logical True
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+
+Solver 3
+  Procedure = "ProcessFields" "ProcessFields"
+  Equation = post process data
+  Update Exported Variables = Logical True
+  Calculate Harmonic Loss = Logical True
+  Transient Core Loss Method = String gse
+End
+
+Solver 4
+  Equation = "sv"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = loss.dat
+  Variable 1 = String "LoadWm3Avg"
+  Operator 1 = String "int"
+  Show Norm Index = Integer 1
+End
+
+Solver 5
+  Equation = "sv bodies"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = bodies.dat
+  Variable 1 = String "LoadWm3Avg"
+  Operator 1 = String "body int"
+  Mask Name 1 = String "layered"
+  Variable 2 = String "LoadWm3Avg"
+  Operator 2 = String "body int"
+  Mask Name 2 = String "plain"
+  Show Norm Index = Integer 1
+End
+
+Boundary Condition 1
+  Target Boundaries(8) = 1 2 3 4 5 6 7 8
+  P = Real 0
+  P {e} 1 = Real 0
+  P {e} 2 = Real 0
+  P {e} 3 = Variable Coordinate 2, Time
+    Real MATC "tx(0)*(0.5 + 0.1*cos(2*pi*tx(1)))"
+End
+
+Solver 4 :: Reference Norm = 6.12521021E-02
+Solver 4 :: Reference Norm Tolerance = 1e-5
+Solver 5 :: Reference Norm = 2.85809498E-02
+Solver 5 :: Reference Norm Tolerance = 1e-5

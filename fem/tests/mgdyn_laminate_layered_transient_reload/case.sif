@@ -2,10 +2,10 @@
 ! mgdyn_laminate_layered_transient_runs (M300-35A curve, 500 Hz, stacking factor 0.96, Laminate
 ! Normal (0.6, 0, 0.8)) in two runs of one step each, the second with 0.8 of the first one's flux
 ! (Run Control parameter rpar(0) in the initial field and the drive). One step repeats the timestep
-! count, so the second run is told from a repeated solve only by the run counter: its ladders start
-! from its own initial field and its norms are those of a single run at 0.8 of the flux (with the
-! ladders of the first run kept, they differ). The loss density also goes into an elemental
-! 'Proximity Loss', which the reloaded model must find again.
+! count and the time, so the second run is told from a repeated solve by the run counter and the
+! solver's own step count: its ladders start from its own initial field and its norms are those of
+! a single run at 0.8 of the flux (with the ladders of the first run kept, they differ). The loss
+! density also goes into an elemental 'Proximity Loss' (solver 6).
 ! Norms at the end of the second run: the laminate stack loss (W, solver 3), the magnetic field
 ! energy (solver 4), the air layer B_x (solver 5) and the largest 'Proximity Loss' (W/m^3, solver 6).
 
