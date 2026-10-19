@@ -414,13 +414,16 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   in-plane and normal parts the static law has no potential and its Newton term is not symmetric:
   with `Linear System Symmetric` the solver gets its symmetric part, in the matrix and the right
   hand side alike, so that a solver reading one triangle still converges to the law. A Fatal stops
-  `Constant (Bulk) System`, `Adaptive Timestepping`, `Convergence Control`, a timestepping method
-  other than BDF of order 1 - 2 or implicit Euler, `Electrodynamics Model` (second order in time),
-  a second WhitneyAVSolver with layered bodies and lamination sheets (`Thin Sheet Laminate
-  Thickness`), whose net lamination currents only the harmonic solver carries. The states start
-  from the initial field as
-  steady, also after a restart, whose files carry no ladder history, and in each new simulation of
-  the same process (a `Run Control` sweep, a reloaded model). Validated on a flux-driven stack in 3-D
+  `Constant (Bulk) System`, `Adaptive Timestepping`, `Convergence Control`, a predictor-corrector
+  AV solver, a timestepping method other than BDF of order 1 - 2 or implicit Euler,
+  `Electrodynamics Model` (second order in time), a second WhitneyAVSolver with layered bodies and
+  lamination sheets (`Thin Sheet Laminate Thickness`), whose net lamination currents only the
+  harmonic solver carries. The states start from the initial field as steady, also after a
+  restart, whose files carry no ladder history, and in each new simulation of the same process (a
+  `Run Control` sweep, a reloaded model, also when the AV solver first runs at a later step of it,
+  a solver initialised again). A mesh swap during a run (`Mesh Name Index`, remeshing) initialises
+  the solver again, so the states start again from the new mesh's field there.
+  Validated on a flux-driven stack in 3-D
   (a quarter of a lamination width, `hfhomog/stack3d.py` transient mode,
   `studies/run_stack_transient.py` in CORE HOMOGENIZATION):
   - linear steel (mu_r 1000 - 5000, 0.35 / 0.50 mm, F 0.96 and 1), sine 50 Hz - 50 kHz, against the
@@ -471,7 +474,10 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   one-step simulation after `RUN` with the AV solver initialised again and 0.8 of the flux, whose
   step, time, run counter and solver step count repeat those of the first: the norms of a restart
   from the first one's result; with the ladders of the first kept the loss is 11 % off),
-  `mgdyn_laminate_layered_transient_cubic` (an ordinary and a monotone cubic spline of the same
+  `mgdyn_laminate_layered_transient_delayed` (a second simulation after `RUN` of two steps whose
+  first the AV solver skips: the norms of a restart from the first one's result; with the ladders
+  of the first kept the loss is 48 % off), `mgdyn_laminate_layered_transient_cubic` (an ordinary
+  and a monotone cubic spline of the same
   curve in two stacks: each energy from its own table), `mgdyn_laminate_layered_transient_spd`
   (MUMPS reading one triangle, deep saturation at stacking factor 0.5: the symmetric Newton term
   gives the norms of the full one with a general solver; with the full term MUMPS's residual check
