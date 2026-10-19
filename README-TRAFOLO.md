@@ -476,8 +476,11 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   from the first one's result; with the ladders of the first kept the loss is 11 % off),
   `mgdyn_laminate_layered_transient_delayed` (a second simulation after `RUN` of two steps whose
   first the AV solver skips: the norms of a restart from the first one's result; with the ladders
-  of the first kept the loss is 48 % off), `mgdyn_laminate_layered_transient_cubic` (an ordinary
-  and a monotone cubic spline of the same
+  of the first kept the loss is 48 % off), `mgdyn_laminate_layered_transient_second_av` (a
+  second, air-only AV solver whose step count differs from the layered one's after only that is
+  initialised again: the norms of a restart; with the other solver resetting the ladders the loss
+  is 98 % low), `mgdyn_laminate_layered_transient_cubic` (an ordinary and a monotone cubic spline
+  of the same
   curve in two stacks: each energy from its own table), `mgdyn_laminate_layered_transient_spd`
   (MUMPS reading one triangle, deep saturation at stacking factor 0.5: the symmetric Newton term
   gives the norms of the full one with a general solver; with the full term MUMPS's residual check
