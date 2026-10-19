@@ -381,10 +381,18 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
         END IF
       ELSE
         ! Original GSE accumulates directly into LoadWkg (alongside Joule losses)
-        VarLoadWkg % Values = VarLoadWkg % Values + LamFill * ( &
-                              VarLCk1 * dBdt**VarFqP * &
-                              LossBAbs**(VarFdP-VarFqP) + &
-                              VarLC2k2 * dBdt**2 )
+        IF ( LamAny ) THEN
+          VarLoadWkg % Values = VarLoadWkg % Values + LamFill * ( &
+                                VarLCk1 * dBdt**VarFqP * &
+                                LossBAbs**(VarFdP-VarFqP) + &
+                                VarLC2k2 * dBdt**2 )
+        ELSE
+          ! without layered stacks the terms as before, to the last bit
+          VarLoadWkg % Values = VarLoadWkg % Values + &
+                                VarLCk1 * dBdt**VarFqP * &
+                                VarBT % Values**(VarFdP-VarFqP) + &
+                                VarLC2k2 * dBdt**2
+        END IF
       END IF
 
     ELSE
