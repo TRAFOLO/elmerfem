@@ -1322,8 +1322,10 @@ CONTAINS
   ! timestep, also one the solver skips) goes on, which shifts their offset also
   ! when the solver first runs at a later step; a sweep also moves the run
   ! counter, and a solver initialised again the generation counter: its ladders
-  ! start from its field, as after a restart.
-  IF (Transient .AND. LamLadderStep > 0) THEN
+  ! start from its field, as after a restart. Only the solver holding the ladders
+  ! checks: another AV solver of the model has step counts of its own.
+  IF (Transient .AND. LamLadderStep > 0 .AND. &
+      ListGetLogical(SolverParams, 'Laminate Xi Declared', Found)) THEN
     IF (XiStep < LamLadderStep .OR. Solver % DoneTime - XiStep /= LamStepOffset .OR. &
         LaminateRunCount() /= LamRun .OR. LaminateInitGeneration /= LamGeneration .OR. &
         (XiStep == LamLadderStep .AND. GetTime() /= LamTime)) CALL ResetLaminateLadders()
