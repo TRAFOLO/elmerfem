@@ -474,8 +474,10 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   gives the norms of the full one with a general solver; with the full term MUMPS's residual check
   stops the run), `mgdyn_laminate_layered_transient_sheet` (a lamination sheet: the Fatal) and
   `mgdyn_transient_loss_layered_gse` / `_igse` (the fields of `mgdyn_transient_loss_start_gse` /
-  `_igse` in a stack of stacking factor 0.5: the GSE loss, the iGSE base and bounds of B/F on the
-  metal fraction, as the law gives them to 9 digits). Elmer as it is: an edge initial
+  `_igse` in a stack of stacking factor 0.5, the iGSE one with tilted laminations so that the flux
+  has normal and in-plane parts: the GSE loss, the iGSE base and bounds of B_s on the metal
+  fraction, as the law gives them to 9 digits; without layered bodies the loss is the same to the
+  last bit). Elmer as it is: an edge initial
   condition needs the scalar `AV {e}` entry for `SetInitialConditions` to read its components,
   the masked means of `SaveScalars` need `Parallel Reduce` on ranks without that body, and the
   `int` operator of `SaveScalars` skips elements of an elemental (`-elem`) field.

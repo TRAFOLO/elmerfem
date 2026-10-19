@@ -413,8 +413,10 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
         CALL Info('WhitneyAVSolver_Init','Declared "'//LaminateXiName//'" with '// &
             I2S(nlam)//' poles for the laminate stack eddy current ladder', Level=5)
         CALL ListAddLogical(Params, 'Laminate Xi Declared', .TRUE.)
-        LaminateInitGeneration = LaminateInitGeneration + 1
       END IF
+      ! every initialisation of the solver holding the ladders, also of one
+      ! retained over a reload whose variables are already declared
+      IF (nlam > 0) LaminateInitGeneration = LaminateInitGeneration + 1
     END BLOCK
   END IF
 
