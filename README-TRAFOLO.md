@@ -320,7 +320,8 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   sum is meaningful, the sheet part alone can be negative (d of about 3-5 skin depths). The loss is
   not in the `Joule Heating` field (no thermal coupling yet). A tensor or complex permeability, a
   nonzero conductivity or a coil component in a `layered` body, and `layered` in the transient
-  solver, stop with a Fatal (an H-B curve is accepted since DEV-1604). Validated against a
+  solver, stop with a Fatal (an H-B curve is accepted since DEV-1604, the transient solver since
+  DEV-1606). Validated against a
   resolved model of three 8 um NiFe laminations (mu_r 190, 1.67 MS/m) around a copper bar, 1 MHz -
   1 GHz, single bar and a pair 20 um apart in and out of phase: R -3.2 .. +0.9 %, L -0.3 .. +2.5 %
   (the tensor alone: L up to +9.8 %). Test: `mgdyn_laminate_layered_harmonic` (MUMPS).
@@ -375,6 +376,125 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   magnetic energy; converges at the 12th solve; also on 3 ranks of the default partitioning, with
   the same norms), `mgdyn_laminate_layered_harmonic_hb_split_sheet` (that model on 3 ranks with
   sheets cut by the partition interfaces: the Fatal).
+- `layered` laminate stack model in the transient A-V solver (DEV-1606), so that TRAFOLO can move
+  harmonic and transient runs off the low-frequency model at once. `WhitneyAVSolver` takes a
+  `layered` body (before: a Fatal) with `Relative Permeability` or an `H-B Curve`: the static stack
+  tensor of the harmonic model at zero frequency (an H-B curve read at B_s, with the Newton term of
+  DEV-1604, real) and, in the lamination plane, the eddy currents of the laminations as a Foster
+  ladder per element, H_dyn = (nu(s) - nu(0)) B_par (`LaminateNuFoster` in `CircuitUtils`). The
+  ladder holds the lamination modes of tanh(x)/x, the first N-1 of them and one pole that carries the
+  rest of their DC weight and first moment, so that the DC value, the low-frequency eddy term and
+  the infinite-frequency limit (1-F) mu0 are those of the lamination; the eddy term is
+  sigma d^2/(12 F) (F mu_r/(1 - F + F mu_r))^2 dB/dt, sigma d^2/(12 F) dB/dt for F mu_r >> 1 - F
+  (exact at F = 1). Its poles are the zeros of the modal permeability (bisection), N = `Laminate
+  Ladder Order` (new, 1-6, default 6).
+  With the constant DC tail of the foil sheet ladder instead, the eddy loss of a square flux ripple
+  (1 % edges) came out up to 8 % low; with the moment-matched pole within 1 % (1-D check, 0.10-0.35
+  mm, 1-20 kHz, triangle and square flux; d^2/12 alone: up to +486 %). The ladder follows the steel's
+  permeability: `Relative Permeability`, or with a curve the mean incremental reluctivity at the
+  laminations' flux density and at that of their core (the slowest ladder state) of the previous
+  step, frozen over the step so that Newton stays exact. The incremental permeability is what the
+  eddy currents of a ripple on a bias see: the secant, a fixed permeability or d^2/12 miss its loss
+  by 20-100 % and more. The states (three components per pole) follow the element mean of B_par,
+  advance with the field's own BDF weights and are eliminated per element and step; the solver
+  declares them on the layered bodies (`Laminate Xi`, `Laminate Ladder`, about 0.5 kB per element
+  at order 6). With F = 1, order 1 and no normal the ladder is sigma d^2/12 dB/dt alone and the model
+  is the old `Low-Frequency Model` (same solution to 12 digits), which however reports no eddy loss.
+  The eddy loss is the power the ladder takes less the change of its stored energy, the power the
+  block absorbs also while the ladder follows the curve (the ladder's own dissipation, sum -r_k T_k
+  xi_k'^2, then over-reports it, by up to 30 % at 500 Hz in saturation). It goes into `res: Eddy
+  current power` and `res: Laminate stack loss`, and into an elemental `Proximity Loss` when one is
+  declared (`ProcessFields` adds that to the core load: a Steinmetz eddy term on top counts the
+  classical loss twice). The transient core loss of `ProcessFields` (GSE, iGSE) takes, in a layered
+  body, the steel's flux density B_s = B_par/F + B_perp (its dB/dt, its magnitude and the iGSE
+  bounds) on the metal fraction F of the volume, as the harmonic loss of `CalcFields` does; the
+  exported B and BT stay the stack's. `CalcFields` adds the eddy current field to H and the ladder's stored
+  energy to the magnetic energy; the static energy of an H-B body is the potential of its law along
+  the path from zero, integrated along the curve (`LaminateLayeredEnergy`). Where the flux has
+  in-plane and normal parts the static law has no potential and its Newton term is not symmetric:
+  with `Linear System Symmetric` the solver gets its symmetric part, in the matrix and the right
+  hand side alike, so that a solver reading one triangle still converges to the law. A Fatal stops
+  `Constant (Bulk) System`, `Adaptive Timestepping`, `Convergence Control`, a predictor-corrector
+  AV solver, a timestepping method other than BDF of order 1 - 2 or implicit Euler,
+  `Electrodynamics Model` (second order in time), a second WhitneyAVSolver with layered bodies and
+  lamination sheets (`Thin Sheet Laminate Thickness`), whose net lamination currents only the
+  harmonic solver carries. The states start from the initial field as steady, also after a
+  restart, whose files carry no ladder history, and in each new simulation of the same process (a
+  `Run Control` sweep, a reloaded model, also when the AV solver first runs at a later step of it,
+  a solver initialised again). A mesh swap during a run (`Mesh Name Index`, remeshing) initialises
+  the solver again, so the states start again from the new mesh's field there.
+  Validated on a flux-driven stack in 3-D
+  (a quarter of a lamination width, `hfhomog/stack3d.py` transient mode,
+  `studies/run_stack_transient.py` in CORE HOMOGENIZATION):
+  - linear steel (mu_r 1000 - 5000, 0.35 / 0.50 mm, F 0.96 and 1), sine 50 Hz - 50 kHz, against the
+    harmonic layered model, which is exact there: complex permeability and loss within 0.07 % up to
+    20 kHz, 0.8 / 0.9 % at 50 kHz (38 - 49 times the first lamination mode); energy balance 1.0005.
+  - saturating sine at 50 Hz, 0.5 - 1.7 T, against meshed laminations (transient, same mesh and
+    curve; M300-35A, M310-50A, M270-50A, M235-35A, grain-oriented M165-35S; F 0.96): non-oriented
+    steels magnetizing field |H1| within 0.2 %, peak H within 0.3 %, eddy loss -0.9 .. +0.1 % (the
+    old model: 0.4 %, 0.4 %, -0.8 .. +0.2 %); M165-35S |H1| within 0.5 %, peak H 1.3 %, loss +0.6 /
+    -0.9 / -3.9 / -4.2 % at 0.5 / 1.0 / 1.5 / 1.7 T (the old model: |H1| to -1.9 %, loss +1.0 / +0.3
+    / -3.2 / -3.5 %). There the skin depth below the knee is about the lamination thickness and the
+    surface layers saturate first, so the eddy currents across the lamination are nonlinear, which
+    neither a linear ladder nor d^2/12 follows: a 1-D check (resolved lamination against the block)
+    gives -3.5 .. -4.4 % for every choice of the ladder's permeability and for d^2/12 alone.
+  - 500 Hz, 0.5 - 1.7 T: M300-35A |H1| -1.5 .. +0.9 %, peak H -1.8 .. +1.0 %, eddy loss -5.1 ..
+    -2.5 %; M310-50A (0.5 mm) |H1| -4.5 .. +2.2 %, peak H -3.8 .. +16.7 % (0.5 T), loss -9.4 ..
+    +0.4 %, the largest misses at 1.0 - 1.7 T, where saturation makes the eddy currents across the
+    lamination nonlinear, which a linear ladder does not follow (the 1-D check gives the same for
+    every choice of its permeability; the harmonic layered model against its meshed reference: -11
+    .. +4 % and -8 .. +7 %). The old model: |H1| down to -11 %, peak H to -17 %, loss -6.8 .. +9.5 %.
+  - triangular flux ripple +-0.05 T at 5 kHz on a bias of 0.5 / 1.0 / 1.5 T, M300-35A: ripple |H1|
+    -0.5 / +0.2 / +0.2 %, peak H -3.8 / -3.0 / +0.2 %, eddy loss -2.2 / +0.0 / +0.3 %; the old model
+    +184 / +55 / +0.9 % loss, +84 / +6 / -0.0 % |H1|.
+  - energy balance: reported eddy loss over the absorbed power 1.0005 in the sines; in the ripple
+    1.0000 against the absorbed power in the run's own BDF2 quadrature, 1.007 - 1.024 against the
+    trapezoidal one (dB/dt jumps at the triangle's corners; the comparisons above use the
+    trapezoidal power for both models).
+  - against the harmonic layered model at 50 Hz in saturation (3 steels): eddy loss within 0.8 %;
+    the field amplitudes differ by method (the harmonic model's H is the curve at the peak flux,
+    the transient one the fundamental of the true waveform: -53 .. -79 % at 1.5 - 1.7 T).
+  Known limits, accepted: the eddy loss of grain-oriented M165-35S at 50 Hz and 1.5 / 1.7 T comes
+  out -3.9 / -4.2 % low, and that of 0.5 mm laminations (M310-50A) at 500 Hz and 1.0 - 1.7 T
+  -6.9 .. -9.4 % low. In both the eddy currents across a saturating lamination are nonlinear, which
+  a model with a linear ladder on the lamination's mean flux cannot follow, whatever permeability
+  the ladder takes (1-D check above); the old model misses them too (-3.2 / -3.5 %, down to
+  -6.8 %).
+  Tests: `mgdyn_laminate_layered_transient` (linear, 2 kHz, order 6: stack loss, energy with the
+  ladder's share, surface field; also on 2 ranks), `mgdyn_laminate_layered_transient_lf` (F = 1,
+  order 1: the old model's solution and its eddy loss; also on 4 ranks),
+  `mgdyn_laminate_layered_transient_hb` (M300-35A curve, 500 Hz, 1.3 T; also on 3 ranks cut along
+  the stack, one of them without a layered element), `mgdyn_laminate_layered_transient_history`
+  (a start from a nonzero field, two step sizes, two solves per step that give the result of one,
+  the elemental `Proximity Loss`), `mgdyn_laminate_layered_transient_runs` (two Run Control runs
+  that give the result of one, tilted laminations with an H-B curve, ending in saturation; with
+  the states of the first run kept the loss is 0.02 % off), `mgdyn_laminate_layered_transient_reload`
+  (two one-step Run Control runs, the second at 0.8 of the flux: the norms of a single run at 0.8,
+  also of an elemental `Proximity Loss`), `mgdyn_laminate_layered_transient_reinit` (a second
+  one-step simulation after `RUN` with the AV solver initialised again and 0.8 of the flux, whose
+  step, time, run counter and solver step count repeat those of the first: the norms of a restart
+  from the first one's result; with the ladders of the first kept the loss is 11 % off),
+  `mgdyn_laminate_layered_transient_delayed` (a second simulation after `RUN` of two steps whose
+  first the AV solver skips: the norms of a restart from the first one's result; with the ladders
+  of the first kept the loss is 48 % off), `mgdyn_laminate_layered_transient_second_av` (a
+  second, air-only AV solver whose step count differs from the layered one's after only that is
+  initialised again: the norms of a restart; with the other solver resetting the ladders the loss
+  is 98 % low), `mgdyn_laminate_layered_transient_cubic` (an ordinary and a monotone cubic spline
+  of the same
+  curve in two stacks: each energy from its own table), `mgdyn_laminate_layered_transient_spd`
+  (MUMPS reading one triangle, deep saturation at stacking factor 0.5: the symmetric Newton term
+  gives the norms of the full one with a general solver; with the full term MUMPS's residual check
+  stops the run), `mgdyn_laminate_layered_transient_sheet` (a lamination sheet: the Fatal),
+  `mgdyn_transient_loss_layered_gse` / `_igse` (the fields of `mgdyn_transient_loss_start_gse` /
+  `_igse` in a stack of stacking factor 0.5, the iGSE one with tilted laminations so that the flux
+  has normal and in-plane parts: the GSE loss, the iGSE base and bounds of B_s on the metal
+  fraction, as the law gives them to 9 digits; without layered bodies the loss is the same to the
+  last bit) and `mgdyn_transient_loss_layered_mixed` (that field in a stack without a normal in a
+  quarter of the cube next to plain steel: the loss of each body as the law gives it, to 9
+  digits). Elmer as it is: an edge initial
+  condition needs the scalar `AV {e}` entry for `SetInitialConditions` to read its components,
+  the masked means of `SaveScalars` need `Parallel Reduce` on ranks without that body, and the
+  `int` operator of `SaveScalars` skips elements of an elemental (`-elem`) field.
 
 ## Building the distributed bundle
 

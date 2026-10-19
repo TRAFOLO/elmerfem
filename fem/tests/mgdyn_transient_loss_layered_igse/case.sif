@@ -1,0 +1,119 @@
+!---------------------------------------------------------------------
+! Transient iGSE core loss of a 'layered' laminate stack (DEV-1606). The
+! field of mgdyn_transient_loss_start_igse (a uniform B along x) in a stack
+! of stacking factor 0.5 with tilted laminations, Laminate Normal (0.6, 0,
+! 0.8), so that B has normal and in-plane parts: the steel's flux density
+! B_s = B_par/F + B_perp keeps its direction and is s B, s = sqrt(0.8^2/F^2
+! + 0.6^2) = 1.708801. The bounds DeltaB are those of B_s, 0.3417601
+! instead of 0.2, and the hysteresis base is that of B_s on the metal
+! fraction F, 0.0209662 W from the law with the same backward differences
+! (at the stack's B 0.0198053 W).
+!---------------------------------------------------------------------
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "cube"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Transient
+  Timestepping Method = implicit euler
+  Timestep Intervals(1) = 201
+  Timestep Sizes(1) = 0.005
+  Steady State Max Iterations = 1
+End
+
+Body 1
+  Equation = 1
+  Material = 1
+End
+
+Material 1
+  Relative Permeability = Real 1000
+  Electric Conductivity = Real 0
+  Laminate Stack Model = String "layered"
+  Laminate Thickness = Real 0.00035
+  Laminate Stack Conductivity = Real 2000000
+  Laminate Stacking Factor = Real 0.5
+  Laminate Normal(3) = Real 0.6 0 0.8
+  Density = Real 1
+  Harmonic Loss Linear Coefficient = Real 1.0
+  Harmonic Loss Quadratic Coefficient = Real 0.1
+  Harmonic Loss Linear Frequency Exponent = Real 1.4
+  Harmonic Loss Linear Exponent = Real 2.4
+End
+
+Equation 1
+  Active Solvers(5) = 1 2 3 4 5
+End
+
+Solver 1
+  Equation = "MGDynamics"
+  Variable = P
+  Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+  Linear System Symmetric = True
+  Linear System Solver = "Direct"
+  Linear System Direct Method = "MUMPS"
+  Use Tree Gauge = Logical False
+  Mumps Diagonal Regularization = Real 1e-09
+  Steady State Convergence Tolerance = 1e-09
+End
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Linear System Symmetric = True
+  Potential Variable = String "P"
+  Calculate Elemental Fields = Logical True
+  Calculate Nodal Fields = Logical False
+  Calculate Joule Heating = Logical True
+  Steady State Convergence Tolerance = 0
+  Linear System Solver = "Iterative"
+  Linear System Preconditioning = None
+  Linear System Max Iterations = 5000
+  Linear System Iterative Method = CG
+  Linear System Convergence Tolerance = 1.0e-10
+End
+
+Solver 3
+  Procedure = "ProcessFields" "ProcessFields"
+  Equation = post process data
+  Update Exported Variables = Logical True
+  Calculate Harmonic Loss = Logical True
+  Transient Core Loss Method = String igse
+End
+
+Solver 4
+  Equation = "sv"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = deltab.dat
+  Variable 1 = String "DeltaB"
+  Operator 1 = String "max"
+  Show Norm Index = Integer 1
+End
+
+Solver 5
+  Equation = "sv base"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = base.dat
+  Variable 1 = String "iGSE_Base1_WkgAvg"
+  Operator 1 = String "int"
+  Show Norm Index = Integer 1
+End
+
+Boundary Condition 1
+  Target Boundaries(6) = 1 2 3 4 5 6
+  P = Real 0
+  P {e} 1 = Real 0
+  P {e} 2 = Real 0
+  P {e} 3 = Variable Coordinate 2, Time
+    Real MATC "tx(0)*(0.5 + 0.1*cos(2*pi*tx(1)))"
+End
+
+Solver 4 :: Reference Norm = 3.41760150E-01
+Solver 4 :: Reference Norm Tolerance = 1e-5
+Solver 5 :: Reference Norm = 2.09661870E-02
+Solver 5 :: Reference Norm Tolerance = 1e-5

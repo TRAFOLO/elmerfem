@@ -325,6 +325,12 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
   ! needs all three. Each direction gets the largest ladder order of the sheets
   ! using it; a sheet of lower order uses the first dofs of its elements.
   IF (Transient) THEN
+    ! The lamination sheets of a 'layered' stack carry the net lamination
+    ! currents in the harmonic solver only: here they would be left out of the
+    ! equations, while CalcFields still reported them.
+    IF (ListCheckPresentAnyBC(Model, 'Thin Sheet Laminate Thickness')) CALL Fatal( &
+        'WhitneyAVSolver_Init', 'Lamination sheets ("Thin Sheet Laminate Thickness") '// &
+        'are available in the harmonic solver only!')
     BLOCK
       TYPE(ValueList_t), POINTER :: CPar
       INTEGER :: ic, nlad, slot, dStack, dPlane(2), d, nXi(3)
@@ -360,6 +366,57 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
         END DO
         CALL ListAddLogical(Params, 'Foil Sheet Xi Declared', .TRUE.)
       END IF
+    END BLOCK
+
+    ! A 'layered' laminate stack carries the eddy currents of its laminations as
+    ! a Foster ladder per element (three global components per pole) and the
+    ! ladder of the step; declared on the layered bodies only, by the solver
+    ! active there (another AV solver of the model must not claim them).
+    BLOCK
+      TYPE(ValueList_t), POINTER :: Mat
+      INTEGER :: ib, ieq, im, nlad, nlam, slot
+      LOGICAL :: gotit, HasEquation, active
+      CHARACTER(:), ALLOCATABLE :: EqName
+      nlam = 0
+      EqName = ListGetString(Params, 'Equation', HasEquation)
+      DO ib = 1, Model % NumberOfBodies
+        IF (.NOT. HasEquation) EXIT
+        ieq = ListGetInteger(Model % Bodies(ib) % Values, 'Equation', active, &
+            minv=1, maxv=Model % NumberOfEquations)
+        IF (active) active = ListGetLogical(Model % Equations(ieq) % Values, EqName, gotit)
+        IF (.NOT. active) CYCLE
+        im = ListGetInteger(Model % Bodies(ib) % Values, 'Material', gotit, &
+            minv=1, maxv=Model % NumberOfMaterials)
+        IF (.NOT. gotit) CYCLE
+        Mat => Model % Materials(im) % Values
+        IF (ListGetString(Mat, 'Laminate Stack Model', gotit) /= 'layered') CYCLE
+        nlad = ListGetInteger(Mat, 'Laminate Ladder Order', gotit)
+        IF (.NOT. gotit) nlad = DefaultLaminateLadderOrder
+        IF (nlad < 1 .OR. nlad > MaxHomogLadderOrder) CALL Fatal('WhitneyAVSolver_Init', &
+            '"Laminate Ladder Order" must be between 1 and '//I2S(MaxHomogLadderOrder))
+        nlam = MAX(nlam, nlad)
+        CALL ListAddLogical(Mat, LaminateLadderMask, .TRUE.)
+      END DO
+      IF (nlam > 0 .AND. .NOT. ListCheckPresent(Params, 'Laminate Xi Declared')) THEN
+        slot = 1
+        DO WHILE (ListCheckPresent(Params, 'Exported Variable '//I2S(slot)))
+          slot = slot + 1
+        END DO
+        CALL ListAddString(Params, 'Exported Variable '//I2S(slot), &
+            '-nooutput -dofs '//I2S(3*nlam+LamXiExtra)//' -elem '//LaminateXiName)
+        CALL ListAddString(Params, 'Exported Variable '//I2S(slot)//' Mask', &
+            'material: '//LaminateLadderMask)
+        CALL ListAddString(Params, 'Exported Variable '//I2S(slot+1), &
+            '-nooutput -dofs '//I2S(LamLadPoles-1+2*nlam)//' -elem '//LaminateLadderName)
+        CALL ListAddString(Params, 'Exported Variable '//I2S(slot+1)//' Mask', &
+            'material: '//LaminateLadderMask)
+        CALL Info('WhitneyAVSolver_Init','Declared "'//LaminateXiName//'" with '// &
+            I2S(nlam)//' poles for the laminate stack eddy current ladder', Level=5)
+        CALL ListAddLogical(Params, 'Laminate Xi Declared', .TRUE.)
+      END IF
+      ! every initialisation of the solver holding the ladders, also of one
+      ! retained over a reload whose variables are already declared
+      IF (nlam > 0) LaminateInitGeneration = LaminateInitGeneration + 1
     END BLOCK
   END IF
 
@@ -505,13 +562,34 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   INTEGER :: XiSet = XiStranded, XiStep
   TYPE(Variable_t), POINTER :: prox_loss_var => NULL()
 
+  ! 'layered' laminate stack of the current element. In transient the eddy
+  ! currents of its laminations are a Foster ladder in the lamination plane per
+  ! element, H_dyn = Kappa dB/dt - sum_k r_k (B_par - xi_k), T_k xi_k' + xi_k =
+  ! B_par with B_par the element mean, on top of the static stack tensor. XiLam
+  ! holds the states, three global components per pole (LaminateXiName);
+  ! LamLadderVar the ladder of the step, its dynamic reluctivity and history field
+  ! (LaminateLadderName, layout LamLad*). Both are set at the first assembly of a
+  ! timestep (LamLadderStep, at the time LamTime of the run LamRun, the solver's
+  ! own step count DoneTime then LamStepOffset ahead of it), with the BDF weights
+  ! LamBdf of that step. LamSymJac: the H-B Newton term of a layered body is made
+  ! symmetric for solvers told the system is symmetric.
+  LOGICAL :: LamLayered, LamLayerHasNormal, LamNewStep, LamBuilt, LamSymJac, &
+      LamXiInitialized = .FALSE.
+  REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
+  INTEGER :: LamLayerOrder, LamTimeOrder, LamLadderStep = -1, LamStepOffset = 0, LamGeneration = -1
+  REAL(KIND=dp) :: LamBdf(3) = 0.0_dp, LamDt = 0.0_dp, LamTime = 0.0_dp, LamRun = 0.0_dp
+  TYPE(XiDir_t) :: XiLam
+  TYPE(Variable_t), POINTER :: LamLadderVar => NULL()
+
   CHARACTER(*), PARAMETER :: Caller = 'WhitneyAVSolver'
 
   SAVE STIFF, LOAD, MASS, DAMP, FORCE, JFixFORCE, JFixVec, Tcoef, GapLength, AirGapMu, &
        Acoef, Cwrk, LamThick, LamCond, Wbase, RotM, AllocationsDone, &
        Acoef_t, ThinLineCrossect, ThinLineCond, nSTIFF, nFORCE, &
        HomogLadderOrder_alloc, fos_y0, fos_r, fos_T, hcoef_n, hcoef_n1, &
-       XiD, nu_eff_dir, dir_active, prox_loss_var
+       XiD, nu_eff_dir, dir_active, prox_loss_var, &
+       LamXiInitialized, LamLadderStep, LamBdf, LamDt, LamTime, LamRun, LamStepOffset, LamGeneration, XiLam, &
+       LamLadderVar
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN	
 
@@ -844,6 +922,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
       END DO
       IF (ParallelReduction(xihere, 2) > 0) CALL UpdateTransientHomogXiState()
     END BLOCK
+    IF (ASSOCIATED(XiLam % var)) CALL UpdateLaminateXiState()
   END IF
 
   IF(.NOT. UseTorqueTol) CALL CalculateLumpedParameters()
@@ -928,6 +1007,260 @@ CONTAINS
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
+!> Locate the laminate ladder variables of WhitneyAVSolver_Init, size the
+!> history of the states and commit them at the first call of a timestep.
+!------------------------------------------------------------------------------
+  SUBROUTINE LocateLaminateLadder()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    INTEGER :: nv
+
+    IF (.NOT. ASSOCIATED(XiLam % var)) THEN
+      XiLam % var => VariableGet(Solver % Mesh % Variables, LaminateXiName)
+      LamLadderVar => VariableGet(Solver % Mesh % Variables, LaminateLadderName)
+      IF (.NOT. ASSOCIATED(XiLam % var) .OR. .NOT. ASSOCIATED(LamLadderVar)) CALL Fatal(Caller, &
+          'A transient layered laminate stack needs "'//LaminateXiName//'" and "'// &
+          LaminateLadderName//'", which WhitneyAVSolver_Init declares in transient runs!')
+    END IF
+    nv = SIZE(XiLam % var % Values)
+    IF (ALLOCATED(XiLam % prev2)) THEN
+      IF (SIZE(XiLam % prev2) /= nv) DEALLOCATE(XiLam % prev1, XiLam % prev2)
+    END IF
+    IF (.NOT. ALLOCATED(XiLam % prev2)) THEN
+      ALLOCATE(XiLam % prev1(nv), XiLam % prev2(nv))
+      XiLam % prev1 = 0._dp
+      XiLam % prev2 = 0._dp
+    END IF
+    CALL CommitXiState(XiLam)
+!------------------------------------------------------------------------------
+  END SUBROUTINE LocateLaminateLadder
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Forget the laminate ladders of a previous simulation of this process: the
+!> next assembly locates the variables again and starts the states from the
+!> field of the new one, taken as steady.
+!------------------------------------------------------------------------------
+  SUBROUTINE ResetLaminateLadders()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    CALL Info(Caller, 'New simulation: the laminate stack ladders start again from its field', &
+        Level=6)
+    LamLadderStep = -1
+    LamStepOffset = 0
+    LamDt = 0.0_dp
+    LamXiInitialized = .FALSE.
+    XiLam % var => NULL()
+    XiLam % step = -1
+    IF (ALLOCATED(XiLam % prev1)) DEALLOCATE(XiLam % prev1)
+    IF (ALLOCATED(XiLam % prev2)) DEALLOCATE(XiLam % prev2)
+    LamLadderVar => NULL()
+!------------------------------------------------------------------------------
+  END SUBROUTINE ResetLaminateLadders
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> The run counter of a Run Control loop (variable 'run'), zero without one.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateRunCount() RESULT(RunCount)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: RunCount
+    TYPE(Variable_t), POINTER :: RunVar
+    RunCount = 0.0_dp
+    RunVar => VariableGet(Solver % Mesh % Variables, 'run', ThisOnly = .TRUE.)
+    IF (ASSOCIATED(RunVar)) RunCount = RunVar % Values(1)
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateRunCount
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Offsets of a layered element in the laminate state (xoff) and ladder (loff)
+!> variables, and the number of poles they have room for.
+!------------------------------------------------------------------------------
+  SUBROUTINE LaminateSlots(Element, xoff, loff, nmax)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: xoff, loff, nmax
+    INTEGER :: jx, jl
+
+    jx = XiLam % var % Perm(Element % ElementIndex)
+    jl = LamLadderVar % Perm(Element % ElementIndex)
+    IF (jx <= 0 .OR. jl <= 0) CALL Fatal(Caller, &
+        'A layered laminate stack element has no slot in "'//LaminateXiName//'"!')
+    xoff = (jx-1) * XiLam % var % DOFs
+    loff = (jl-1) * LamLadderVar % DOFs
+    nmax = (XiLam % var % DOFs - LamXiExtra) / 3
+!------------------------------------------------------------------------------
+  END SUBROUTINE LaminateSlots
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Volume average of the flux density of an element, from this iterate of the
+!> potential (tStep 0) or from that of the previous timestep (tStep -1).
+!------------------------------------------------------------------------------
+  FUNCTION ElementMeanFluxDensity(Element, n, nd, tStep) RESULT(Bm)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: n, nd, tStep
+    REAL(KIND=dp) :: Bm(3)
+    TYPE(Nodes_t), SAVE :: ENodes
+    TYPE(GaussIntegrationPoints_t) :: EIP
+    REAL(KIND=dp) :: EBasis(n), EdBasisdx(n,3), EWBasis(nd,3), ERotWBasis(nd,3), Apot(nd), &
+        EdetJ, wt, vol
+    INTEGER :: k, npot
+    LOGICAL :: stat_ip
+
+    CALL GetElementNodes(ENodes, UElement=Element)
+    IF (tStep < 0) THEN
+      CALL GetScalarLocalSolution(Apot, UElement=Element, tStep=tStep)
+    ELSE
+      CALL GetScalarLocalSolution(Apot, UElement=Element)
+    END IF
+    npot = n * Solver % Def_Dofs(GetElementFamily(Element), Element % BodyId, 1)
+    EIP = GaussPointsAdapt(Element, Solver, EdgeBasis=.TRUE.)
+    Bm = 0.0_dp
+    vol = 0.0_dp
+    DO k = 1, EIP % n
+      stat_ip = ElementInfo(Element, ENodes, EIP % U(k), EIP % V(k), EIP % W(k), EdetJ, &
+          EBasis, EdBasisdx, EdgeBasis = EWBasis, RotBasis = ERotWBasis, USolver = pSolver)
+      wt = EdetJ * EIP % s(k)
+      Bm = Bm + MATMUL(Apot(npot+1:nd), ERotWBasis(1:nd-npot,:)) * wt
+      vol = vol + wt
+    END DO
+    IF (vol > 0.0_dp) Bm = Bm / vol
+!------------------------------------------------------------------------------
+  END FUNCTION ElementMeanFluxDensity
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> The eddy current ladder of a 'layered' element for this timestep, set up at
+!> the first assembly of the step: commit the states, build the ladder of the
+!> steel's permeability (LaminateNuFoster) and store it with the dynamic
+!> reluctivity and the history field of the BDF step,
+!>   H_dyn = NuDyn B_par + Hist,  M_k = 1 + a1 T_k/dt,  B_par the element mean,
+!>   NuDyn = (a1/dt) ( Kappa - sum_k r_k T_k/M_k ),
+!>   Hist  = -sum_k r_k T_k/(M_k dt) (a2 xi_k^n + a3 xi_k^{n-1})
+!>           + Kappa/dt (a2 B_par^n + a3 B_par^{n-1}),
+!> from the states of the start of the step; the B_par states of a Kappa term
+!> are those of its free pole slot, the last one, which has T = 0. The states
+!> of the first step start from the initial field, taken as steady.
+!------------------------------------------------------------------------------
+  SUBROUTINE LaminateElementLadder(Element, n, nd)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: n, nd
+    REAL(KIND=dp) :: mu0, mur, tau0, Kappa, r(MaxHomogLadderOrder), Tk(MaxHomogLadderOrder), &
+        Mk, NuDyn, Hist(3), B0(3), P(3,3)
+    INTEGER :: xoff, loff, nmax, k, ks
+
+    IF (LamNewStep) THEN
+      IF (.NOT. ASSOCIATED(XiLam % var)) THEN
+        CALL LocateLaminateLadder()
+      ELSE IF (XiLam % step /= XiStep) THEN
+        CALL LocateLaminateLadder()
+      END IF
+    END IF
+    ! the states, their history and the ladder of the step are kept for one solver
+    IF (ASSOCIATED(XiLam % var)) THEN
+      IF (.NOT. (ASSOCIATED(XiLam % var % Solver, Solver) .AND. &
+          ASSOCIATED(LamLadderVar % Solver, Solver))) CALL Fatal(Caller, &
+          'Transient layered laminate stacks are supported in one WhitneyAVSolver of a model only!')
+    END IF
+    IF (.NOT. LamNewStep) RETURN
+    LamBuilt = .TRUE.
+    CALL LaminateSlots(Element, xoff, loff, nmax)
+    IF (LamLayerOrder > nmax) CALL Fatal(Caller, 'The laminate ladder has fewer poles than '// &
+        '"Laminate Ladder Order" '//I2S(LamLayerOrder))
+    mu0 = VacuumPermeability()
+    P = LaminateInPlaneProjector(LamLayerNormal, LamLayerHasNormal)
+
+    IF (.NOT. LamXiInitialized) THEN
+      B0 = MATMUL(P, ElementMeanFluxDensity(Element, n, nd, -1))
+      DO k = 1, nmax + 1
+        ks = xoff + 3*(k-1)
+        XiLam % var % Values(ks+1:ks+3) = B0
+        XiLam % prev1(ks+1:ks+3) = B0
+        XiLam % prev2(ks+1:ks+3) = B0
+      END DO
+      ks = xoff + 3*nmax + 4
+      XiLam % var % Values(ks) = 0.0_dp
+      XiLam % prev1(ks) = 0.0_dp
+      XiLam % prev2(ks) = 0.0_dp
+    END IF
+
+    IF (HasHBCurve) THEN
+      ! The steel's incremental permeability, frozen over the step: the mean of
+      ! the incremental reluctivity of the curve at the laminations' flux density
+      ! (the element mean B_s of t^n) and at that of their core (the slowest
+      ! state, with the normal flux), which bound the lamination between them.
+      BLOCK
+        REAL(KIND=dp) :: Bn(3), Bcore(3), nuinc
+        Bn = ElementMeanFluxDensity(Element, n, nd, -1)
+        Bcore = XiLam % prev1(xoff+1:xoff+3) + (Bn - MATMUL(P, Bn))
+        nuinc = 0.5_dp * ( &
+            CurveIncrementalReluctivity(Material, LaminateMetalFluxDensity(CMPLX(Bn, 0.0_dp, &
+            KIND=dp), LamLayerFill, LamLayerNormal, LamLayerHasNormal)) + &
+            CurveIncrementalReluctivity(Material, LaminateMetalFluxDensity(CMPLX(Bcore, 0.0_dp, &
+            KIND=dp), LamLayerFill, LamLayerNormal, LamLayerHasNormal)) )
+        mur = 1.0_dp / (mu0 * nuinc)
+      END BLOCK
+    ELSE
+      mur = 1.0_dp / (mu0 * SUM(Acoef(1:n)) / n)
+    END IF
+
+    tau0 = mur * mu0 * LamLayerCond * LamLayerThick**2 / 4
+    r = 0.0_dp
+    Tk = 0.0_dp
+    CALL LaminateNuFoster(tau0, LamLayerFill, mur, mu0, LamLayerOrder, .TRUE., Kappa, &
+        r(1:LamLayerOrder), Tk(1:LamLayerOrder))
+
+    ! The BDF weights of the field itself (Add1stOrderTime_CRS: first order at the
+    ! first step only), so that the ladder integrates in step with dB/dt: with
+    ! F = 1 at order 1 the model is the low-frequency model at every step.
+    BLOCK
+      TYPE(Variable_t), POINTER :: DtVar
+      REAL(KIND=dp) :: dtp
+      dtp = dt
+      DtVar => VariableGet(Solver % Mesh % Variables, 'Timestep size')
+      IF (ASSOCIATED(DtVar)) THEN
+        IF (ASSOCIATED(DtVar % PrevValues)) dtp = DtVar % PrevValues(1,1)
+      END IF
+      LamBdf = LadderBDFWeights(MIN(Solver % DoneTime, LamTimeOrder), dt, dtp)
+    END BLOCK
+    LamDt = dt
+    NuDyn = Kappa * LamBdf(1) / dt
+    Hist = 0.0_dp
+    DO k = 1, LamLayerOrder
+      IF (Tk(k) <= 0.0_dp) CYCLE
+      ks = xoff + 3*(k-1)
+      Mk = 1.0_dp + LamBdf(1) * Tk(k) / dt
+      NuDyn = NuDyn - r(k) * Tk(k) * LamBdf(1) / (Mk * dt)
+      Hist = Hist - r(k) * Tk(k) / (Mk * dt) * &
+          (LamBdf(2) * XiLam % prev1(ks+1:ks+3) + LamBdf(3) * XiLam % prev2(ks+1:ks+3))
+    END DO
+    IF (Kappa > 0.0_dp) THEN
+      ks = xoff + 3*(LamLayerOrder-1)
+      Hist = Hist + Kappa / dt * &
+          (LamBdf(2) * XiLam % prev1(ks+1:ks+3) + LamBdf(3) * XiLam % prev2(ks+1:ks+3))
+    END IF
+
+    LamLadderVar % Values(loff+LamLadMu) = mur
+    LamLadderVar % Values(loff+LamLadKappa) = Kappa
+    LamLadderVar % Values(loff+LamLadNuDyn) = NuDyn
+    LamLadderVar % Values(loff+LamLadHist:loff+LamLadHist+2) = Hist
+    DO k = 1, nmax
+      LamLadderVar % Values(loff+LamLadPoles-1+k) = r(k)
+      LamLadderVar % Values(loff+LamLadPoles-1+nmax+k) = Tk(k)
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE LaminateElementLadder
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
   LOGICAL FUNCTION DoSolve(IterNo) RESULT(Converged)
 !------------------------------------------------------------------------------
    IMPLICIT NONE
@@ -980,6 +1313,26 @@ CONTAINS
   ! Slice 1b: multiple Components with Transient Homogenization are supported.
   ! The assembly loop below and UpdateTransientHomogXiState both read the
   ! ladder triplets from each element's own Component.
+
+  ! The ladders of the 'layered' laminate stacks are set up once per timestep,
+  ! and again when the step is redone with another size; the step counts as done
+  ! only once the solver holding the ladders has set them up (LamBuilt). A new
+  ! simulation in this process (a Run Control sweep, a reloaded model) counts its
+  ! timesteps again while the solver's own count (DoneTime, advanced at every
+  ! timestep, also one the solver skips) goes on, which shifts their offset also
+  ! when the solver first runs at a later step; a sweep also moves the run
+  ! counter, and a solver initialised again the generation counter: its ladders
+  ! start from its field, as after a restart. Only the solver holding the ladders
+  ! checks: another AV solver of the model has step counts of its own.
+  IF (Transient .AND. LamLadderStep > 0 .AND. &
+      ListGetLogical(SolverParams, 'Laminate Xi Declared', Found)) THEN
+    IF (XiStep < LamLadderStep .OR. Solver % DoneTime - XiStep /= LamStepOffset .OR. &
+        LaminateRunCount() /= LamRun .OR. LaminateInitGeneration /= LamGeneration .OR. &
+        (XiStep == LamLadderStep .AND. GetTime() /= LamTime)) CALL ResetLaminateLadders()
+  END IF
+  LamNewStep = Transient .AND. ( LamLadderStep /= XiStep .OR. dt /= LamDt )
+  LamBuilt = .FALSE.
+  LamSymJac = ListGetLogical(SolverParams, 'Linear System Symmetric', Found)
 
   PrevMaterial => NULL()
   DO t=1,active
@@ -1220,6 +1573,7 @@ CONTAINS
 
      LamThick = 0.0_dp
      LamCond  = 0.0_dp
+     LamLayered = .FALSE.
      IF (LaminateStack) THEN
        SELECT CASE(LaminateStackModel)
        CASE('low-frequency model')
@@ -1230,7 +1584,48 @@ CONTAINS
          IF (.NOT. Found) CALL Fatal(Caller, 'Laminate Stack Conductivity not found!')
 
        CASE('layered')
-         CALL Fatal(Caller, 'The layered laminate stack model is only available in the harmonic solver!')
+         ! The static stack tensor of the harmonic model at zero frequency and, in
+         ! transient, the eddy current ladder of the laminations (LocalMatrix).
+         ! Their net currents are not carried, so the body has no conductivity.
+         IF (HasTensorReluctivity .OR. HasReluctivityFunction) CALL Fatal(Caller, &
+             'The layered laminate stack model needs a scalar permeability or an H-B curve!')
+         IF (ANY(ABS(Tcoef(:,:,1:n)) > AEPS)) CALL Fatal(Caller, &
+             'A layered laminate stack body must have zero Electric Conductivity!')
+         IF (CoilBody) CALL Fatal(Caller, 'A layered laminate stack body cannot be a coil component!')
+         ! the ladder history enters the right hand side of every step, and its
+         ! states advance once per step: adaptive substeps would not roll them back
+         IF (Transient .AND. (ConstantBulk .OR. ConstantSystem)) CALL Fatal(Caller, &
+             'A transient layered laminate stack needs the assembly of every timestep: '// &
+             'remove "Constant Bulk System" and "Constant System"!')
+         IF (Transient) THEN
+           ! a predictor-corrector solver also advances its step count twice a timestep
+           IF (ListGetLogical(Model % Simulation, 'Adaptive Timestepping', Found) .OR. &
+               ListGetLogical(Model % Simulation, 'Convergence Control', Found) .OR. &
+               Solver % SolverExecWhen == SOLVER_EXEC_PREDCORR) CALL Fatal(Caller, &
+               'A transient layered laminate stack supports neither "Adaptive Timestepping", '// &
+               '"Convergence Control" nor a predictor-corrector solver!')
+           ! its ladder integrates with the field's BDF weights, of order 1 or 2;
+           ! implicit Euler is BDF1 (Solver % Order may keep a BDF order of a reload)
+           SELECT CASE (ListGetString(SolverParams, 'Timestepping Method', Found))
+           CASE ('bdf')
+             LamTimeOrder = Solver % Order
+           CASE ('implicit euler')
+             LamTimeOrder = 1
+           CASE DEFAULT
+             LamTimeOrder = 0
+           END SELECT
+           IF (LamTimeOrder < 1 .OR. LamTimeOrder > 2) CALL Fatal(Caller, &
+               'A transient layered laminate stack needs "Timestepping Method" '// &
+               '= BDF of order 1 or 2, or Implicit Euler!')
+           ! the ladder reads the previous potential from the first order history
+           IF (Solver % TimeOrder /= 1) CALL Fatal(Caller, &
+               'A transient layered laminate stack needs a first order time derivative: '// &
+               'it does not support "Electrodynamics Model"!')
+         END IF
+         CALL GetLaminateLayeredParameters(Material, LamLayerThick, LamLayerCond, &
+             LamLayerFill, LamLayerNormal, LamLayerHasNormal, LamLayerOrder)
+         LamLayered = .TRUE.
+         IF (Transient) CALL LaminateElementLadder(Element, n, nd+nb)
        CASE DEFAULT
          CALL WARN(Caller, 'Nonexistent Laminate Stack Model chosen!')
        END SELECT
@@ -1280,6 +1675,15 @@ CONTAINS
      END IF
 
    END DO
+
+  IF (LamNewStep .AND. LamBuilt) THEN
+    LamLadderStep = XiStep
+    LamTime = GetTime()
+    LamRun = LaminateRunCount()
+    LamStepOffset = Solver % DoneTime - XiStep
+    LamGeneration = LaminateInitGeneration
+    LamXiInitialized = .TRUE.
+  END IF
 
   CALL DefaultFinishBulkAssembly(BulkUpdate=ConstantBulk)
 
@@ -2434,6 +2838,13 @@ END SUBROUTINE LocalConstraintMatrix
     REAL(KIND=dp) :: xi_e(MaxHomogLadderOrder,3), xi_e1(MaxHomogLadderOrder,3)
     REAL(KIND=dp) :: h_hist_local(3), h_hist_global(3)
     INTEGER :: xi_perm_idx, xi_off, xd, xk
+    ! 'layered' laminate stack: projector onto the lamination plane, dynamic
+    ! reluctivity and history field of the eddy current ladder (transient), and
+    ! the Newton weights of the metal flux density with an H-B curve
+    REAL(KIND=dp) :: LamProj(3,3), LamNuDyn, LamHist(3), LamFluxWeight(3), LamNewtonH(3), &
+        LamCurlInt(nd,3), LamVolume
+    COMPLEX(KIND=dp) :: LamFluxWeightC(3)
+    INTEGER :: lam_xoff, lam_loff, lam_nmax
 
     TYPE(GaussIntegrationPoints_t) :: IP
 
@@ -2508,6 +2919,21 @@ END SUBROUTINE LocalConstraintMatrix
       END DO
     END IF
 
+    LamNuDyn = 0.0_dp
+    LamHist = 0.0_dp
+    LamFluxWeight = 0.0_dp
+    LamNewtonH = 0.0_dp
+    LamCurlInt = 0.0_dp
+    LamVolume = 0.0_dp
+    IF ( LamLayered ) THEN
+      LamProj = LaminateInPlaneProjector(LamLayerNormal, LamLayerHasNormal)
+      IF ( Transient ) THEN
+        CALL LaminateSlots(Element, lam_xoff, lam_loff, lam_nmax)
+        LamNuDyn = LamLadderVar % Values(lam_loff+LamLadNuDyn)
+        LamHist = LamLadderVar % Values(lam_loff+LamLadHist:lam_loff+LamLadHist+2)
+      END IF
+    END IF
+
     !Numerical integration:
     !----------------------
     IP = GaussPointsAdapt(Element, Solver, EdgeBasis=.TRUE. )
@@ -2535,6 +2961,30 @@ END SUBROUTINE LocalConstraintMatrix
          A_t(2, 2) = nu_eff_dir(2)
          A_t(3, 3) = nu_eff_dir(3)
          A_t = MATMUL(MATMUL(RotMLoc, A_t), TRANSPOSE(RotMLoc))
+       ELSE IF ( LamLayered ) THEN
+         ! The static stack tensor of the steel's reluctivity, the H-B curve read
+         ! at the flux density of the laminations, plus the dynamic reluctivity
+         ! of the eddy current ladder in the lamination plane (its history field
+         ! is in M below). H = Nu(nu(|B_s|)) B: the Newton term needs dNu/dnu B.
+         IF ( HasHBCurve ) THEN
+           B_ip = MATMUL( Aloc(np+1:nd), RotWBasis(1:nd-np,:) )
+           babs = MAX( LaminateMetalFluxDensity(CMPLX(B_ip, 0.0_dp, KIND=dp), LamLayerFill, &
+               LamLayerNormal, LamLayerHasNormal, LamFluxWeightC), 1.d-8 )
+           LamFluxWeight = REAL(LamFluxWeightC)
+           IF( Newton ) THEN
+             mu = ListGetFun( Material,'h-b curve',babs,dFdx=muder) / Babs
+             muder = (muder-mu)/babs
+           ELSE
+             mu = ListGetFun( Material,'h-b curve',babs) / Babs
+           END IF
+         ELSE
+           mu = SUM( Basis(1:n) * Acoef(1:n) )
+         END IF
+         A_t = REAL( LaminateLayeredReluctivity(0.0_dp, CMPLX(mu, 0.0_dp, KIND=dp), 0.0_dp, &
+             1.0_dp, LamLayerFill, LamLayerNormal, LamLayerHasNormal) )
+         IF ( HasHBCurve .AND. Newton ) LamNewtonH = MATMUL( REAL( &
+             LaminateLayeredReluctivityDerivative(0.0_dp, CMPLX(mu, 0.0_dp, KIND=dp), 0.0_dp, &
+             1.0_dp, LamLayerFill, LamLayerNormal, LamLayerHasNormal) ), B_ip )
        ELSE IF ( HasHBCurve ) THEN
          B_ip = MATMUL( Aloc(np+1:nd), RotWBasis(1:nd-np,:) )
          babs = MAX( SQRT(SUM(B_ip**2)), 1.d-8 )
@@ -2651,6 +3101,8 @@ END SUBROUTINE LocalConstraintMatrix
          h_hist_global = MATMUL(RotMLoc, h_hist_local)
          M = M - h_hist_global
        END IF
+       ! the history field of the laminate stack ladder, already in-plane and global
+       IF (LamLayered .AND. Transient) M = M - LamHist
          
        LocalLamThick = SUM( Basis(1:n) * LamThick(1:n) )
        LocalLamCond = SUM( Basis(1:n) * LamCond(1:n) )
@@ -2814,14 +3266,18 @@ END SUBROUTINE LocalConstraintMatrix
          DO j = 1,nd-np
            q = j+np
 
-           IF (HasTensorReluctivity .OR. HasReluctivityFunction .OR. StrandedTransientHomog) THEN
+           IF (HasTensorReluctivity .OR. HasReluctivityFunction .OR. StrandedTransientHomog &
+               .OR. LamLayered) THEN
              STIFF(p,q) = STIFF(p,q) &
                  + SUM(RotWBasis(i,:) * MATMUL(A_t, RotWBasis(j,:)))*detJ*IP%s(t)
            ELSE
-             STIFF(p,q) = STIFF(p,q) + mu * SUM(RotWBasis(i,:)*RotWBasis(j,:))*detJ*IP%s(t)              
+             STIFF(p,q) = STIFF(p,q) + mu * SUM(RotWBasis(i,:)*RotWBasis(j,:))*detJ*IP%s(t)
            END IF
            IF ( Newton ) THEN
-             IF ( HasHBCurve ) THEN
+             IF ( HasHBCurve .AND. LamLayered ) THEN
+               JAC(p,q) = JAC(p,q) + muder * SUM(LamNewtonH(:)*RotWBasis(i,:)) * &
+                   SUM(LamFluxWeight(:)*RotWBasis(j,:))*detJ*IP % s(t)/Babs
+             ELSE IF ( HasHBCurve ) THEN
                JAC(p,q) = JAC(p,q) + muder * SUM(B_ip(:)*RotWBasis(j,:)) * &
                    SUM(B_ip(:)*RotWBasis(i,:))*detJ*IP % s(t)/Babs
              ELSE IF( HasReluctivityFunction ) THEN
@@ -2927,12 +3383,37 @@ END SUBROUTINE LocalConstraintMatrix
              END DO
            END IF
          END BLOCK
-           
+
+       END IF
+
+       IF ( LamLayered .AND. Transient ) THEN
+         LamCurlInt(1:nd-np,:) = LamCurlInt(1:nd-np,:) + RotWBasis(1:nd-np,:) * detJ * IP % s(t)
+         LamVolume = LamVolume + detJ * IP % s(t)
        END IF
      END DO
 
-     
+    ! The ladder states of a layered element follow the element mean of B_par,
+    ! so its dynamic field is NuDyn times that mean (plus the history field in
+    ! M), constant over the element: int curl(w_i).H_dyn = NuDyn/V C_i.P C_j A_j
+    ! with C_j the integral of curl(w_j).
+    IF ( LamLayered .AND. Transient .AND. LamVolume > 0.0_dp ) THEN
+      DO i = 1, nd-np
+        p = i+np
+        DO j = 1, nd-np
+          q = j+np
+          STIFF(p,q) = STIFF(p,q) + LamNuDyn / LamVolume * &
+              SUM(LamCurlInt(i,:) * MATMUL(LamProj, LamCurlInt(j,:)))
+        END DO
+      END DO
+    END IF
+
     IF ( Newton ) THEN
+      ! The H-B Newton term of a layered stack is not symmetric where its flux has
+      ! in-plane and normal parts (the static law has no potential there). A solver
+      ! told the system is symmetric may read one triangle only: it gets the
+      ! symmetric part, in the matrix and in the right hand side alike, so that the
+      ! iteration still converges to the law.
+      IF ( LamLayered .AND. HasHBCurve .AND. LamSymJac ) JAC = 0.5_dp * (JAC + TRANSPOSE(JAC))
       IF( HasHBCurve .OR. HasReluctivityFunction ) THEN
         STIFF(1:nd,1:nd) = STIFF(1:nd,1:nd) + JAC
         FORCE(1:nd) = FORCE(1:nd) + MATMUL(JAC,Aloc)
@@ -4011,6 +4492,88 @@ END SUBROUTINE LocalConstraintMatrix
     END IF
 !------------------------------------------------------------------------------
   END SUBROUTINE UpdateTransientHomogXiState
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> End of a solve: advance the laminate ladder states of every layered element
+!> to t^{n+1} from the element mean of B_par,
+!>   xi_k = [ B_par - (T_k/dt)(a2 xi_k^n + a3 xi_k^{n-1}) ] / M_k   (B_par for T = 0),
+!> from the states committed at the start of the step, so that a second solve in
+!> a step redoes it. The loss density of the laminations is the power the
+!> ladder takes less the change of its stored energy W = -sum_k r_k |B_par -
+!> xi_k|^2/2, both with the BDF weights of the step,
+!>   D = H_dyn . B_par' - W',   H_dyn = NuDyn B_par + Hist,
+!> in continuous time sum_k -r_k T_k |xi_k'|^2 + Kappa |B_par'|^2 for a fixed
+!> ladder. When the ladder follows an H-B curve it also keeps the energy the
+!> change of the ladder moves, so that over a period its sum is the power the
+!> block takes, sum H_dyn . B_par' dt.
+!> Stores it for the post processing (and in 'Proximity Loss' when declared),
+!> and B_par and W with the states for the next step.
+!------------------------------------------------------------------------------
+  SUBROUTINE UpdateLaminateXiState()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: El
+    TYPE(ValueList_t), POINTER :: Mat
+    TYPE(Variable_t), POINTER :: PL
+    REAL(KIND=dp) :: P(3,3), Bp(3), xin(3), xin1(3), xnew(3), rk, Tk, Mk, Hdyn(3), Bdot(3), &
+        Wnew, Wdot, loss, Thick, Sigma, Fill, Normal(3)
+    INTEGER :: e, nel, ndel, xoff, loff, nmax, k, ks, nlad, jpl
+    LOGICAL :: HasNormal, GotIt
+
+    IF (LamDt <= 0.0_dp) RETURN
+    ! only into an elemental field of one value per element, as ProcessFields reads it
+    PL => VariableGet(Solver % Mesh % Variables, 'Proximity Loss', ThisOnly = .TRUE.)
+    IF (ASSOCIATED(PL)) THEN
+      IF (PL % TYPE /= Variable_on_elements .OR. PL % DOFs /= 1) PL => NULL()
+    END IF
+
+    DO e = 1, GetNOFActive()
+      El => GetActiveElement(e)
+      Mat => GetMaterial(El)
+      IF (.NOT. ASSOCIATED(Mat)) CYCLE
+      IF (GetString(Mat, 'Laminate Stack Model', GotIt) /= 'layered') CYCLE
+      CALL GetLaminateLayeredParameters(Mat, Thick, Sigma, Fill, Normal, HasNormal, nlad)
+      nel = GetElementNOFNodes(El)
+      ndel = GetElementNOFDOFs(El)
+      CALL LaminateSlots(El, xoff, loff, nmax)
+      P = LaminateInPlaneProjector(Normal, HasNormal)
+      Bp = MATMUL(P, ElementMeanFluxDensity(El, nel, ndel, 0))
+
+      Wnew = 0.0_dp
+      DO k = 1, nmax
+        rk = LamLadderVar % Values(loff+LamLadPoles-1+k)
+        Tk = LamLadderVar % Values(loff+LamLadPoles-1+nmax+k)
+        ks = xoff + 3*(k-1)
+        xin = XiLam % prev1(ks+1:ks+3)
+        xin1 = XiLam % prev2(ks+1:ks+3)
+        Mk = 1.0_dp + LamBdf(1) * Tk / LamDt
+        xnew = (Bp - Tk / LamDt * (LamBdf(2) * xin + LamBdf(3) * xin1)) / Mk
+        XiLam % var % Values(ks+1:ks+3) = xnew
+        IF (Tk > 0.0_dp) Wnew = Wnew - 0.5_dp * rk * SUM((Bp - xnew)**2)
+      END DO
+
+      ! B_par and W of this solve, and their derivatives from the committed ones
+      ks = xoff + 3*nmax
+      XiLam % var % Values(ks+1:ks+3) = Bp
+      XiLam % var % Values(ks+4) = Wnew
+      Bdot = (LamBdf(1) * Bp + LamBdf(2) * XiLam % prev1(ks+1:ks+3) + &
+          LamBdf(3) * XiLam % prev2(ks+1:ks+3)) / LamDt
+      Wdot = (LamBdf(1) * Wnew + LamBdf(2) * XiLam % prev1(ks+4) + &
+          LamBdf(3) * XiLam % prev2(ks+4)) / LamDt
+      Hdyn = LamLadderVar % Values(loff+LamLadNuDyn) * Bp + &
+          LamLadderVar % Values(loff+LamLadHist:loff+LamLadHist+2)
+      loss = SUM(Hdyn * Bdot) - Wdot
+      LamLadderVar % Values(loff+LamLadLoss) = loss
+
+      IF (ASSOCIATED(PL)) THEN
+        jpl = El % ElementIndex
+        IF (ASSOCIATED(PL % Perm)) jpl = PL % Perm(El % ElementIndex)
+        IF (jpl > 0 .AND. jpl <= SIZE(PL % Values)) PL % Values(jpl) = loss
+      END IF
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE UpdateLaminateXiState
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------

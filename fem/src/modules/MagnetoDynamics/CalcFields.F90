@@ -637,6 +637,14 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    INTEGER :: LamStackPowerSeen     ! 1 where a layered laminate stack contributed to it
    LOGICAL :: LayeredLaminate, LamLayerHasNormal, LamSheet
    REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
+   ! Transient 'layered' stack: the element's eddy current ladder and states as
+   ! WhitneyAVSolver left them (LaminateLadderName, LaminateXiName), and the
+   ! frequency of its stack tensor (zero for a real field)
+   LOGICAL :: LamLadderHere
+   INTEGER :: LamNPoles, LamXiOff, LamLadOff
+   REAL(KIND=dp) :: LamOmega, LamNuDyn, LamHist(3), LamLossDensity, LamBMean(3), &
+       LamPoleR(MaxHomogLadderOrder), LamPoleT(MaxHomogLadderOrder), LamXi(3,MaxHomogLadderOrder)
+   TYPE(Variable_t), POINTER :: LamXiVar, LamLadVar
    REAL(KIND=dp) :: SheetLamThick, SheetMu, SheetImagCond, LamSheetEnergy, SheetNu, SheetMuAbs
    LOGICAL :: SheetFollowsCurve
    COMPLEX(KIND=dp) :: SheetFactor
@@ -1140,7 +1148,11 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    END IF
    
    PrevMaterial => NULL()
-   
+
+   ! the eddy current ladders of transient layered stacks, if WhitneyAVSolver has any
+   LamXiVar => VariableGet(Mesh % Variables, LaminateXiName)
+   LamLadVar => VariableGet(Mesh % Variables, LaminateLadderName)
+
    DO i = 1, GetNOFActive()
      Element => GetActiveElement(i)
 
@@ -1583,15 +1595,40 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      END IF
 
      ! The 'layered' laminate stack model replaces the scalar reluctivity of
-     ! the lamination material by the stack tensor, as in the 3-D harmonic
-     ! solver (the only one that implements it; it rejects coils in the stack).
-     ! An H-B curve is read at the flux density of the laminations, as there.
+     ! the lamination material by the stack tensor, as the 3-D A-V solvers do
+     ! (they reject coils in the stack). An H-B curve is read at the flux density
+     ! of the laminations, as there. A real field has the static tensor and, in
+     ! transient, the eddy current ladder of WhitneyAVSolver on top of it.
      LayeredLaminate = .FALSE.
-     IF ( dim == 3 .AND. .NOT. ( CoilBody .OR. RealField .OR. &
+     LamLadderHere = .FALSE.
+     IF ( dim == 3 .AND. .NOT. ( CoilBody .OR. &
          HasReluctivityFunction .OR. HasTensorReluctivity ) ) THEN
        LayeredLaminate = ( GetString(Material, 'Laminate Stack Model', Found) == 'layered' )
        IF (LayeredLaminate) CALL GetLaminateLayeredParameters(Material, LamLayerThick, &
            LamLayerCond, LamLayerFill, LamLayerNormal, LamLayerHasNormal)
+     END IF
+     LamOmega = Omega
+     IF (RealField) LamOmega = 0.0_dp
+     IF (LayeredLaminate .AND. RealField .AND. Transient) THEN
+       IF (ASSOCIATED(LamXiVar) .AND. ASSOCIATED(LamLadVar)) THEN
+         LamXiOff = LamXiVar % Perm(Element % ElementIndex)
+         LamLadOff = LamLadVar % Perm(Element % ElementIndex)
+         IF (LamXiOff > 0 .AND. LamLadOff > 0) THEN
+           LamLadderHere = .TRUE.
+           LamNPoles = (LamXiVar % DOFs - LamXiExtra) / 3
+           LamXiOff = (LamXiOff-1) * LamXiVar % DOFs
+           LamLadOff = (LamLadOff-1) * LamLadVar % DOFs
+           LamNuDyn = LamLadVar % Values(LamLadOff+LamLadNuDyn)
+           LamHist = LamLadVar % Values(LamLadOff+LamLadHist:LamLadOff+LamLadHist+2)
+           LamLossDensity = LamLadVar % Values(LamLadOff+LamLadLoss)
+           LamBMean = LamXiVar % Values(LamXiOff+3*LamNPoles+1:LamXiOff+3*LamNPoles+3)
+           DO k = 1, LamNPoles
+             LamPoleR(k) = LamLadVar % Values(LamLadOff+LamLadPoles-1+k)
+             LamPoleT(k) = LamLadVar % Values(LamLadOff+LamLadPoles-1+LamNPoles+k)
+             LamXi(1:3,k) = LamXiVar % Values(LamXiOff+3*(k-1)+1:LamXiOff+3*k)
+           END DO
+         END IF
+       END IF
      END IF
 
      HasVelocity = .FALSE.
@@ -2113,11 +2150,17 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          Babs = MAX( LaminateMetalFluxDensity(CMPLX(B(1,:), B(2,:), KIND=dp), &
              LamLayerFill, LamLayerNormal, LamLayerHasNormal), 1.d-8 )
          R_ip_Z = CMPLX(ListGetFun(Material,'h-b curve', x=babs) / Babs, 0.0_dp, KIND=dp)
-         Nu = LaminateLayeredReluctivity(Omega, R_ip_Z, LamLayerCond, LamLayerThick, &
+         Nu = LaminateLayeredReluctivity(LamOmega, R_ip_Z, LamLayerCond, LamLayerThick, &
              LamLayerFill, LamLayerNormal, LamLayerHasNormal)
          R_ip = 0.0_dp
-         w_dens = 0.5*( SUM(MATMUL(REAL(Nu), B(1,:)) * B(1,:)) + &
-             SUM(MATMUL(REAL(Nu), B(2,:)) * B(2,:)) )
+         IF (RealField) THEN
+           ! the energy of the static law along the path from zero
+           w_dens = LaminateLayeredEnergy(Material, B(1,:), LamLayerFill, LamLayerNormal, &
+               LamLayerHasNormal, .TRUE., REAL(R_ip_Z))
+         ELSE
+           w_dens = 0.5*( SUM(MATMUL(REAL(Nu), B(1,:)) * B(1,:)) + &
+               SUM(MATMUL(REAL(Nu), B(2,:)) * B(2,:)) )
+         END IF
        ELSE IF ( HasHBCurve ) THEN
          IF (RealField) THEN
            Babs=SQRT(SUM(B(1,:)**2))
@@ -2191,7 +2234,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            !
            R_ip = REAL(R_ip_Z)
            IF (LayeredLaminate) THEN
-             Nu = LaminateLayeredReluctivity(Omega, R_ip_Z, LamLayerCond, LamLayerThick, &
+             Nu = LaminateLayeredReluctivity(LamOmega, R_ip_Z, LamLayerCond, LamLayerThick, &
                  LamLayerFill, LamLayerNormal, LamLayerHasNormal)
              R_ip = 0.0_dp
            END IF
@@ -2222,6 +2265,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          DO l=1,3
            MG_ip(l) = SUM( Magnetization(l,1:n)*Basis(1:n) )
          END DO
+         ! the eddy current field of the laminations, as the solver has it: on the
+         ! element mean of B_par, which its states follow
+         IF (LamLadderHere) MG_ip = MG_ip - (LamNuDyn * LamBMean + LamHist)
        END IF
 
        IF( ASSOCIATED(VP).OR.ASSOCIATED(EL_VP) ) THEN
@@ -2288,6 +2334,22 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            ! the internal states, not just the macroscopic H.B, and equals the
            ! energy. Only the totals take it; the forces above keep H.B.
            HdotB = 2._dp * w_dens
+         END BLOCK
+       END IF
+
+       ! The eddy current ladder of a transient layered stack stores
+       ! -sum_k r_k |B_par - xi_k|^2/2 (r_k < 0, B_par the element mean) on top of
+       ! the static energy; as for the winding ladder, its coenergy equals its
+       ! energy (totals only).
+       IF (LamLadderHere) THEN
+         BLOCK
+           REAL(KIND=dp) :: w_lad
+           w_lad = 0.0_dp
+           DO k = 1, LamNPoles
+             IF (LamPoleT(k) > 0.0_dp) w_lad = w_lad - 0.5_dp * LamPoleR(k) * SUM((LamBMean - LamXi(:,k))**2)
+           END DO
+           w_dens = w_dens + w_lad
+           HdotB = HdotB + 2._dp * w_lad
          END BLOCK
        END IF
 
@@ -2650,9 +2712,17 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            ! loss inside its laminations; their net currents are in the thin
            ! sheets ('res: Thin sheet current power').
            IF (LayeredLaminate) THEN
-             ! Coeff above is the time average; HarmPowerCoeff gives the peak when asked
-             Power = Power + 2 * HarmPowerCoeff * Coeff
-             LamStackPower = LamStackPower + 2 * HarmPowerCoeff * Coeff
+             IF (RealField) THEN
+               ! the loss of the eddy current ladder at this instant (transient)
+               Coeff = 0.0_dp
+               IF (LamLadderHere) Coeff = s * Basis(p) * LamLossDensity
+               Power = Power + Coeff
+               LamStackPower = LamStackPower + Coeff
+             ELSE
+               ! Coeff above is the time average; HarmPowerCoeff gives the peak when asked
+               Power = Power + 2 * HarmPowerCoeff * Coeff
+               LamStackPower = LamStackPower + 2 * HarmPowerCoeff * Coeff
+             END IF
              LamStackPowerSeen = 1
            END IF
 
