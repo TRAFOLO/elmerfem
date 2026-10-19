@@ -569,13 +569,14 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   ! holds the states, three global components per pole (LaminateXiName);
   ! LamLadderVar the ladder of the step, its dynamic reluctivity and history field
   ! (LaminateLadderName, layout LamLad*). Both are set at the first assembly of a
-  ! timestep (LamLadderStep, at the time LamTime of the run LamRun), with the
-  ! BDF weights LamBdf of that step. LamSymJac: the H-B Newton term of a layered
-  ! body is made symmetric for solvers told the system is symmetric.
+  ! timestep (LamLadderStep, at the time LamTime of the run LamRun, the solver's
+  ! own step count DoneTime then LamStepOffset ahead of it), with the BDF weights
+  ! LamBdf of that step. LamSymJac: the H-B Newton term of a layered body is made
+  ! symmetric for solvers told the system is symmetric.
   LOGICAL :: LamLayered, LamLayerHasNormal, LamNewStep, LamBuilt, LamSymJac, &
       LamXiInitialized = .FALSE.
   REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
-  INTEGER :: LamLayerOrder, LamTimeOrder, LamLadderStep = -1, LamDoneTime = -1, LamGeneration = -1
+  INTEGER :: LamLayerOrder, LamTimeOrder, LamLadderStep = -1, LamStepOffset = 0, LamGeneration = -1
   REAL(KIND=dp) :: LamBdf(3) = 0.0_dp, LamDt = 0.0_dp, LamTime = 0.0_dp, LamRun = 0.0_dp
   TYPE(XiDir_t) :: XiLam
   TYPE(Variable_t), POINTER :: LamLadderVar => NULL()
@@ -587,7 +588,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
        Acoef_t, ThinLineCrossect, ThinLineCond, nSTIFF, nFORCE, &
        HomogLadderOrder_alloc, fos_y0, fos_r, fos_T, hcoef_n, hcoef_n1, &
        XiD, nu_eff_dir, dir_active, prox_loss_var, &
-       LamXiInitialized, LamLadderStep, LamBdf, LamDt, LamTime, LamRun, LamDoneTime, LamGeneration, XiLam, &
+       LamXiInitialized, LamLadderStep, LamBdf, LamDt, LamTime, LamRun, LamStepOffset, LamGeneration, XiLam, &
        LamLadderVar
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN	
@@ -1046,7 +1047,7 @@ CONTAINS
     CALL Info(Caller, 'New simulation: the laminate stack ladders start again from its field', &
         Level=6)
     LamLadderStep = -1
-    LamDoneTime = -1
+    LamStepOffset = 0
     LamDt = 0.0_dp
     LamXiInitialized = .FALSE.
     XiLam % var => NULL()
@@ -1317,14 +1318,15 @@ CONTAINS
   ! and again when the step is redone with another size; the step counts as done
   ! only once the solver holding the ladders has set them up (LamBuilt). A new
   ! simulation in this process (a Run Control sweep, a reloaded model) counts its
-  ! steps again, the runs on, the solver's own steps (DoneTime) apart from the
-  ! timestep, or initialises the solver again: its ladders start from its field,
-  ! as after a restart.
+  ! timesteps again while the solver's own count (DoneTime, advanced at every
+  ! timestep, also one the solver skips) goes on, which shifts their offset also
+  ! when the solver first runs at a later step; a sweep also moves the run
+  ! counter, and a solver initialised again the generation counter: its ladders
+  ! start from its field, as after a restart.
   IF (Transient .AND. LamLadderStep > 0) THEN
-    IF (XiStep < LamLadderStep .OR. LaminateRunCount() /= LamRun .OR. &
-        Solver % DoneTime < LamDoneTime .OR. LaminateInitGeneration /= LamGeneration .OR. &
-        (XiStep == LamLadderStep .AND. &
-        (GetTime() /= LamTime .OR. Solver % DoneTime /= LamDoneTime))) CALL ResetLaminateLadders()
+    IF (XiStep < LamLadderStep .OR. Solver % DoneTime - XiStep /= LamStepOffset .OR. &
+        LaminateRunCount() /= LamRun .OR. LaminateInitGeneration /= LamGeneration .OR. &
+        (XiStep == LamLadderStep .AND. GetTime() /= LamTime)) CALL ResetLaminateLadders()
   END IF
   LamNewStep = Transient .AND. ( LamLadderStep /= XiStep .OR. dt /= LamDt )
   LamBuilt = .FALSE.
@@ -1594,10 +1596,12 @@ CONTAINS
              'A transient layered laminate stack needs the assembly of every timestep: '// &
              'remove "Constant Bulk System" and "Constant System"!')
          IF (Transient) THEN
+           ! a predictor-corrector solver also advances its step count twice a timestep
            IF (ListGetLogical(Model % Simulation, 'Adaptive Timestepping', Found) .OR. &
-               ListGetLogical(Model % Simulation, 'Convergence Control', Found)) CALL Fatal(Caller, &
-               'A transient layered laminate stack supports neither "Adaptive Timestepping" nor '// &
-               '"Convergence Control"!')
+               ListGetLogical(Model % Simulation, 'Convergence Control', Found) .OR. &
+               Solver % SolverExecWhen == SOLVER_EXEC_PREDCORR) CALL Fatal(Caller, &
+               'A transient layered laminate stack supports neither "Adaptive Timestepping", '// &
+               '"Convergence Control" nor a predictor-corrector solver!')
            ! its ladder integrates with the field's BDF weights, of order 1 or 2;
            ! implicit Euler is BDF1 (Solver % Order may keep a BDF order of a reload)
            SELECT CASE (ListGetString(SolverParams, 'Timestepping Method', Found))
@@ -1674,7 +1678,7 @@ CONTAINS
     LamLadderStep = XiStep
     LamTime = GetTime()
     LamRun = LaminateRunCount()
-    LamDoneTime = Solver % DoneTime
+    LamStepOffset = Solver % DoneTime - XiStep
     LamGeneration = LaminateInitGeneration
     LamXiInitialized = .TRUE.
   END IF
