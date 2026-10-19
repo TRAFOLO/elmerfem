@@ -219,6 +219,9 @@ SUBROUTINE WhitneyAVHarmonicSolver( Model,Solver,dt,Transient )
   LOGICAL :: PiolaVersion, SecondOrder, GotHbCurveVar, HasTensorReluctivity
   LOGICAL :: ExtNewton, StrandedHomogenization
   LOGICAL :: LamLayerHasNormal, LamSheet
+  LOGICAL :: SheetFollowsCurve
+  LOGICAL, SAVE :: SheetHBInfo = .FALSE.
+  REAL(KIND=dp) :: SheetNu, SheetMu
   LOGICAL, ALLOCATABLE, SAVE :: TreeEdges(:)
   LOGICAL, SAVE :: CircuitGaugeWarned = .FALSE., ElectroDynamicsGaugeWarned = .FALSE.
 
@@ -565,10 +568,11 @@ CONTAINS
            ! Anisotropic complex reluctivity of insulated laminations. The net
            ! currents of the laminations are carried by 'Thin Sheet Laminate
            ! Thickness' boundaries on their mid-surfaces, so this body itself
-           ! should be given zero conductivity.
-           IF (ListCheckPresent(Material, 'H-B Curve') .OR. HasTensorReluctivity) &
+           ! should be given zero conductivity. An H-B curve is read at the
+           ! flux density of the laminations (LocalMatrix).
+           IF (HasTensorReluctivity) &
              CALL Fatal('WhitneyAVHarmonicSolver', &
-                 'The layered laminate stack model needs a scalar linear permeability!')
+                 'The layered laminate stack model needs a scalar permeability or an H-B curve!')
            ! the lamination sheets take a real permeability, and the sheet
            ! correction holds only for the same mu in body and sheets
            IF (ANY(ABS(AIMAG(Acoef(1:n))) > AEPS * ABS(Acoef(1:n)))) &
@@ -704,10 +708,24 @@ CONTAINS
                ! and the conductance factor compensates the part of the
                ! net-current impedance the body already holds.
                Omega = GetAngularFrequency(Found=Found)
+               ! The factor holds for the same permeability in sheet and body: next
+               ! to a body with an H-B curve the sheet takes the steel's reluctivity
+               ! there (from the previous iterate) instead of its own permeability.
+               SheetNu = LaminateSheetSteelReluctivity(Element, pSolver, PiolaVersion, &
+                   MERGE(2, 1, SecondOrder), SheetFollowsCurve)
+               IF (SheetFollowsCurve .AND. .NOT. SheetHBInfo) THEN
+                 CALL Info('WhitneyAVHarmonicSolver', 'Lamination sheets follow the H-B curve '// &
+                     'of the adjacent layered body', Level=6)
+                 SheetHBInfo = .TRUE.
+               END IF
                DO i = 1, n
+                 IF (SheetFollowsCurve) THEN
+                   SheetMu = 1.0_dp / SheetNu
+                 ELSE
+                   SheetMu = VacuumPermeability() * MuParameter(i)
+                 END IF
                  SheetCond(i) = SkinCond(i) * LaminateSheetFactor(Omega, &
-                     CMPLX(VacuumPermeability() * MuParameter(i), 0.0_dp, KIND=dp), &
-                     SkinCond(i), SheetLamThick(i))
+                     CMPLX(SheetMu, 0.0_dp, KIND=dp), SkinCond(i), SheetLamThick(i))
                END DO
                CALL LocalMatrixThinSheet( MASS, STIFF, FORCE, LOAD, SheetLamThick, MuParameter, &
                                               SheetCond, .FALSE., Element, n, nd )
@@ -1401,8 +1419,10 @@ END BLOCK
     COMPLEX(KIND=dp) :: mu, C(3,3), L(3), G(3), M(3), JfixPot(n), Nu(3,3)
     COMPLEX(KIND=dp) :: LocalLamCond, JAC(nd,nd), B_ip(3), Aloc(nd), &
           CVelo(3), CVeloSum, Permittivity(nd), P_ip, DAMP(nd,nd)
+    ! 'layered' stack with an H-B curve: Newton weights of the metal flux density
+    COMPLEX(KIND=dp) :: LamFluxWeight(3), LamNewtonH(3)
 
-    LOGICAL :: Stat, Newton, HBCurve, &
+    LOGICAL :: Stat, Newton, HBCurve, LayeredHB, &
                HasVelocity, HasLorenzVelocity, HasAngularVelocity
     LOGICAL :: StrandedHomogenization, UseRotM, FoundIm
 
@@ -1447,6 +1467,7 @@ END BLOCK
     
     CALL GetPermittivity(GetMaterial(), Permittivity, n)
     HBCurve = ListCheckPresent(Material,'H-B Curve')
+    LayeredHB = HBCurve .AND. LaminateStack .AND. LaminateStackModel == 'layered'
 
     IF(HBCurve) THEN
       Newton = GetLogical( SolverParams,'Newton-Raphson iteration',Found)
@@ -1559,7 +1580,14 @@ END BLOCK
 
        IF ( HBCurve ) THEN
          B_ip = MATMUL( Aloc(np+1:nd), RotWBasis(1:nd-np,:) )
-         babs = MAX( SQRT(SUM(ABS(B_ip)**2)), 1.d-8 )
+         IF ( LayeredHB ) THEN
+           ! the laminations carry the in-plane flux of the stack: the curve is
+           ! read at their flux density, not at the stack average
+           babs = MAX( LaminateMetalFluxDensity(B_ip, LamLayerFill, LamLayerNormal, &
+               LamLayerHasNormal, LamFluxWeight), 1.d-8 )
+         ELSE
+           babs = MAX( SQRT(SUM(ABS(B_ip)**2)), 1.d-8 )
+         END IF
 
          IF( Newton ) THEN
            mu = ListGetFun( Material,'h-b curve',babs,dFdx=muder) / Babs
@@ -1589,6 +1617,10 @@ END BLOCK
        IF (LaminateStack .AND. LaminateStackModel == 'layered') THEN
          Nu = LaminateLayeredReluctivity(Omega, mu, LamLayerCond, LamLayerThick, &
              LamLayerFill, LamLayerNormal, LamLayerHasNormal)
+         ! H = Nu(nu(B_s)) B: the Newton term needs dNu/dnu B
+         IF (LayeredHB .AND. Newton) LamNewtonH = MATMUL( LaminateLayeredReluctivityDerivative( &
+             Omega, mu, LamLayerCond, LamLayerThick, LamLayerFill, LamLayerNormal, &
+             LamLayerHasNormal), B_ip )
        ELSE IF (HasTensorReluctivity) THEN
          IF (SIZE(Acoef_t,2) == 1) THEN
            Nu = CMPLX(0._dp, 0._dp, kind=dp)
@@ -1722,8 +1754,13 @@ END BLOCK
            q = j+np
 
            IF ( Newton ) THEN
-             JAC(p,q) = JAC(p,q) + muder * SUM(B_ip(:)*RotWBasis(i,:)) * &
-                 SUM(CONJG(B_ip(:))*RotWBasis(j,:))*detJ*IP % s(t)/Babs
+             IF ( LayeredHB ) THEN
+               JAC(p,q) = JAC(p,q) + muder * SUM(LamNewtonH(:)*RotWBasis(i,:)) * &
+                   SUM(CONJG(LamFluxWeight(:))*RotWBasis(j,:))*detJ*IP % s(t)/Babs
+             ELSE
+               JAC(p,q) = JAC(p,q) + muder * SUM(B_ip(:)*RotWBasis(i,:)) * &
+                   SUM(CONJG(B_ip(:))*RotWBasis(j,:))*detJ*IP % s(t)/Babs
+             END IF
            END IF
 
            IF( HasVelocity ) THEN

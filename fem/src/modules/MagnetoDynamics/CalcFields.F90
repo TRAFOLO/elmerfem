@@ -637,12 +637,15 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    INTEGER :: LamStackPowerSeen     ! 1 where a layered laminate stack contributed to it
    LOGICAL :: LayeredLaminate, LamLayerHasNormal, LamSheet
    REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
-   REAL(KIND=dp) :: SheetLamThick, SheetMu, SheetImagCond, LamSheetEnergy
+   REAL(KIND=dp) :: SheetLamThick, SheetMu, SheetImagCond, LamSheetEnergy, SheetNu, SheetMuAbs
+   LOGICAL :: SheetFollowsCurve
    COMPLEX(KIND=dp) :: SheetFactor
    INTEGER :: SheetPowerSeen     ! 1 where a transient foil sheet contributed to it
    REAL(KIND=dp) :: localThickness
    REAL(KIND=dp) :: Freq, FreqPower(2), FieldPower(2), LossCoeff(2), ElemLoss(2), ModeLoss(2), BSq(2), AxisSq(2), &
        BRe(3), BIm(3), BScale
+   ! Field and volume fraction the loss law is evaluated on: the laminations' in a 'layered' stack
+   REAL(KIND=dp) :: BLoss(2,3), LossFraction
    REAL(KIND=dp) :: ComponentLoss(2,2), rot_velo(3), angular_velo(3)
    REAL(KIND=dp) :: Coeff, TotalLoss(3), LumpedForce(3), localAlpha, localV(2), nofturns, coilthickness
    REAL(KIND=dp) :: Flux(2), AverageFluxDensity(2), Area, N_j, wvec(3)
@@ -1582,8 +1585,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      ! The 'layered' laminate stack model replaces the scalar reluctivity of
      ! the lamination material by the stack tensor, as in the 3-D harmonic
      ! solver (the only one that implements it; it rejects coils in the stack).
+     ! An H-B curve is read at the flux density of the laminations, as there.
      LayeredLaminate = .FALSE.
-     IF ( dim == 3 .AND. .NOT. ( CoilBody .OR. RealField .OR. HasHBCurve .OR. &
+     IF ( dim == 3 .AND. .NOT. ( CoilBody .OR. RealField .OR. &
          HasReluctivityFunction .OR. HasTensorReluctivity ) ) THEN
        LayeredLaminate = ( GetString(Material, 'Laminate Stack Model', Found) == 'layered' )
        IF (LayeredLaminate) CALL GetLaminateLayeredParameters(Material, LamLayerThick, &
@@ -2102,14 +2106,26 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        
        Nu = CMPLX(0.0d0, 0.0d0, kind=dp)
        w_dens = 0._dp
-       IF ( HasHBCurve ) THEN
+       IF ( HasHBCurve .AND. LayeredLaminate ) THEN
+         ! As in the harmonic solver: the curve is read at the flux density of the
+         ! laminations and gives the material reluctivity of the stack tensor. The
+         ! energy is the secant one of the tensor, twice the time average.
+         Babs = MAX( LaminateMetalFluxDensity(CMPLX(B(1,:), B(2,:), KIND=dp), &
+             LamLayerFill, LamLayerNormal, LamLayerHasNormal), 1.d-8 )
+         R_ip_Z = CMPLX(ListGetFun(Material,'h-b curve', x=babs) / Babs, 0.0_dp, KIND=dp)
+         Nu = LaminateLayeredReluctivity(Omega, R_ip_Z, LamLayerCond, LamLayerThick, &
+             LamLayerFill, LamLayerNormal, LamLayerHasNormal)
+         R_ip = 0.0_dp
+         w_dens = 0.5*( SUM(MATMUL(REAL(Nu), B(1,:)) * B(1,:)) + &
+             SUM(MATMUL(REAL(Nu), B(2,:)) * B(2,:)) )
+       ELSE IF ( HasHBCurve ) THEN
          IF (RealField) THEN
            Babs=SQRT(SUM(B(1,:)**2))
          ELSE
            Babs = SQRT(SUM(B(1,:)**2 + B(2,:)**2))
          END IF
          Babs = MAX(Babs, 1.d-8)
-         
+
          R_ip = ListGetFun(Material,'h-b curve', x=babs) / Babs
 
          BLOCK
@@ -2553,21 +2569,33 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            
            ! No losses to add if loss coefficient is not given
            IF( Found .OR. MaterialExponents ) THEN
+             ! The loss law of a 'layered' stack is the laminations' law: their flux density over
+             ! the metal fraction F of the volume.
+             IF( LayeredLaminate ) THEN
+               BLoss(1,1:3) = REAL( LaminateMetalFlux( CMPLX(B(1,1:3), B(2,1:3), KIND=dp), &
+                   LamLayerFill, LamLayerNormal, LamLayerHasNormal ) )
+               BLoss(2,1:3) = AIMAG( LaminateMetalFlux( CMPLX(B(1,1:3), B(2,1:3), KIND=dp), &
+                   LamLayerFill, LamLayerNormal, LamLayerHasNormal ) )
+               LossFraction = LamLayerFill
+             ELSE
+               BLoss = B(1:2,1:3)
+               LossFraction = 1.0_dp
+             END IF
              ! The loss law holds for a unidirectional sinusoidal B. Re B and Im B are two instants of an
              ! elliptical B whose time origin is arbitrary, so each mode on its own depends on the source phase;
              ! the principal axes of the ellipse do not: Bmaj^2 + Bmin^2 = |Re B|^2 + |Im B|^2 and
              ! Bmaj * Bmin = |Re B x Im B|. Per axis into ComponentLoss, both axes once into BodyLoss and the field.
-             BSq(1) = SUM( B(1,1:3) ** 2 )
-             BSq(2) = SUM( B(2,1:3) ** 2 )
+             BSq(1) = SUM( BLoss(1,1:3) ** 2 )
+             BSq(2) = SUM( BLoss(2,1:3) ** 2 )
              IF( BSq(1) == 0.0_dp .OR. BSq(2) == 0.0_dp ) THEN
                ! A real-valued field (transient runs) keeps exactly the values of the per-mode sum
                AxisSq(1) = BSq(1) + BSq(2)
                AxisSq(2) = 0.0_dp
              ELSE
                ! Scaled by the largest component, so that no fourth power over- or underflows
-               BScale = MAXVAL( ABS( B(1:2,1:3) ) )
-               BRe = B(1,1:3) / BScale
-               BIm = B(2,1:3) / BScale
+               BScale = MAXVAL( ABS( BLoss(1:2,1:3) ) )
+               BRe = BLoss(1,1:3) / BScale
+               BIm = BLoss(2,1:3) / BScale
                AxisSq(1) = 0.5_dp * ( SUM( BRe ** 2 ) + SUM( BIm ** 2 ) ) &
                    + SQRT( 0.25_dp * ( SUM( BRe ** 2 ) - SUM( BIm ** 2 ) ) ** 2 + SUM( BRe * BIm ) ** 2 )
                AxisSq(2) = SUM( CrossProduct( BRe, BIm ) ** 2 ) / AxisSq(1) * BScale ** 2
@@ -2575,8 +2603,10 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              END IF
              ElemLoss = 0.0_dp
              DO l=1,2
-               ModeLoss(1) = s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) * ( AxisSq(l) ** FieldPower(1) )
-               ModeLoss(2) = s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) * ( AxisSq(l) ** FieldPower(2) )
+               ModeLoss(1) = LossFraction * s * Basis(p) * LossCoeff(1) * ( Freq ** FreqPower(1) ) &
+                   * ( AxisSq(l) ** FieldPower(1) )
+               ModeLoss(2) = LossFraction * s * Basis(p) * LossCoeff(2) * ( Freq ** FreqPower(2) ) &
+                   * ( AxisSq(l) ** FieldPower(2) )
                ComponentLoss(:,l) = ComponentLoss(:,l) + ModeLoss
                ElemLoss = ElemLoss + ModeLoss
              END DO
@@ -3590,15 +3620,12 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
         IF (.NOT. Found) ThinLineCond = 1.0_dp ! if not found default to "air" property
         SheetImagCond = 0.0_dp
         IF (LamSheet) THEN
-          ! a lamination sheet of a 'layered' stack, with the complex conductance of the solver
+          ! a lamination sheet of a 'layered' stack: its complex conductance follows below,
+          ! on the mesh face, as in the solver
           SheetMu = GetCReal(BC, 'Thin Sheet Relative Permeability', Found)
           IF (.NOT. Found) SheetMu = 1.0_dp
           SheetThickness = SheetLamThick
           Omega = GetAngularFrequency(pSolver % Values, Found)
-          SheetFactor = LaminateSheetFactor(Omega, &
-              CMPLX(VacuumPermeability() * SheetMu, 0.0_dp, KIND=dp), ThinLineCond(1), SheetLamThick)
-          SheetImagCond = ThinLineCond(1) * AIMAG(SheetFactor)
-          ThinLineCond = ThinLineCond * REAL(SheetFactor)
         END IF
       ELSE
         CYCLE
@@ -3618,6 +3645,21 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
       IF (.NOT. ActiveBoundaryElement(Element)) CYCLE
 
       Model % CurrentElement => Element
+
+      IF (LamSheet) THEN
+        ! the same permeability as the solver: the steel's next to a body with an H-B curve
+        SheetNu = LaminateSheetSteelReluctivity(Element, pSolver, PiolaVersion, EdgeBasisDegree, &
+            SheetFollowsCurve)
+        IF (SheetFollowsCurve) THEN
+          SheetMuAbs = 1.0_dp / SheetNu
+        ELSE
+          SheetMuAbs = VacuumPermeability() * SheetMu
+        END IF
+        SheetFactor = LaminateSheetFactor(Omega, CMPLX(SheetMuAbs, 0.0_dp, KIND=dp), &
+            ThinLineCond(1), SheetLamThick)
+        SheetImagCond = ThinLineCond(1) * AIMAG(SheetFactor)
+        ThinLineCond = ThinLineCond * REAL(SheetFactor)
+      END IF
 
       ! The DOFs are those of the potential solver, not of this one: with this
       ! solver's counts the nodal and edge parts of SOL were split wrongly.

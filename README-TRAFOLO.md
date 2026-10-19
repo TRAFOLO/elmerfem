@@ -318,12 +318,12 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   same tensor for H and the energy, adds the sheets' reactive part to the field energy and
   publishes `res: Laminate stack loss`: the Im(nu) loss of the bodies plus the sheet loss; only the
   sum is meaningful, the sheet part alone can be negative (d of about 3-5 skin depths). The loss is
-  not in the `Joule Heating` field (no thermal coupling yet). An H-B curve, a tensor or complex
-  permeability, a nonzero conductivity or a coil component in a `layered` body, and `layered` in
-  the transient solver, stop with a Fatal. Validated against a resolved model of three 8 um NiFe
-  laminations (mu_r 190, 1.67 MS/m) around a copper bar, 1 MHz - 1 GHz, single bar and a pair 20 um
-  apart in and out of phase: R -3.2 .. +0.9 %, L -0.3 .. +2.5 % (the tensor alone: L up to +9.8 %).
-  Test: `mgdyn_laminate_layered_harmonic` (MUMPS).
+  not in the `Joule Heating` field (no thermal coupling yet). A tensor or complex permeability, a
+  nonzero conductivity or a coil component in a `layered` body, and `layered` in the transient
+  solver, stop with a Fatal (an H-B curve is accepted since DEV-1604). Validated against a
+  resolved model of three 8 um NiFe laminations (mu_r 190, 1.67 MS/m) around a copper bar, 1 MHz -
+  1 GHz, single bar and a pair 20 um apart in and out of phase: R -3.2 .. +0.9 %, L -0.3 .. +2.5 %
+  (the tensor alone: L up to +9.8 %). Test: `mgdyn_laminate_layered_harmonic` (MUMPS).
 - `res: Thin sheet current power` (`CalcFields`) evaluates the sheet field with the DOF counts and
   the edge basis of the potential solver, on the same mesh face as the assembly (DEV-1600). Before,
   it took its own solver's counts and a Piola basis and reported about 1e9 W instead of 1e-2 W in a
@@ -339,6 +339,42 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   without core loss ignored it and averaged from t = 0. Tests: `mgdyn_transient_loss_start_gse`,
   `mgdyn_transient_loss_start_igse`; `circuits_transient_foilsheet_skinloss` and
   `circuits_transient_stranded_skinladder_rl` / `_sine` now get their start time without core loss.
+- H-B curves in the `layered` laminate stack model (DEV-1604). A `layered` body may take an `H-B
+  Curve` instead of `Relative Permeability`: the curve of the lamination steel (as data sheets and
+  Epstein tests give it). It is read at the flux density of the laminations, B_s = B_par/F + B_perp
+  (the laminations carry the stack's in-plane flux on the fraction F of the cross-section and all of
+  the normal flux), and nu = H(|B_s|)/|B_s| is the material reluctivity of the stack tensor, skin
+  factor g included (`LaminateMetalFlux`, `LaminateMetalFluxDensity` in `Utils`). The Newton term
+  carries dNu/dnu B (relative finite difference, `LaminateLayeredReluctivityDerivative`) and the
+  weight B_par/F^2 + B_perp of d|B_s|/dB, with the complex-linear approximation of the isotropic H-B
+  term; the converged solution does not depend on it (Newton and Picard agree to 5e-12) and the
+  iteration converges like the isotropic term (same iteration history at 1 MHz). `CalcFields` builds
+  the same tensor for H and the energy (secant: 1/2 Re(B* Nu B), twice the time average) and
+  evaluates the `Harmonic Loss` law of a layered body on B_s over the metal fraction F of its
+  volume, the way per-kg loss data of the steel are defined (F^(1-beta) more than on the stack
+  average: +3.4 % for F 0.96 and beta 1.8; this also applies to linear layered bodies). Validated
+  against resolved laminations (M300-35A, M310-50A at 500 Hz; M270-50A, M235-35A, M165-35S at 50 Hz;
+  F 0.96, mean flux density 0.5 - 1.7 T, flux-driven stack): magnetizing field and eddy loss within
+  0.5 % at 50 Hz (grain-oriented M165-35S: 1.5 %); at 500 Hz -11 .. +4 % and -8 .. +7 %, largest for
+  0.5 mm laminations at 1.0 - 1.3 T, where the skin effect makes the saturation uneven across the
+  lamination. The low-frequency model in the same runs: -86 .. -2 % and -6 .. +8 %, mostly because
+  it reads the curve at the stack average. A lamination sheet next to a layered body with an H-B
+  curve takes the steel's reluctivity there instead of its `Thin Sheet Relative Permeability`: H/B at
+  B_s averaged over the neighbouring elements, from the previous iterate, in the solver and in
+  `CalcFields` (`LaminateSheetSteelReluctivity`), so sheet and body keep the same permeability, which
+  the sheet factor needs. In parallel the sheet must lie inside a partition: ElmerGrid keeps the two
+  parents of a boundary face together by default, and a sheet that a partition interface cuts (with
+  `-partnobcoptim`, for example) stops with a Fatal, as its parent across the interface is not at
+  hand there. With the fixed sheet permeability a saturated 8 um NiFe lamination at
+  100 MHz turned active and the iteration did not converge; it now converges, linearly in deep
+  saturation since the sheet's dependence on B is not in the Newton term. Maxwell stress has no
+  magnetic part in layered bodies (scalar reluctivity 0, as before), and `Relative Permeability`
+  output is 1/(mu0 Nu_11) of the stack tensor, not the steel's. Tests:
+  `mgdyn_laminate_layered_harmonic_hb_linear` (a linear curve gives the DEV-1600 norm),
+  `mgdyn_laminate_layered_harmonic_hb` (saturating curve at 1 MHz; stack loss, loss law and
+  magnetic energy; converges at the 12th solve; also on 3 ranks of the default partitioning, with
+  the same norms), `mgdyn_laminate_layered_harmonic_hb_split_sheet` (that model on 3 ranks with
+  sheets cut by the partition interfaces: the Fatal).
 
 ## Building the distributed bundle
 
