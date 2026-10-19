@@ -362,14 +362,19 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   curve takes the steel's reluctivity there instead of its `Thin Sheet Relative Permeability`: H/B at
   B_s averaged over the neighbouring elements, from the previous iterate, in the solver and in
   `CalcFields` (`LaminateSheetSteelReluctivity`), so sheet and body keep the same permeability, which
-  the sheet factor needs. With the fixed sheet permeability a saturated 8 um NiFe lamination at
+  the sheet factor needs. In parallel the sheet must lie inside a partition: ElmerGrid keeps the two
+  parents of a boundary face together by default, and a sheet that a partition interface cuts (with
+  `-partnobcoptim`, for example) stops with a Fatal, as its parent across the interface is not at
+  hand there. With the fixed sheet permeability a saturated 8 um NiFe lamination at
   100 MHz turned active and the iteration did not converge; it now converges, linearly in deep
   saturation since the sheet's dependence on B is not in the Newton term. Maxwell stress has no
   magnetic part in layered bodies (scalar reluctivity 0, as before), and `Relative Permeability`
   output is 1/(mu0 Nu_11) of the stack tensor, not the steel's. Tests:
   `mgdyn_laminate_layered_harmonic_hb_linear` (a linear curve gives the DEV-1600 norm),
   `mgdyn_laminate_layered_harmonic_hb` (saturating curve at 1 MHz; stack loss, loss law and
-  magnetic energy; converges at the 12th solve).
+  magnetic energy; converges at the 12th solve; also on 3 ranks of the default partitioning, with
+  the same norms), `mgdyn_laminate_layered_harmonic_hb_split_sheet` (that model on 3 ranks with
+  sheets cut by the partition interfaces: the Fatal).
 
 ## Building the distributed bundle
 

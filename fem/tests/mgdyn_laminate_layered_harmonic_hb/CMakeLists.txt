@@ -8,5 +8,5 @@ IF(HAVE_MUMPS)
   FILE(COPY ELMERSOLVER_STARTINFO DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
   FILE(COPY ${base}/mesh DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
 
-  ADD_ELMER_TEST(mgdyn_laminate_layered_harmonic_hb LABELS whitney harmonic)
+  ADD_ELMER_TEST(mgdyn_laminate_layered_harmonic_hb NPROCS 1 3 LABELS whitney harmonic)
 ENDIF()

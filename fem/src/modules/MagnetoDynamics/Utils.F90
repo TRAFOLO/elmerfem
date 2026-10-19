@@ -524,6 +524,19 @@ CONTAINS
     NuSum = 0.0_dp
     Volume = 0.0_dp
     IF (.NOT. ASSOCIATED(Face % BoundaryInfo)) RETURN
+    ! In parallel a face on a partition interface keeps only its local parent
+    ! (ElmerGrid drops the other one without a halo): the average would differ
+    ! from the serial one, or fall back to the sheet's own permeability.
+    IF (ParEnv % PEs > 1) THEN
+      IF (.NOT. (ASSOCIATED(Face % BoundaryInfo % Left) .AND. &
+          ASSOCIATED(Face % BoundaryInfo % Right))) THEN
+        IF (FaceOnPartitionInterface() .AND. AnyLayeredCurve()) CALL Fatal( &
+            'LaminateSheetSteelReluctivity', 'A lamination sheet lies on a partition '// &
+            'interface in a model with layered H-B bodies, where its parent across the '// &
+            'interface is not at hand: partition the mesh so that the sheets lie inside '// &
+            'partitions!')
+      END IF
+    END IF
     DO side = 1, 2
       IF (side == 1) Parent => Face % BoundaryInfo % Left
       IF (side == 2) Parent => Face % BoundaryInfo % Right
@@ -557,6 +570,29 @@ CONTAINS
       Found = .TRUE.
       NuSteel = NuSum / Volume
     END IF
+
+  CONTAINS
+
+    ! all nodes of the face are shared with another partition
+    LOGICAL FUNCTION FaceOnPartitionInterface() RESULT(OnInterface)
+      TYPE(Mesh_t), POINTER :: Mesh
+      OnInterface = .FALSE.
+      Mesh => PSolver % Mesh
+      IF (.NOT. ASSOCIATED(Mesh % ParallelInfo % GInterface)) RETURN
+      OnInterface = ALL(Mesh % ParallelInfo % GInterface(Face % NodeIndexes))
+    END FUNCTION FaceOnPartitionInterface
+
+    ! a 'layered' material with an H-B curve somewhere in the model
+    LOGICAL FUNCTION AnyLayeredCurve() RESULT(HasCurve)
+      INTEGER :: k
+      LOGICAL :: GotIt
+      HasCurve = .FALSE.
+      DO k = 1, CurrentModel % NumberOfMaterials
+        IF (ListGetString(CurrentModel % Materials(k) % Values, 'Laminate Stack Model', &
+            GotIt) /= 'layered') CYCLE
+        IF (ListCheckPresent(CurrentModel % Materials(k) % Values, 'H-B Curve')) HasCurve = .TRUE.
+      END DO
+    END FUNCTION AnyLayeredCurve
 !------------------------------------------------------------------------------
   END FUNCTION LaminateSheetSteelReluctivity
 !------------------------------------------------------------------------------
