@@ -81,6 +81,9 @@ MODULE MagnetoDynamicsUtils
    INTEGER, PARAMETER :: MaxLaminateEnergyTables = 64
    TYPE(LaminateEnergyTable_t), SAVE :: LamEnergyTables(MaxLaminateEnergyTables)
    INTEGER, SAVE :: NoLamEnergyTables = 0, LastLamEnergyTable = 0
+   ! WhitneyAVSolver_Init counts each declaration of the laminate ladder variables:
+   ! a solver initialised again (a reloaded model) starts its ladders again
+   INTEGER, SAVE :: LaminateInitGeneration = 0
 
    INTERFACE SetDOFtoValue
      MODULE PROCEDURE SetDOFtoValueR, SetDOFtoValueC

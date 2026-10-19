@@ -325,6 +325,12 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
   ! needs all three. Each direction gets the largest ladder order of the sheets
   ! using it; a sheet of lower order uses the first dofs of its elements.
   IF (Transient) THEN
+    ! The lamination sheets of a 'layered' stack carry the net lamination
+    ! currents in the harmonic solver only: here they would be left out of the
+    ! equations, while CalcFields still reported them.
+    IF (ListCheckPresentAnyBC(Model, 'Thin Sheet Laminate Thickness')) CALL Fatal( &
+        'WhitneyAVSolver_Init', 'Lamination sheets ("Thin Sheet Laminate Thickness") '// &
+        'are available in the harmonic solver only!')
     BLOCK
       TYPE(ValueList_t), POINTER :: CPar
       INTEGER :: ic, nlad, slot, dStack, dPlane(2), d, nXi(3)
@@ -407,6 +413,7 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
         CALL Info('WhitneyAVSolver_Init','Declared "'//LaminateXiName//'" with '// &
             I2S(nlam)//' poles for the laminate stack eddy current ladder', Level=5)
         CALL ListAddLogical(Params, 'Laminate Xi Declared', .TRUE.)
+        LaminateInitGeneration = LaminateInitGeneration + 1
       END IF
     END BLOCK
   END IF
@@ -566,7 +573,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
   LOGICAL :: LamLayered, LamLayerHasNormal, LamNewStep, LamBuilt, LamSymJac, &
       LamXiInitialized = .FALSE.
   REAL(KIND=dp) :: LamLayerThick, LamLayerCond, LamLayerFill, LamLayerNormal(3)
-  INTEGER :: LamLayerOrder, LamTimeOrder, LamLadderStep = -1, LamDoneTime = -1
+  INTEGER :: LamLayerOrder, LamTimeOrder, LamLadderStep = -1, LamDoneTime = -1, LamGeneration = -1
   REAL(KIND=dp) :: LamBdf(3) = 0.0_dp, LamDt = 0.0_dp, LamTime = 0.0_dp, LamRun = 0.0_dp
   TYPE(XiDir_t) :: XiLam
   TYPE(Variable_t), POINTER :: LamLadderVar => NULL()
@@ -578,7 +585,7 @@ SUBROUTINE WhitneyAVSolver( Model,Solver,dt,Transient )
        Acoef_t, ThinLineCrossect, ThinLineCond, nSTIFF, nFORCE, &
        HomogLadderOrder_alloc, fos_y0, fos_r, fos_T, hcoef_n, hcoef_n1, &
        XiD, nu_eff_dir, dir_active, prox_loss_var, &
-       LamXiInitialized, LamLadderStep, LamBdf, LamDt, LamTime, LamRun, LamDoneTime, XiLam, &
+       LamXiInitialized, LamLadderStep, LamBdf, LamDt, LamTime, LamRun, LamDoneTime, LamGeneration, XiLam, &
        LamLadderVar
 !------------------------------------------------------------------------------
   IF ( .NOT. ASSOCIATED( Solver % Matrix ) ) RETURN	
@@ -1308,11 +1315,13 @@ CONTAINS
   ! and again when the step is redone with another size; the step counts as done
   ! only once the solver holding the ladders has set them up (LamBuilt). A new
   ! simulation in this process (a Run Control sweep, a reloaded model) counts its
-  ! steps again, the runs on, or the solver's own steps (DoneTime) apart from the
-  ! timestep: its ladders start from its field, as after a restart.
+  ! steps again, the runs on, the solver's own steps (DoneTime) apart from the
+  ! timestep, or initialises the solver again: its ladders start from its field,
+  ! as after a restart.
   IF (Transient .AND. LamLadderStep > 0) THEN
     IF (XiStep < LamLadderStep .OR. LaminateRunCount() /= LamRun .OR. &
-        Solver % DoneTime < LamDoneTime .OR. (XiStep == LamLadderStep .AND. &
+        Solver % DoneTime < LamDoneTime .OR. LaminateInitGeneration /= LamGeneration .OR. &
+        (XiStep == LamLadderStep .AND. &
         (GetTime() /= LamTime .OR. Solver % DoneTime /= LamDoneTime))) CALL ResetLaminateLadders()
   END IF
   LamNewStep = Transient .AND. ( LamLadderStep /= XiStep .OR. dt /= LamDt )
@@ -1664,6 +1673,7 @@ CONTAINS
     LamTime = GetTime()
     LamRun = LaminateRunCount()
     LamDoneTime = Solver % DoneTime
+    LamGeneration = LaminateInitGeneration
     LamXiInitialized = .TRUE.
   END IF
 

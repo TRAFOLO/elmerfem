@@ -405,15 +405,20 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   xi_k'^2, then over-reports it, by up to 30 % at 500 Hz in saturation). It goes into `res: Eddy
   current power` and `res: Laminate stack loss`, and into an elemental `Proximity Loss` when one is
   declared (`ProcessFields` adds that to the core load: a Steinmetz eddy term on top counts the
-  classical loss twice). `CalcFields` adds the eddy current field to H and the ladder's stored
+  classical loss twice). The transient core loss of `ProcessFields` (GSE, iGSE) takes, in a layered
+  body, the steel's flux density B_s = B_par/F + B_perp (its dB/dt, its magnitude and the iGSE
+  bounds) on the metal fraction F of the volume, as the harmonic loss of `CalcFields` does; the
+  exported B and BT stay the stack's. `CalcFields` adds the eddy current field to H and the ladder's stored
   energy to the magnetic energy; the static energy of an H-B body is the potential of its law along
   the path from zero, integrated along the curve (`LaminateLayeredEnergy`). Where the flux has
   in-plane and normal parts the static law has no potential and its Newton term is not symmetric:
   with `Linear System Symmetric` the solver gets its symmetric part, in the matrix and the right
   hand side alike, so that a solver reading one triangle still converges to the law. A Fatal stops
   `Constant (Bulk) System`, `Adaptive Timestepping`, `Convergence Control`, a timestepping method
-  other than BDF of order 1 - 2 or implicit Euler, `Electrodynamics Model` (second order in time)
-  and a second WhitneyAVSolver with layered bodies. The states start from the initial field as
+  other than BDF of order 1 - 2 or implicit Euler, `Electrodynamics Model` (second order in time),
+  a second WhitneyAVSolver with layered bodies and lamination sheets (`Thin Sheet Laminate
+  Thickness`), whose net lamination currents only the harmonic solver carries. The states start
+  from the initial field as
   steady, also after a restart, whose files carry no ladder history, and in each new simulation of
   the same process (a `Run Control` sweep, a reloaded model). Validated on a flux-driven stack in 3-D
   (a quarter of a lamination width, `hfhomog/stack3d.py` transient mode,
@@ -460,10 +465,17 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   (a start from a nonzero field, two step sizes, two solves per step that give the result of one,
   the elemental `Proximity Loss`), `mgdyn_laminate_layered_transient_runs` (two Run Control runs
   that give the result of one, tilted laminations with an H-B curve, ending in saturation; with
-  the states of the first run kept the loss is 0.02 % off) and
-  `mgdyn_laminate_layered_transient_spd` (MUMPS reading one triangle, deep saturation at stacking
-  factor 0.5: the symmetric Newton term gives the norms of the full one with a general solver;
-  with the full term MUMPS's residual check stops the run). Elmer as it is: an edge initial
+  the states of the first run kept the loss is 0.02 % off), `mgdyn_laminate_layered_transient_reload`
+  (two one-step Run Control runs, the second at 0.8 of the flux: the norms of a single run at 0.8,
+  and an elemental `Proximity Loss` found again in the reloaded model),
+  `mgdyn_laminate_layered_transient_cubic` (an ordinary and a monotone cubic spline of the same
+  curve in two stacks: each energy from its own table), `mgdyn_laminate_layered_transient_spd`
+  (MUMPS reading one triangle, deep saturation at stacking factor 0.5: the symmetric Newton term
+  gives the norms of the full one with a general solver; with the full term MUMPS's residual check
+  stops the run), `mgdyn_laminate_layered_transient_sheet` (a lamination sheet: the Fatal) and
+  `mgdyn_transient_loss_layered_gse` / `_igse` (the fields of `mgdyn_transient_loss_start_gse` /
+  `_igse` in a stack of stacking factor 0.5: the GSE loss, the iGSE base and bounds of B/F on the
+  metal fraction, as the law gives them to 9 digits). Elmer as it is: an edge initial
   condition needs the scalar `AV {e}` entry for `SetInitialConditions` to read its components,
   the masked means of `SaveScalars` need `Parallel Reduce` on ranks without that body, and the
   `int` operator of `SaveScalars` skips elements of an elemental (`-elem`) field.
