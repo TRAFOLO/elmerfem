@@ -51,6 +51,40 @@ MODULE MagnetoDynamicsUtils
    
    COMPLEX(KIND=dp), PARAMETER :: im = (0._dp,1._dp)
 
+   ! A transient 'layered' laminate stack carries the eddy currents of its
+   ! laminations as a Foster ladder per element: LaminateXiName holds the states
+   ! (three global components per pole), LaminateLadderName the ladder of the
+   ! timestep. WhitneyAVSolver_Init declares both on the bodies whose material it
+   ! marks with LaminateLadderMask.
+   CHARACTER(*), PARAMETER :: LaminateXiName = 'Laminate Xi', &
+       LaminateLadderName = 'Laminate Ladder', LaminateLadderMask = 'Laminate Ladder Body'
+   INTEGER, PARAMETER :: DefaultLaminateLadderOrder = 6
+   ! LaminateLadderName per element: the ladder's relative permeability, Kappa,
+   ! the loss density of the last solve, the dynamic reluctivity of the step and
+   ! its history field (3), then the residues and the time constants of the
+   ! poles (as many of each as the variable has room for).
+   INTEGER, PARAMETER :: LamLadMu = 1, LamLadKappa = 2, LamLadLoss = 3, &
+       LamLadNuDyn = 4, LamLadHist = 5, LamLadPoles = 8
+   ! LaminateXiName per element: the states of the poles, three global
+   ! components each, then the element mean of B_par (3) and the stored energy of
+   ! the ladder (1) of the last solve, committed with the states for the loss
+   INTEGER, PARAMETER :: LamXiExtra = 4
+
+   ! The in-plane energy integral of the static 'layered' law at the knots of
+   ! each H-B curve and stacking factor (LaminateInPlaneEnergyIntegral), keyed on
+   ! the curve's data: a reloaded model frees its curve entries and makes new ones
+   TYPE LaminateEnergyTable_t
+     REAL(KIND=dp) :: StackingFactor = -1.0_dp
+     LOGICAL :: Cubic = .FALSE.
+     REAL(KIND=dp), ALLOCATABLE :: Knots(:), Values(:), CubicCoeff(:), Cumulative(:)
+   END TYPE LaminateEnergyTable_t
+   INTEGER, PARAMETER :: MaxLaminateEnergyTables = 64
+   TYPE(LaminateEnergyTable_t), SAVE :: LamEnergyTables(MaxLaminateEnergyTables)
+   INTEGER, SAVE :: NoLamEnergyTables = 0, LastLamEnergyTable = 0
+   ! WhitneyAVSolver_Init counts each declaration of the laminate ladder variables:
+   ! a solver initialised again (a reloaded model) starts its ladders again
+   INTEGER, SAVE :: LaminateInitGeneration = 0
+
    INTERFACE SetDOFtoValue
      MODULE PROCEDURE SetDOFtoValueR, SetDOFtoValueC
    END INTERFACE
@@ -338,12 +372,14 @@ CONTAINS
 !> (a corner) and the in-plane reluctivity is used in every direction.
 !------------------------------------------------------------------------------
   SUBROUTINE GetLaminateLayeredParameters(Material, Thickness, Sigma, &
-      StackingFactor, Normal, HasNormal)
+      StackingFactor, Normal, HasNormal, LadderOrder)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: Material
     REAL(KIND=dp), INTENT(OUT) :: Thickness, Sigma, StackingFactor, Normal(3)
     LOGICAL, INTENT(OUT) :: HasNormal
+    ! poles of the transient eddy current ladder
+    INTEGER, INTENT(OUT), OPTIONAL :: LadderOrder
 !------------------------------------------------------------------------------
     REAL(KIND=dp), POINTER :: NormalArray(:,:)
     LOGICAL :: Found
@@ -367,6 +403,11 @@ CONTAINS
       Normal = NormalArray(1:3,1)
       IF (SQRT(SUM(Normal**2)) < EPSILON(1.0_dp)) CALL Fatal(Caller, '> Laminate Normal < is a zero vector!')
       Normal = Normal / SQRT(SUM(Normal**2))
+    END IF
+
+    IF (PRESENT(LadderOrder)) THEN
+      LadderOrder = ListGetInteger(Material, 'Laminate Ladder Order', Found)
+      IF (.NOT. Found) LadderOrder = DefaultLaminateLadderOrder
     END IF
 !------------------------------------------------------------------------------
   END SUBROUTINE GetLaminateLayeredParameters
@@ -595,6 +636,221 @@ CONTAINS
     END FUNCTION AnyLayeredCurve
 !------------------------------------------------------------------------------
   END FUNCTION LaminateSheetSteelReluctivity
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Incremental reluctivity dH/dB of the H-B curve of a material at |B| = Babs.
+!------------------------------------------------------------------------------
+  FUNCTION CurveIncrementalReluctivity(Material, Babs) RESULT(dHdB)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: Material
+    REAL(KIND=dp), INTENT(IN) :: Babs
+    REAL(KIND=dp) :: dHdB
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: H
+!------------------------------------------------------------------------------
+    H = ListGetFun(Material, 'h-b curve', Babs, dFdx=dHdB)
+    IF (dHdB <= 0.0_dp) THEN
+      WRITE(Message,'(A,ES12.4,A)') 'The H-B curve does not rise at |B| =', Babs, ' T!'
+      CALL Fatal('CurveIncrementalReluctivity', Message)
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION CurveIncrementalReluctivity
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Projector onto the lamination plane of a 'layered' stack, I - n n^T; the
+!> identity without a normal, where every direction is in-plane.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateInPlaneProjector(Normal, HasNormal) RESULT(P)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp), INTENT(IN) :: Normal(3)
+    LOGICAL, INTENT(IN) :: HasNormal
+    REAL(KIND=dp) :: P(3,3)
+!------------------------------------------------------------------------------
+    INTEGER :: i, j
+!------------------------------------------------------------------------------
+    P = 0.0_dp
+    DO i = 1, 3
+      P(i,i) = 1.0_dp
+    END DO
+    IF (HasNormal) THEN
+      DO i = 1, 3
+        DO j = 1, 3
+          P(i,j) = P(i,j) - Normal(i) * Normal(j)
+        END DO
+      END DO
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateInPlaneProjector
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> In-plane energy integral of the static 'layered' law of an H-B curve,
+!> I_par(b) = int_0^b beta nu_par(beta) dbeta, nu_par = H/(F beta + (1-F) mu0 H),
+!> b >= 0, by five-point Gauss on each interval of the curve. Its values at the
+!> knots above zero are tabulated once per curve and stacking factor; a full
+!> cache gives its oldest table up for a new one.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateInPlaneEnergyIntegral(Curve, StackingFactor, b) RESULT(Ipar)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueListEntry_t), POINTER :: Curve
+    REAL(KIND=dp), INTENT(IN) :: StackingFactor, b
+    REAL(KIND=dp) :: Ipar
+!------------------------------------------------------------------------------
+    INTEGER :: it, j, n
+!------------------------------------------------------------------------------
+    n = SIZE(Curve % TValues)
+    ! the largest knot in (0, b], if any: the integral up to it is tabulated
+    j = n
+    DO WHILE (j >= 1)
+      IF (Curve % TValues(j) <= b) EXIT
+      j = j - 1
+    END DO
+    ! the table is read where it is found or built, as another call may replace it
+    !$OMP CRITICAL(LaminateEnergyTables)
+    it = LaminateEnergyTableIndex()
+    IF (j < 1) THEN
+      Ipar = SegmentIntegral(0.0_dp, b)
+    ELSE IF (Curve % TValues(j) <= 0.0_dp) THEN
+      Ipar = SegmentIntegral(0.0_dp, b)
+    ELSE
+      Ipar = LamEnergyTables(it) % Cumulative(j) + SegmentIntegral(Curve % TValues(j), b)
+    END IF
+    !$OMP END CRITICAL(LaminateEnergyTables)
+
+  CONTAINS
+
+    ! the table of this curve (its knots, values and cubic coefficients: an
+    ! ordinary and a monotone cubic differ in these only) and stacking factor,
+    ! built at the first call: the cumulative integral from zero at each knot
+    ! above zero (zero below). Called inside the critical section.
+    FUNCTION LaminateEnergyTableIndex() RESULT(it)
+      INTEGER :: it, k
+      REAL(KIND=dp) :: lo
+      LOGICAL :: Cubic
+      Cubic = ASSOCIATED(Curve % CubicCoeff)
+      DO it = 1, NoLamEnergyTables
+        IF (LamEnergyTables(it) % StackingFactor /= StackingFactor) CYCLE
+        IF (LamEnergyTables(it) % Cubic .NEQV. Cubic) CYCLE
+        IF (SIZE(LamEnergyTables(it) % Knots) /= n) CYCLE
+        IF (ANY(LamEnergyTables(it) % Knots /= Curve % TValues)) CYCLE
+        IF (ANY(LamEnergyTables(it) % Values /= Curve % FValues(1,1,:))) CYCLE
+        IF (Cubic) THEN
+          IF (SIZE(LamEnergyTables(it) % CubicCoeff) /= SIZE(Curve % CubicCoeff)) CYCLE
+          IF (ANY(LamEnergyTables(it) % CubicCoeff /= Curve % CubicCoeff)) CYCLE
+        END IF
+        RETURN
+      END DO
+      IF (NoLamEnergyTables < MaxLaminateEnergyTables) THEN
+        NoLamEnergyTables = NoLamEnergyTables + 1
+        it = NoLamEnergyTables
+      ELSE
+        it = MOD(LastLamEnergyTable, MaxLaminateEnergyTables) + 1
+      END IF
+      LastLamEnergyTable = it
+      IF (ALLOCATED(LamEnergyTables(it) % Knots)) DEALLOCATE(LamEnergyTables(it) % Knots, &
+          LamEnergyTables(it) % Values, LamEnergyTables(it) % Cumulative)
+      IF (ALLOCATED(LamEnergyTables(it) % CubicCoeff)) DEALLOCATE(LamEnergyTables(it) % CubicCoeff)
+      ALLOCATE(LamEnergyTables(it) % Knots(n), LamEnergyTables(it) % Values(n), &
+          LamEnergyTables(it) % Cumulative(n))
+      LamEnergyTables(it) % Knots = Curve % TValues
+      LamEnergyTables(it) % Values = Curve % FValues(1,1,:)
+      IF (Cubic) THEN
+        ALLOCATE(LamEnergyTables(it) % CubicCoeff(SIZE(Curve % CubicCoeff)))
+        LamEnergyTables(it) % CubicCoeff = Curve % CubicCoeff
+      END IF
+      LamEnergyTables(it) % Cubic = Cubic
+      LamEnergyTables(it) % StackingFactor = StackingFactor
+      LamEnergyTables(it) % Cumulative = 0.0_dp
+      lo = 0.0_dp
+      DO k = 1, n
+        IF (Curve % TValues(k) <= 0.0_dp) CYCLE
+        LamEnergyTables(it) % Cumulative(k) = SegmentIntegral(lo, Curve % TValues(k))
+        IF (lo > 0.0_dp) LamEnergyTables(it) % Cumulative(k) = &
+            LamEnergyTables(it) % Cumulative(k) + LamEnergyTables(it) % Cumulative(k-1)
+        lo = Curve % TValues(k)
+      END DO
+    END FUNCTION LaminateEnergyTableIndex
+
+    ! int_lo^hi beta nu_par(beta) dbeta by five-point Gauss
+    FUNCTION SegmentIntegral(lo, hi) RESULT(s)
+      REAL(KIND=dp), INTENT(IN) :: lo, hi
+      REAL(KIND=dp) :: s, beta, h, mu0
+      REAL(KIND=dp), PARAMETER :: GaussU(5) = [-0.906179845938664_dp, -0.538469310105683_dp, &
+          0.0_dp, 0.538469310105683_dp, 0.906179845938664_dp]
+      REAL(KIND=dp), PARAMETER :: GaussW(5) = [0.236926885056189_dp, 0.478628670499366_dp, &
+          0.568888888888889_dp, 0.478628670499366_dp, 0.236926885056189_dp]
+      INTEGER :: k
+      s = 0.0_dp
+      IF (hi <= lo) RETURN
+      mu0 = VacuumPermeability()
+      DO k = 1, 5
+        beta = 0.5_dp * (lo + hi) + 0.5_dp * (hi - lo) * GaussU(k)
+        h = InterpolateCurve(Curve % TValues, Curve % FValues(1,1,:), beta, Curve % CubicCoeff)
+        s = s + GaussW(k) * beta * h / (StackingFactor * beta + (1.0_dp - StackingFactor) * mu0 * h)
+      END DO
+      s = 0.5_dp * (hi - lo) * s
+    END FUNCTION SegmentIntegral
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateInPlaneEnergyIntegral
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Field energy density of the static 'layered' stack law at B (real, transient).
+!> The law depends on B through b = |B_s| only, so its energy on the straight
+!> path from 0 is |B_par|^2/b^2 I_par(b) + |B_perp|^2/b^2 I_perp(b) with
+!> I(b) = int_0^b beta nu(beta) dbeta of the in-plane and the normal stack
+!> reluctivity: I_perp = F int H dB + (1-F) b^2/(2 mu0) is the curve integral,
+!> I_par is integrated along the curve (LaminateInPlaneEnergyIntegral). With
+!> B in the lamination plane or along the normal this is the potential of the
+!> law. NuSteel is the steel's reluctivity at b; with HasCurve the H-B curve of
+!> the material is integrated, else the steel is linear.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateLayeredEnergy(Material, B, StackingFactor, Normal, HasNormal, &
+      HasCurve, NuSteel) RESULT(W)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: Material
+    REAL(KIND=dp), INTENT(IN) :: B(3), StackingFactor, Normal(3), NuSteel
+    LOGICAL, INTENT(IN) :: HasNormal, HasCurve
+    REAL(KIND=dp) :: W
+!------------------------------------------------------------------------------
+    TYPE(ValueListEntry_t), POINTER :: Curve
+    COMPLEX(KIND=dp) :: Nu(3,3)
+    REAL(KIND=dp) :: Bperp(3), Bpar(3), bs, mu0, CurveEnergy
+    LOGICAL :: Found
+!------------------------------------------------------------------------------
+    IF (.NOT. HasCurve) THEN
+      Nu = LaminateLayeredReluctivity(0.0_dp, CMPLX(NuSteel, 0.0_dp, KIND=dp), 0.0_dp, &
+          1.0_dp, StackingFactor, Normal, HasNormal)
+      W = 0.5_dp * SUM(B * MATMUL(REAL(Nu), B))
+      RETURN
+    END IF
+
+    W = 0.0_dp
+    bs = LaminateMetalFluxDensity(CMPLX(B, 0.0_dp, KIND=dp), StackingFactor, Normal, HasNormal)
+    IF (bs <= 0.0_dp) RETURN
+    mu0 = VacuumPermeability()
+    Bperp = 0.0_dp
+    IF (HasNormal) Bperp = Normal * SUM(Normal * B)
+    Bpar = B - Bperp
+
+    Curve => ListFind(Material, 'h-b curve')
+    CurveEnergy = IntegrateCurve(Curve % TValues, Curve % FValues(1,1,:), Curve % CubicCoeff, &
+        0.0_dp, bs, Found=Found)
+    W = SUM(Bpar**2) / bs**2 * LaminateInPlaneEnergyIntegral(Curve, StackingFactor, bs) + &
+        SUM(Bperp**2) / bs**2 * (StackingFactor * CurveEnergy + &
+        (1.0_dp - StackingFactor) * bs**2 / (2 * mu0))
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateLayeredEnergy
 !------------------------------------------------------------------------------
 
 !> Get a real-valued reluctivity tensor. This subroutine seeks values which

@@ -137,9 +137,19 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
   TYPE(Element_t), POINTER :: Element
   CHARACTER(LEN=15) :: coeffStr
   CHARACTER(LEN=MAX_NAME_LEN) :: LossMethodStr
+  ! Transient core loss of a 'layered' laminate stack: its loss law takes the
+  ! steel's flux density, B_s = B_par/F + B_perp (B/F without a normal), on the
+  ! metal fraction F of the volume, as the harmonic loss of CalcFields does.
+  ! Per DG node: the stacking factor (1 outside layered stacks), the normal,
+  ! and the flux density of the loss law; the exported B stays the stack's.
+  REAL(KIND=dp), POINTER :: LamFill(:), LamNrm(:,:), LossBX(:), LossBY(:), LossBZ(:), &
+                            LossBAbs(:)
+  LOGICAL, POINTER :: LamHasN(:)
+  LOGICAL :: LamAny = .FALSE.
 
   SAVE Visit, Mesh, VarLCk1, VarLC2k2, VarFdP, VarFqP, VarDens, VarTF, LossCoeff, &
-       LossCoeff2, Told, Tstart, VarBoldX, VarBoldY, VarBoldZ, dBdt, LossMethodStr
+       LossCoeff2, Told, Tstart, VarBoldX, VarBoldY, VarBoldZ, dBdt, LossMethodStr, &
+       LamFill, LamNrm, LamHasN, LamAny, LossBX, LossBY, LossBZ, LossBAbs
 
 !------------------------------------------------------------------------------
 !    Check if version number output is requested
@@ -241,13 +251,20 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
   IF (Transient) THEN
     IF (VISIT .EQ. 0)  THEN
       ALLOCATE( VarBoldX(NSIZE), VarBoldY(NSIZE), VarBoldZ(NSIZE), dbdt(NSIZE) )
-      ! No dB/dt for step 1: against the zero initial field it is the switch-on, not the waveform
-      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 1', ThisOnly = .TRUE. )
-      VarBoldX = TmpVar % Values
-      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 2', ThisOnly = .TRUE. )
-      VarBoldY = TmpVar % Values
-      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 3', ThisOnly = .TRUE. )
-      VarBoldZ = TmpVar % Values
+      ALLOCATE( LamFill(NSIZE), LamNrm(3,NSIZE), LamHasN(NSIZE), LossBX(NSIZE), LossBY(NSIZE), &
+          LossBZ(NSIZE), LossBAbs(NSIZE) )
+      LamFill = 1.0d0
+      LamNrm = 0.0d0
+      LamHasN = .FALSE.
+      DO i = 1, GetNOFActive()
+        Element => Mesh % Elements(i)
+        Material => GetMaterial( Element )
+        IF ( GetString( Material, 'Laminate Stack Model', Found ) /= 'layered' ) CYCLE
+        CALL LayeredStackOfElement()
+      END DO
+      LamAny = ANY( LamFill < 1.0d0 )
+      IF ( LamAny ) CALL Info( 'ProcessFields', 'Core loss of the layered laminate stacks '// &
+          'from the steel flux density on their metal fraction', Level=3 )
 
       LossMethodStr = GetString( SolverParams, 'Transient Core Loss Method', Found )
       IF (.NOT. Found) LossMethodStr = 'gse'
@@ -265,6 +282,15 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
       VarBT % Values = VarBT % Values + TmpVar % Values * TmpVar % Values
     END DO
     VarBT % Values = SQRT(VarBT % Values)
+
+    ! The flux density of the loss law, and at step 1 its history: no dB/dt for
+    ! step 1, against the zero initial field it is the switch-on, not the waveform
+    CALL LossFluxDensity()
+    IF (VISIT .EQ. 0) THEN
+      VarBoldX = LossBX
+      VarBoldY = LossBY
+      VarBoldZ = LossBZ
+    END IF
 
     IF ( HAmFound ) THEN
       VarHAm % Values = 0.0d0
@@ -338,36 +364,35 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
       END IF
 
 
-      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 1', ThisOnly = .TRUE. )
-      dBdt = (TmpVar % Values - VarBoldX)**2
+      dBdt = SQRT( (LossBX - VarBoldX)**2 + (LossBY - VarBoldY)**2 + (LossBZ - VarBoldZ)**2 )/dt
 
-      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 2', ThisOnly = .TRUE. )
-      dBdt = dBdt + (TmpVar % Values - VarBoldY)**2
-
-      TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 3', ThisOnly = .TRUE. )
-      dBdt = dBdt + (TmpVar % Values - VarBoldZ)**2
-
-      dBdt = SQRT(dBdt)/dt
-
-      ! Apply Losses properly separated by method
+      ! Apply Losses properly separated by method, on the metal fraction of a layered stack
       IF ( LossMethodStr == 'igse' ) THEN
         ! Base 1: iGSE Hysteresis Temporal Base
         Var_iGSE_Base1 => VariableGet( Mesh % Variables, 'iGSE_Base1_Wkg', ThisOnly = .TRUE. )
         IF (ASSOCIATED(Var_iGSE_Base1)) THEN
-          Var_iGSE_Base1 % Values = VarLCk1 * dBdt**VarFqP
+          Var_iGSE_Base1 % Values = LamFill * VarLCk1 * dBdt**VarFqP
         END IF
-        
+
         ! Base 2: Eddy Current Base
         Var_iGSE_Base2 => VariableGet( Mesh % Variables, 'iGSE_Base2_Wkg', ThisOnly = .TRUE. )
         IF (ASSOCIATED(Var_iGSE_Base2)) THEN
-          Var_iGSE_Base2 % Values = VarLC2k2 * dBdt**2
+          Var_iGSE_Base2 % Values = LamFill * VarLC2k2 * dBdt**2
         END IF
       ELSE
         ! Original GSE accumulates directly into LoadWkg (alongside Joule losses)
-        VarLoadWkg % Values = VarLoadWkg % Values + &
-                              VarLCk1 * dBdt**VarFqP * &
-                              VarBT % Values**(VarFdP-VarFqP) + &
-                              VarLC2k2 * dBdt**2
+        IF ( LamAny ) THEN
+          VarLoadWkg % Values = VarLoadWkg % Values + LamFill * ( &
+                                VarLCk1 * dBdt**VarFqP * &
+                                LossBAbs**(VarFdP-VarFqP) + &
+                                VarLC2k2 * dBdt**2 )
+        ELSE
+          ! without layered stacks the terms as before, to the last bit
+          VarLoadWkg % Values = VarLoadWkg % Values + &
+                                VarLCk1 * dBdt**VarFqP * &
+                                VarBT % Values**(VarFdP-VarFqP) + &
+                                VarLC2k2 * dBdt**2
+        END IF
       END IF
 
     ELSE
@@ -427,13 +452,10 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
       END IF
     END IF
 
-    ! Save current B vectors for next dB/dt derivative calculation
-    TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 1', ThisOnly = .TRUE. )
-    VarBoldX = TmpVar % Values
-    TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 2', ThisOnly = .TRUE. )
-    VarBoldY = TmpVar % Values
-    TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e 3', ThisOnly = .TRUE. )
-    VarBoldZ = TmpVar % Values
+    ! Save current B vectors (of the loss law) for next dB/dt derivative calculation
+    VarBoldX = LossBX
+    VarBoldY = LossBY
+    VarBoldZ = LossBZ
 
     ! ==========================================
     ! UNIVERSAL BOUNDING BOX & DELTA B TRACKING
@@ -444,9 +466,9 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
       VarDeltaB % Values = 0.0d0
       
       DO i = 1, dim
-        ! Get current vector component
+        ! Get current vector component, of the loss law's flux density
         TmpVar => VariableGet( Mesh % Variables, 'magnetic flux density e '//TRIM(i2s(i)), ThisOnly = .TRUE. )
-        
+
         ! Get bounding box components
         VarBmaxComp => VariableGet( Mesh % Variables, 'Bmax '//TRIM(i2s(i)), ThisOnly = .TRUE. )
         VarBminComp => VariableGet( Mesh % Variables, 'Bmin '//TRIM(i2s(i)), ThisOnly = .TRUE. )
@@ -454,14 +476,14 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
         IF (ASSOCIATED(VarBmaxComp) .AND. ASSOCIATED(VarBminComp) .AND. ASSOCIATED(TmpVar)) THEN
           IF (Visit == 0 .OR. Told + dt/2 <= Tstart) THEN
             ! Pin min/max to the current field until averaging starts, and at step 1 (not to B = 0)
-            VarBmaxComp % Values = TmpVar % Values
-            VarBminComp % Values = TmpVar % Values
+            VarBmaxComp % Values = LossComponent(i)
+            VarBminComp % Values = LossComponent(i)
           ELSE
             ! Track spatial maximum and minimum bounds
-            VarBmaxComp % Values = MAX(VarBmaxComp % Values, TmpVar % Values)
-            VarBminComp % Values = MIN(VarBminComp % Values, TmpVar % Values)
+            VarBmaxComp % Values = MAX(VarBmaxComp % Values, LossComponent(i))
+            VarBminComp % Values = MIN(VarBminComp % Values, LossComponent(i))
           END IF
-          
+
           ! Calculate the squared spatial difference for this axis and add to running DeltaB sum
           VarDeltaB % Values = VarDeltaB % Values + (VarBmaxComp % Values - VarBminComp % Values)**2
         END IF
@@ -529,6 +551,79 @@ SUBROUTINE ProcessFields( Model,Solver,dt,Transient )
 
   Visit = Visit + 1
   Told = Told + dt
+
+CONTAINS
+
+  ! Stacking factor and normal of the layered stack of Element at its DG nodes
+  SUBROUTINE LayeredStackOfElement()
+    REAL(KIND=dp) :: Fill, Nrm(3)
+    REAL(KIND=dp), POINTER :: NormalArray(:,:)
+    LOGICAL :: HasNormal, GotFill
+    INTEGER :: k, j
+    Fill = GetCReal( Material, 'Laminate Stacking Factor', GotFill )
+    IF ( .NOT. GotFill ) Fill = 1.0d0
+    IF ( Fill <= 0.0d0 .OR. Fill > 1.0d0 ) CALL Fatal( 'ProcessFields', &
+        '> Laminate Stacking Factor < must be in (0,1]!' )
+    Nrm = 0.0d0
+    NormalArray => ListGetConstRealArray( Material, 'Laminate Normal', HasNormal )
+    IF ( HasNormal ) THEN
+      IF ( SIZE(NormalArray,1) < 3 ) CALL Fatal( 'ProcessFields', '> Laminate Normal < needs three components!' )
+      Nrm = NormalArray(1:3,1)
+      IF ( SQRT(SUM(Nrm**2)) < EPSILON(1.0d0) ) CALL Fatal( 'ProcessFields', '> Laminate Normal < is a zero vector!' )
+      Nrm = Nrm / SQRT(SUM(Nrm**2))
+    END IF
+    DO k = 1, SIZE( Element % DGIndexes )
+      j = VarLoadWkg % Perm( Element % DGIndexes(k) )
+      IF ( j <= 0 ) CYCLE
+      LamFill(j) = Fill
+      LamNrm(:,j) = Nrm
+      LamHasN(j) = HasNormal
+    END DO
+  END SUBROUTINE LayeredStackOfElement
+
+  ! The flux density of the loss law at the DG nodes: B, in a layered stack the
+  ! steel's B_par/F + B_perp; its magnitude as BT outside layered stacks
+  SUBROUTINE LossFluxDensity()
+    TYPE(Variable_t), POINTER :: BVar
+    REAL(KIND=dp) :: bn
+    INTEGER :: j
+    BVar => VariableGet( Mesh % Variables, 'magnetic flux density e 1', ThisOnly = .TRUE. )
+    LossBX = BVar % Values
+    BVar => VariableGet( Mesh % Variables, 'magnetic flux density e 2', ThisOnly = .TRUE. )
+    LossBY = BVar % Values
+    BVar => VariableGet( Mesh % Variables, 'magnetic flux density e 3', ThisOnly = .TRUE. )
+    LossBZ = BVar % Values
+    LossBAbs = VarBT % Values
+    IF ( .NOT. LamAny ) RETURN
+    DO j = 1, NSIZE
+      IF ( LamFill(j) >= 1.0d0 ) CYCLE
+      IF ( LamHasN(j) ) THEN
+        bn = LossBX(j) * LamNrm(1,j) + LossBY(j) * LamNrm(2,j) + LossBZ(j) * LamNrm(3,j)
+        LossBX(j) = (LossBX(j) - bn * LamNrm(1,j)) / LamFill(j) + bn * LamNrm(1,j)
+        LossBY(j) = (LossBY(j) - bn * LamNrm(2,j)) / LamFill(j) + bn * LamNrm(2,j)
+        LossBZ(j) = (LossBZ(j) - bn * LamNrm(3,j)) / LamFill(j) + bn * LamNrm(3,j)
+      ELSE
+        LossBX(j) = LossBX(j) / LamFill(j)
+        LossBY(j) = LossBY(j) / LamFill(j)
+        LossBZ(j) = LossBZ(j) / LamFill(j)
+      END IF
+      LossBAbs(j) = SQRT( LossBX(j)**2 + LossBY(j)**2 + LossBZ(j)**2 )
+    END DO
+  END SUBROUTINE LossFluxDensity
+
+  ! Component i of the flux density of the loss law
+  FUNCTION LossComponent( i ) RESULT( Bi )
+    INTEGER :: i
+    REAL(KIND=dp) :: Bi(NSIZE)
+    SELECT CASE( i )
+    CASE( 1 )
+      Bi = LossBX
+    CASE( 2 )
+      Bi = LossBY
+    CASE DEFAULT
+      Bi = LossBZ
+    END SELECT
+  END FUNCTION LossComponent
 !------------------------------------------------------------------------------
 END SUBROUTINE ProcessFields
 !------------------------------------------------------------------------------
