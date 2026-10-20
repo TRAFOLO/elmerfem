@@ -584,7 +584,7 @@ CONTAINS
            IF (CoilBody) &
              CALL Fatal('WhitneyAVHarmonicSolver', &
                  'A layered laminate stack body cannot be a coil component!')
-           CALL GetLaminateLayeredParameters(Material, LamLayerThick, LamLayerCond, &
+           CALL GetLaminateLayeredParameters(Material, Element, LamLayerThick, LamLayerCond, &
                LamLayerFill, LamLayerNormal, LamLayerHasNormal)
          CASE DEFAULT
            CALL WARN('WhitneyAVHarmonicSolver', 'Nonexistent Laminate Stack Model chosen!')
@@ -699,8 +699,11 @@ CONTAINS
              MuParameter=GetConstReal( BC, 'Thin Sheet Relative Permeability', Found)
              IF (.NOT. Found) MuParameter = 1.0_dp ! if not found default to "air" property
              ! Technically, there is no skin but why create yet another conductivity variable?
-             SkinCond = GetConstReal( BC, 'Thin Sheet Electric Conductivity', Found)
-             IF (.NOT. Found) SkinCond = 1.0_dp ! if not found default to "air" property
+             ! (a lamination sheet reads its own below, per face)
+             IF (.NOT. LamSheet) THEN
+               SkinCond = GetConstReal( BC, 'Thin Sheet Electric Conductivity', Found)
+               IF (.NOT. Found) SkinCond = 1.0_dp ! if not found default to "air" property
+             END IF
              IF (LamSheet) THEN
                ! One insulated lamination of a 'layered' stack: the sheet on its
                ! mid-surface carries its net current. The stack body holds the
@@ -708,6 +711,10 @@ CONTAINS
                ! and the conductance factor compensates the part of the
                ! net-current impedance the body already holds.
                Omega = GetAngularFrequency(Found=Found)
+               CALL CheckLaminateSheetPartition(Element, Solver % Mesh)
+               ! the conductivity per face, as the body's per element (it may follow the temperature)
+               SkinCond(1:n) = LaminateElementMean(BC, 'Thin Sheet Electric Conductivity', Element, Found)
+               IF (.NOT. Found) SkinCond = 1.0_dp
                ! The factor holds for the same permeability in sheet and body: next
                ! to a body with an H-B curve the sheet takes the steel's reluctivity
                ! there (from the previous iterate) instead of its own permeability.

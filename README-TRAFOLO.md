@@ -314,7 +314,8 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   Electric Conductivity`, `Thin Sheet Relative Permeability` of the lamination), which gives the
   sheet the complex conductance sigma d sinh(kd)/(kd) and no magnetic term (`LaminateSheetFactor`):
   the body already holds i omega mu g d/4 of the net-current impedance, and with this factor the
-  impedance between the lamination faces is the exact x coth(x)/(sigma d). `CalcFields` uses the
+  impedance between the lamination faces is the exact x coth(x)/(sigma d) (floored for thick
+  laminations since the DEV-1606 lamination sheets, below). `CalcFields` uses the
   same tensor for H and the energy, adds the sheets' reactive part to the field energy and
   publishes `res: Laminate stack loss`: the Im(nu) loss of the bodies plus the sheet loss; only the
   sum is meaningful, the sheet part alone can be negative (d of about 3-5 skin depths). The loss is
@@ -366,7 +367,8 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   the sheet factor needs. In parallel the sheet must lie inside a partition: ElmerGrid keeps the two
   parents of a boundary face together by default, and a sheet that a partition interface cuts (with
   `-partnobcoptim`, for example) stops with a Fatal, as its parent across the interface is not at
-  hand there. With the fixed sheet permeability a saturated 8 um NiFe lamination at
+  hand there (every lamination sheet since the DEV-1606 lamination sheets, below). With the fixed
+  sheet permeability a saturated 8 um NiFe lamination at
   100 MHz turned active and the iteration did not converge; it now converges, linearly in deep
   saturation since the sheet's dependence on B is not in the Newton term. Maxwell stress has no
   magnetic part in layered bodies (scalar reluctivity 0, as before), and `Relative Permeability`
@@ -416,9 +418,9 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   hand side alike, so that a solver reading one triangle still converges to the law. A Fatal stops
   `Constant (Bulk) System`, `Adaptive Timestepping`, `Convergence Control`, a predictor-corrector
   AV solver, a timestepping method other than BDF of order 1 - 2 or implicit Euler,
-  `Electrodynamics Model` (second order in time), a second WhitneyAVSolver with layered bodies and
-  lamination sheets (`Thin Sheet Laminate Thickness`), whose net lamination currents only the
-  harmonic solver carries. The states start from the initial field as steady, also after a
+  `Electrodynamics Model` (second order in time) and a second WhitneyAVSolver with layered bodies
+  (and lamination sheets, until the DEV-1606 lamination sheets below). The states start from the
+  initial field as steady, also after a
   restart, whose files carry no ladder history, and in each new simulation of the same process (a
   `Run Control` sweep, a reloaded model, also when the AV solver first runs at a later step of it,
   a solver initialised again). A mesh swap during a run (`Mesh Name Index`, remeshing) initialises
@@ -484,7 +486,8 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   curve in two stacks: each energy from its own table), `mgdyn_laminate_layered_transient_spd`
   (MUMPS reading one triangle, deep saturation at stacking factor 0.5: the symmetric Newton term
   gives the norms of the full one with a general solver; with the full term MUMPS's residual check
-  stops the run), `mgdyn_laminate_layered_transient_sheet` (a lamination sheet: the Fatal),
+  stops the run), `mgdyn_laminate_layered_transient_sheet` (a lamination sheet: the Fatal; now the
+  transient sheet test of the DEV-1606 lamination sheets, below),
   `mgdyn_transient_loss_layered_gse` / `_igse` (the fields of `mgdyn_transient_loss_start_gse` /
   `_igse` in a stack of stacking factor 0.5, the iGSE one with tilted laminations so that the flux
   has normal and in-plane parts: the GSE loss, the iGSE base and bounds of B_s on the metal
@@ -495,6 +498,100 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   condition needs the scalar `AV {e}` entry for `SetInitialConditions` to read its components,
   the masked means of `SaveScalars` need `Parallel Reduce` on ranks without that body, and the
   `int` operator of `SaveScalars` skips elements of an elemental (`-elem`) field.
+- Lamination sheets for laminations of any thickness and in the transient A-V solver (DEV-1606,
+  second part), so that a core whose insulated laminations close around a conductor has one model in
+  both solvers. In the TRAFOLO tube case (a copper bar through square CoNiFe tubes, each insulated,
+  which carry currents circling around them of zero net value) the `layered` block alone is up to
+  8.8 % off in L and 12 % in R, the block with one lamination sheet per tube within 1 % (CORE
+  HOMOGENIZATION, research notes section 7g).
+  - Harmonic: `LaminateSheetFactor` floors the sheet's own share of the face impedance at 1e-5 of
+    the block's share, f = 1/(kd/sinh(kd) + 1e-5 (kd/2) tanh(kd/2)), with kd/sinh(kd) through
+    exp(-kd) above Re(kd) = 20 and tanh = 1 above Re(kd/2) = 20 (the complex SINH and TANH of
+    gfortran overflow to NaN). The impedance between the lamination faces stays within 1e-5
+    |tanh(x)|^2 (at most 1.3e-5, at 2.4 skin depths) of the exact x coth(x)/(sigma d) at any
+    thickness, and a lamination much thicker than the skin depth gives a near-perfect conductor
+    (sigma d times 2/(1e-5 kd)) instead of the Fatal above k d = 600. Thin laminations change by
+    1e-5 x tanh(x) of their face impedance (4.6e-5 of the sheet factor at 2.8 skin depths).
+  - Transient: `WhitneyAVSolver` assembles lamination sheets (before: a Fatal) as resistive sheets
+    of conductance sigma d, with the scalar potential of their nodes and no magnetic term as in the
+    harmonic solver, integrated with the solver's own time steps like the volume conductors (BDF of
+    order 1 or 2; implicit Euler, which the TRAFOLO app writes, is BDF1). With the block's share x
+    tanh(x) their face impedance is 1 + x tanh(x) for the exact x coth(x) (over sigma d): 2x^2/3
+    high at low and 1/x at high frequency. The sheet's own share of the exact impedance has poles of
+    both signs, so no passive ladder of its own carries it; the block's ladder carries the eddy
+    currents of zero net value. A steady solve leaves the sheets out (an insulated lamination
+    carries no current at DC). A Fatal stops lamination sheets in an eigen analysis, with BDF orders
+    above 2 or other methods, `Adaptive Timestepping`, `Convergence Control`, a predictor-corrector
+    solver, `Electrodynamics Model` and a `Timestep Scale` or `Timestep Over Intervals` on the AV
+    solver or `CalcFields` (the AV solver keeps a timestep of its own only during its solve).
+  - Loss: `CalcFields` evaluates the transient sheet loss with E = -(a1 A^{n+1} + a2 A^n + a3
+    A^{n-1})/dt - grad V, the BDF weights of the AV solver's step (`LaminateStepBDFWeights`, which
+    the DEV-1606 ladder now shares): the dissipation of the discrete equations, free of the gauge of
+    A. The first-order difference CalcFields takes for volume conductors is not (not changed here):
+    in the gauge-free MUMPS runs of the tube case it gave the copper 52 - 20000 times its loss by
+    the energy balance. A harmonic field takes the harmonic law, also in a transient simulation
+    (next to a transient heat solver). As in harmonic the sheet loss is in `res: Thin sheet current
+    power` and in `res: Laminate stack loss`, not in `res: Eddy current power`. Each sheet face's
+    loss also goes as one density into the `Proximity Loss` of its layered parent elements, from
+    which `ProcessFields` takes the heat load: in harmonic into the DG `Proximity Loss E` of
+    `CalcFields` (`Calculate Homogenization Loss`), whose integral is then the laminate stack loss,
+    in transient into the elemental `Proximity Loss` of the AV solver, on top of the element's
+    ladder loss. The nodal `Proximity Loss` of a harmonic run leaves the sheets out.
+  - Conductivity: `Laminate Stack Conductivity` and the sheets' `Thin Sheet Electric Conductivity`
+    are the means of their nodal values over each element and face (`LaminateElementMean`), so that
+    they may follow the temperature (`Variable Temperature`): the harmonic tensor, `CalcFields` and
+    the transient ladder (built at the start of each step) take the element's, the sheets the
+    face's. Constants give the same values to the last bit. `Laminate Stack Conductivity = 0` gives
+    the static stack tensor (an empty ladder); the sheets keep their own `Thin Sheet Electric
+    Conductivity` (0 there: no sheet current).
+  - Partitions: every lamination sheet that a partition interface cuts stops with a Fatal
+    (`CheckLaminateSheetPartition`), in both solvers; DEV-1604 stopped only next to layered H-B
+    bodies. ElmerGrid writes such a face to both partitions, each copy with its local parent, and
+    both were assembled in full: the DEV-1600 test model on 3 ranks with `-partnobcoptim` held 15 of
+    the 36 faces of one sheet twice, its sheet power 2.3 % off. ElmerGrid's default partitioning
+    (what TRAFOLO's `-metis N` uses) keeps the sheets inside partitions. A sheet face on the outer
+    boundary whose nodes all lie on a partition interface stops too: the partitioned mesh does not
+    tell it from a cut one.
+  - Validated on the tube case (`hfhomog/tube_sheets.py`, `studies/run_tube_sheets.py` in CORE
+    HOMOGENIZATION, results `results/trafolo_tube/tube_sheets_dev1606sheets_*.csv`). Harmonic,
+    default mesh, 50 Hz - 1 GHz: the floored law within 1.7e-5 of the plain law in R up to 10 MHz,
+    within 3.3e-5 of perfect-conductor sheets from 10 MHz to 1 GHz (100 MHz 1.65005 Ohm, 4.95708e-8
+    H), energy balance 1 to 2e-6; against the converged meshed tubes L +0.1 .. +1.0 % and R -0.5 ..
+    +0.1 % from 1 kHz to 100 MHz, R -2.2 % at 50 Hz. Transient against harmonic runs with the same
+    resistive sheets (one coarse mesh per frequency, the same uniform terminal current density, BDF2
+    with 200 steps per period, 3 ramp and 3 steady periods) at 50 Hz, 1, 5 and 20 kHz: R +0.02 ..
+    +0.08 %, L +0.01 .. +0.16 %, stack loss +0.02 .. +0.07 %, sheet loss -0.9 .. +0.07 %, settled to
+    0.005 %; the input power less the stack loss (sheets included) and the harmonic copper loss
+    leaves 1.6e-4 of it at 50 Hz and at most 3.3e-5 from 1 kHz. The resistive sheet is within 0.39 %
+    of the floored law in R, L and stack loss. A triangular current at 5 kHz (400 steps per period)
+    against the sum of harmonic runs at its odd harmonics up to the 15th: input power +0.04 %, stack
+    loss +0.04 %, sheet loss -0.27 %, residual 2.2e-5 of the input power. Implicit Euler, the
+    TRAFOLO app's time stepping, at 1, 5 and 20 kHz with 400 and 800 steps per period and its
+    first-order error extrapolated out: R and stack loss within 0.05 %, L within 0.15 %, the copper
+    loss within 0.1 % (with implicit Euler the first-order dA/dt of CalcFields is the solver's),
+    energy balance to 4e-5 of the input power. At 400 steps per period implicit Euler itself puts R
+    0.3 - 0.6 % high, L 0.2 - 0.5 % low and 0.3 - 0.9 % of the input power into numerical damping.
+    Limit: the transient sheet loss is 0.4 % (5 kHz) and 0.9 % (20 kHz) below the harmonic one with
+    the same sheets, in both time steppings, nearly independent of the ladder order and also with a
+    static block (`Laminate Stack Conductivity = 0`); both solvers' energy balances above close, so their
+    discrete solutions differ there, not the loss evaluation (the sheets carry 0.3 % of the input
+    power).
+  - Tests: `mgdyn_laminate_layered_harmonic_thick` (100 MHz, 746 skin depths: the norm of
+    perfect-conductor sheets to 7e-6; the Fatal before),
+    `mgdyn_laminate_layered_harmonic_sheet_heat` (the integral of `Proximity Loss E` is the stack
+    loss), `mgdyn_laminate_layered_harmonic_split_sheet` (the linear DEV-1600 model with sheets cut
+    by partitions: the Fatal), `mgdyn_laminate_layered_harmonic_temperature` /
+    `_transient_temperature` (conductivity following a temperature of 20 - 140 C; at 20 C everywhere
+    the constant's norms to the last digit), `mgdyn_laminate_layered_harmonic_sigma0` /
+    `_transient_sigma0`, `mgdyn_laminate_layered_transient_sheet` (implicit Euler as the TRAFOLO
+    app: the loss, the heat field and the terminal potential; also on 2 ranks with the same norms,
+    and BDF order 1 gives them too), `_transient_sheet_dt` (the variable-step BDF2 weights),
+    `_transient_sheet_restart` (the BDF1 step after a restart), `_transient_sheet_split` (the Fatal)
+    and `_transient_sheet_eigen` (the Fatal of an eigen analysis), all on one 616-element wedge of
+    the tube case. Each fails when its feature is broken (checked by breaking the BDF weights, the
+    implicit Euler weights, the step-size and start logic, the heat field and the sheet assembly in
+    turn). Models without lamination sheets give the same results to the last printed digit (six
+    transient, harmonic and thin-sheet tests compared).
 
 ## Building the distributed bundle
 
