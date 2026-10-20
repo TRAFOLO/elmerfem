@@ -28,7 +28,7 @@ SET(solverlib_SOURCES AddrFunc.F90 NavierStokes.F90 NavierStokesGeneral.F90
   IterativeMethods.F90 TimeIntegrate.F90 Types.F90 SolveBand.F90
   ElementUtils.F90 Radiation.F90 fft.c Load.c Differentials.F90
   FreeSurface.F90 
-  Walls.F90 SolverUtils.F90 SolveSBand.F90 CPUTime.c Interpolation.F90
+  Walls.F90 SolverUtils.F90 SolveSBand.F90 CPUTime.c GfortranLocale.c Interpolation.F90
   MainUtils.F90 Adaptive.F90 EigenSolve.F90 HashTable.F90 MortarUtils.F90
   MeshAllocations.F90 GeometryFitting.F90
   MeshUtils.F90 SaveUtils.F90 SParIterGlobals.F90 SParIterComm.F90

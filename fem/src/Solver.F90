@@ -47,6 +47,7 @@ PROGRAM Solver
    INTEGER :: iargc, nargs, arglen
    CHARACTER(:), ALLOCATABLE :: buf
    TYPE(ArgStr_t), ALLOCATABLE :: args(:)
+   INTEGER :: LocaleFix
 
    INTERFACE
      SUBROUTINE ElmerSolver(initialize, args, NoArgs)
@@ -56,7 +57,15 @@ PROGRAM Solver
        INTEGER, INTENT(IN) :: NoArgs
        TYPE(ArgStr_t), INTENT(IN) :: args(:)
      END SUBROUTINE ElmerSolver
+     ! TRAFOLO: libgfortran's formatted output on MinGW, see GfortranLocale.c
+     FUNCTION GfortranLocaleFix() RESULT(Status) BIND(C, NAME='elmer_gfortran_locale_fix')
+       USE, INTRINSIC :: ISO_C_BINDING, ONLY : C_INT
+       INTEGER(C_INT) :: Status
+     END FUNCTION GfortranLocaleFix
    END INTERFACE
+
+   ! before any formatted output; ElmerSolver reports the result
+   LocaleFix = GfortranLocaleFix()
 
    CALL envir( 'ELMERSOLVER_OUTPUT_TOTAL', toutput, tlen )
    Silent = toutput(1:1)=='0' .OR. toutput(1:5)=='false'

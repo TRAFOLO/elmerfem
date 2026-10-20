@@ -154,6 +154,19 @@
      REAL(KIND=dp), ALLOCATABLE :: rpar(:)
      CHARACTER(LEN=MAX_PATH_LEN) :: MeshDir, MeshName
 
+     ! TRAFOLO: libgfortran's formatted output on MinGW, see GfortranLocale.c
+     INTEGER :: LocaleFix
+     INTERFACE
+       FUNCTION GfortranLocaleFix() RESULT(Status) BIND(C, NAME='elmer_gfortran_locale_fix')
+         USE, INTRINSIC :: ISO_C_BINDING, ONLY : C_INT
+         INTEGER(C_INT) :: Status
+       END FUNCTION GfortranLocaleFix
+     END INTERFACE
+
+     ! TRAFOLO: before any formatted transfer here (ParallelInit, the arguments);
+     ! ElmerSolver(_mpi).exe installs it already as its first statement
+     LocaleFix = GfortranLocaleFix()
+
      ! Start the watches, store later
      !--------------------------------
      RT0 = RealTime()
@@ -295,6 +308,7 @@
 #ifdef HAVE_LUA
          CALL Info( 'MAIN', ' Lua interpreter linked in.' )
 #endif
+         IF (LocaleFix == 1) CALL Info( 'MAIN', ' libgfortran locale workaround installed.' )
 #ifdef HAVE_EXTOPTIM
          CALL Info( 'MAIN', ' External optimization routines linked in.' )
 #endif
@@ -312,6 +326,16 @@
 #endif
          CALL Info( 'MAIN', '=============================================================')
        END IF
+
+       ! TRAFOLO: also in silent mode, see GfortranLocale.c
+       SELECT CASE (LocaleFix)
+       CASE (2)
+         CALL Warn( 'MAIN', 'libgfortran locale workaround not installed: no import of '// &
+             'libgfortran resolves to setlocale (check the toolchain)' )
+       CASE (-1)
+         CALL Warn( 'MAIN', 'libgfortran locale workaround could not be installed: '// &
+             'formatted output may crash at random' )
+       END SELECT
 
        IF( Version ) RETURN
        
