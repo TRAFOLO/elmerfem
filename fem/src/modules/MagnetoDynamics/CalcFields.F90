@@ -692,7 +692,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    COMPLEX(KIND=dp) :: imag_value, Zs
    COMPLEX(KIND=dp), ALLOCATABLE :: Tcoef(:,:,:), Nu_el(:,:,:)
    COMPLEX(KIND=dp), POINTER, SAVE :: Reluct_Z(:,:,:) => NULL()
-   COMPLEX(KIND=dp) :: R_ip_Z, Nu(3,3)
+   COMPLEX(KIND=dp) :: R_ip_Z, Nu(3,3), NuPerm
    
    INTEGER, PARAMETER :: ind1(6) = [1,2,3,1,2,1]
    INTEGER, PARAMETER :: ind2(6) = [1,2,3,2,3,3]
@@ -2152,6 +2152,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
        
        Nu = CMPLX(0.0d0, 0.0d0, kind=dp)
+       R_ip_Z = CMPLX(0.0d0, 0.0d0, kind=dp)
        w_dens = 0._dp
        IF ( HasHBCurve .AND. LayeredLaminate ) THEN
          ! As in the harmonic solver: the curve is read at the flux density of the
@@ -2544,13 +2545,18 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
 
          IF ( ASSOCIATED(MPerm).OR.ASSOCIATED(EL_MPerm)) THEN
+           ! A layered laminate stack exports the permeability of its laminations, not of the
+           ! stack: a later solve may read it back as the material's permeability (TRAFOLO's
+           ! harmonics) and stack it again.
+           NuPerm = Nu(1,1)
+           IF (LayeredLaminate .AND. ABS(R_ip_Z) > 0.0_dp) NuPerm = R_ip_Z
            IF (Vdofs == 1) THEN
-              FORCE(p,k+1) = FORCE(p,k+1)+s*1_dp/Nu(1,1)/mu0*Basis(p)
+              FORCE(p,k+1) = FORCE(p,k+1)+s*1_dp/NuPerm/mu0*Basis(p)
               k = k+1
            ELSE
-              FORCE(p,k+1) = FORCE(p,k+1)+s*REAL(1_dp/Nu(1,1)/mu0)*Basis(p)
+              FORCE(p,k+1) = FORCE(p,k+1)+s*REAL(1_dp/NuPerm/mu0)*Basis(p)
               k = k+1
-              FORCE(p,k+1) = FORCE(p,k+1)+s*AIMAG(1_dp/Nu(1,1)/mu0) * Basis(p)
+              FORCE(p,k+1) = FORCE(p,k+1)+s*AIMAG(1_dp/NuPerm/mu0) * Basis(p)
               k = k+1
            END IF
          END IF
