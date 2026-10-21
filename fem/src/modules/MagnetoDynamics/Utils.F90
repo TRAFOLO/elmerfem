@@ -305,10 +305,15 @@ CONTAINS
 
 !------------------------------------------------------------------------------
 !> Conductance factor of the mid-surface sheet that carries the net current of
-!> one lamination inside a 'layered' stack body: sinh(k d)/(k d). The stack
-!> body already holds mu g over the lamination, which adds i omega mu g d/4 to
-!> the net-current impedance between the two faces; with this factor the face
-!> impedance is the exact one, x coth(x)/(sigma d). Low frequency limit 1.
+!> one lamination inside a 'layered' stack body. The stack body already holds
+!> x tanh(x)/(sigma d), x = k d/2, of the exact net-current impedance between
+!> the two faces, x coth(x)/(sigma d); the sheet's own share, k d/sinh(k d)
+!> over sigma d, vanishes as exp(-k d) in laminations thicker than the skin
+!> depth. Floored at SheetImpedanceFloor times the body's share,
+!>   f = 1 / ( k d/sinh(k d) + SheetImpedanceFloor x tanh(x) ),
+!> the face impedance stays within that fraction of the exact one, times
+!> |tanh(x)|^2 <= 1.31, at any thickness and the conductance finite. Low
+!> frequency limit 1.
 !------------------------------------------------------------------------------
   FUNCTION LaminateSheetFactor(Omega, Mu, Sigma, Thickness) RESULT(f)
 !------------------------------------------------------------------------------
@@ -317,18 +322,29 @@ CONTAINS
     COMPLEX(KIND=dp), INTENT(IN) :: Mu
     COMPLEX(KIND=dp) :: f
 !------------------------------------------------------------------------------
-    COMPLEX(KIND=dp) :: kd
-    ! below SeriesLimit sinh(kd)/kd is taken from its series; above OverflowLimit it is capped
-    REAL(KIND=dp), PARAMETER :: SeriesLimit = 1.0d-3, OverflowLimit = 600.0_dp
+    COMPLEX(KIND=dp) :: kd, kdsinh, th, e
+    ! below SeriesLimit f is taken from its series; above ExpLimit kd/sinh(kd) is
+    ! taken from exp(-kd) and tanh is 1 (the complex SINH and TANH overflow to NaN)
+    REAL(KIND=dp), PARAMETER :: SeriesLimit = 1.0d-3, ExpLimit = 20.0_dp, &
+        SheetImpedanceFloor = 1.0d-5
 !------------------------------------------------------------------------------
     kd = SQRT(im * Omega * Mu * Sigma) * Thickness
     IF (ABS(kd) < SeriesLimit) THEN
       f = 1.0_dp + kd**2 / 6
-    ELSE IF (REAL(kd) > OverflowLimit) THEN
-      CALL Fatal('LaminateSheetFactor', 'Lamination is too thick for its skin depth (k d > 600)!')
-    ELSE
-      f = SINH(kd) / kd
+      RETURN
     END IF
+    IF (REAL(kd) > ExpLimit) THEN
+      e = EXP(-kd)
+      kdsinh = 2 * kd * e / (1.0_dp - e**2)
+    ELSE
+      kdsinh = kd / SINH(kd)
+    END IF
+    IF (REAL(kd) / 2 > ExpLimit) THEN
+      th = 1.0_dp
+    ELSE
+      th = TANH(kd / 2)
+    END IF
+    f = 1.0_dp / (kdsinh + SheetImpedanceFloor * kd / 2 * th)
 !------------------------------------------------------------------------------
   END FUNCTION LaminateSheetFactor
 !------------------------------------------------------------------------------
@@ -366,16 +382,48 @@ CONTAINS
 
 
 !------------------------------------------------------------------------------
+!> Element mean of the nodal values of a keyword, so that a value following a
+!> field ('Variable Temperature') holds per element; equal nodal values (a
+!> constant) come back as they are.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateElementMean(List, Name, Element, Found) RESULT(Mean)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(ValueList_t), POINTER :: List
+    CHARACTER(*) :: Name
+    TYPE(Element_t), POINTER :: Element
+    LOGICAL :: Found
+    REAL(KIND=dp) :: Mean
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: Values(Element % TYPE % NumberOfNodes)
+    INTEGER :: n
+!------------------------------------------------------------------------------
+    n = GetElementNOFNodes(Element)
+    Values(1:n) = GetReal(List, Name, Found, UElement=Element)
+    IF (ALL(Values(1:n) == Values(1))) THEN
+      Mean = Values(1)
+    ELSE
+      Mean = SUM(Values(1:n)) / n
+    END IF
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateElementMean
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
 !> Reads the parameters of the 'layered' laminate stack model of a material:
 !> lamination thickness, lamination conductivity, stacking factor and the
 !> optional lamination normal. Without a normal the stack is treated as bent
-!> (a corner) and the in-plane reluctivity is used in every direction.
+!> (a corner) and the in-plane reluctivity is used in every direction. The
+!> conductivity is the mean over Element of its nodal values, so that it may
+!> follow the temperature.
 !------------------------------------------------------------------------------
-  SUBROUTINE GetLaminateLayeredParameters(Material, Thickness, Sigma, &
+  SUBROUTINE GetLaminateLayeredParameters(Material, Element, Thickness, Sigma, &
       StackingFactor, Normal, HasNormal, LadderOrder)
 !------------------------------------------------------------------------------
     IMPLICIT NONE
     TYPE(ValueList_t), POINTER :: Material
+    TYPE(Element_t), POINTER :: Element
     REAL(KIND=dp), INTENT(OUT) :: Thickness, Sigma, StackingFactor, Normal(3)
     LOGICAL, INTENT(OUT) :: HasNormal
     ! poles of the transient eddy current ladder
@@ -388,7 +436,7 @@ CONTAINS
     Thickness = GetConstReal(Material, 'Laminate Thickness', Found)
     IF (.NOT. Found .OR. Thickness <= 0.0_dp) &
         CALL Fatal(Caller, 'Give a positive > Laminate Thickness < for the layered model!')
-    Sigma = GetConstReal(Material, 'Laminate Stack Conductivity', Found)
+    Sigma = LaminateElementMean(Material, 'Laminate Stack Conductivity', Element, Found)
     IF (.NOT. Found .OR. Sigma < 0.0_dp) &
         CALL Fatal(Caller, 'Give > Laminate Stack Conductivity < for the layered model!')
     StackingFactor = GetConstReal(Material, 'Laminate Stacking Factor', Found)
@@ -565,19 +613,8 @@ CONTAINS
     NuSum = 0.0_dp
     Volume = 0.0_dp
     IF (.NOT. ASSOCIATED(Face % BoundaryInfo)) RETURN
-    ! In parallel a face on a partition interface keeps only its local parent
-    ! (ElmerGrid drops the other one without a halo): the average would differ
-    ! from the serial one, or fall back to the sheet's own permeability.
-    IF (ParEnv % PEs > 1) THEN
-      IF (.NOT. (ASSOCIATED(Face % BoundaryInfo % Left) .AND. &
-          ASSOCIATED(Face % BoundaryInfo % Right))) THEN
-        IF (FaceOnPartitionInterface() .AND. AnyLayeredCurve()) CALL Fatal( &
-            'LaminateSheetSteelReluctivity', 'A lamination sheet lies on a partition '// &
-            'interface in a model with layered H-B bodies, where its parent across the '// &
-            'interface is not at hand: partition the mesh so that the sheets lie inside '// &
-            'partitions!')
-      END IF
-    END IF
+    ! both parents are at hand: the solvers stop on a sheet that a partition
+    ! interface cuts (CheckLaminateSheetPartition)
     DO side = 1, 2
       IF (side == 1) Parent => Face % BoundaryInfo % Left
       IF (side == 2) Parent => Face % BoundaryInfo % Right
@@ -586,7 +623,7 @@ CONTAINS
       IF (.NOT. GotMaterial) CYCLE
       IF (.NOT. ListCheckPresent(Material, 'H-B Curve')) CYCLE
       IF (GetString(Material, 'Laminate Stack Model', Stat) /= 'layered') CYCLE
-      CALL GetLaminateLayeredParameters(Material, Thickness, Sigma, Fill, Normal, HasNormal)
+      CALL GetLaminateLayeredParameters(Material, Parent, Thickness, Sigma, Fill, Normal, HasNormal)
 
       n = GetElementNOFNodes(Parent)
       nd = GetElementNOFDOFs(Parent, PSolver)
@@ -611,31 +648,112 @@ CONTAINS
       Found = .TRUE.
       NuSteel = NuSum / Volume
     END IF
-
-  CONTAINS
-
-    ! all nodes of the face are shared with another partition
-    LOGICAL FUNCTION FaceOnPartitionInterface() RESULT(OnInterface)
-      TYPE(Mesh_t), POINTER :: Mesh
-      OnInterface = .FALSE.
-      Mesh => PSolver % Mesh
-      IF (.NOT. ASSOCIATED(Mesh % ParallelInfo % GInterface)) RETURN
-      OnInterface = ALL(Mesh % ParallelInfo % GInterface(Face % NodeIndexes))
-    END FUNCTION FaceOnPartitionInterface
-
-    ! a 'layered' material with an H-B curve somewhere in the model
-    LOGICAL FUNCTION AnyLayeredCurve() RESULT(HasCurve)
-      INTEGER :: k
-      LOGICAL :: GotIt
-      HasCurve = .FALSE.
-      DO k = 1, CurrentModel % NumberOfMaterials
-        IF (ListGetString(CurrentModel % Materials(k) % Values, 'Laminate Stack Model', &
-            GotIt) /= 'layered') CYCLE
-        IF (ListCheckPresent(CurrentModel % Materials(k) % Values, 'H-B Curve')) HasCurve = .TRUE.
-      END DO
-    END FUNCTION AnyLayeredCurve
 !------------------------------------------------------------------------------
   END FUNCTION LaminateSheetSteelReluctivity
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Stop on a lamination sheet face that a partition interface cuts. ElmerGrid
+!> keeps the two parents of a boundary face in one partition by default; a face
+!> whose parents it puts in two partitions (-partnobcoptim, for example) it
+!> writes to both, each copy with its local parent only (without a halo), and
+!> both copies would be assembled in full: the sheet would count twice there.
+!> A sheet face on the outer boundary (one parent) whose nodes all lie on a
+!> partition interface looks the same in the partitioned mesh and stops too.
+!------------------------------------------------------------------------------
+  SUBROUTINE CheckLaminateSheetPartition(Face, Mesh)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Face
+    TYPE(Mesh_t), POINTER :: Mesh
+!------------------------------------------------------------------------------
+    IF (ParEnv % PEs <= 1) RETURN
+    IF (.NOT. ASSOCIATED(Face % BoundaryInfo)) RETURN
+    IF (ASSOCIATED(Face % BoundaryInfo % Left) .AND. &
+        ASSOCIATED(Face % BoundaryInfo % Right)) RETURN
+    IF (.NOT. ASSOCIATED(Mesh % ParallelInfo % GInterface)) RETURN
+    IF (.NOT. ALL(Mesh % ParallelInfo % GInterface(Face % NodeIndexes))) RETURN
+    CALL Fatal('CheckLaminateSheetPartition', 'A lamination sheet lies on a partition '// &
+        'interface, where the mesh partitioning holds the sheet twice: partition the mesh '// &
+        'so that the sheets lie inside partitions (ElmerGrid does by default), also the '// &
+        'sheets on the outer boundary!')
+!------------------------------------------------------------------------------
+  END SUBROUTINE CheckLaminateSheetPartition
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> BDF order of the time stepping of a transient A-V solver for the laminate
+!> stack models: the BDF order, 1 for implicit Euler, 0 for other methods.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateTimeOrder(Solver) RESULT(Order)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Solver_t) :: Solver
+    INTEGER :: Order
+!------------------------------------------------------------------------------
+    LOGICAL :: Found
+!------------------------------------------------------------------------------
+    ! Solver % Order may keep a BDF order of a reload
+    SELECT CASE (ListGetString(Solver % Values, 'Timestepping Method', Found))
+    CASE ('bdf')
+      Order = Solver % Order
+    CASE ('implicit euler')
+      Order = 1
+    CASE DEFAULT
+      Order = 0
+    END SELECT
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateTimeOrder
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> True when a solver steps with a timestep of its own ('Timestep Scale',
+!> 'Timestep Over Intervals'): it keeps it only during its solve.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateScaledTimestep(Solver) RESULT(Scaled)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Solver_t) :: Solver
+    LOGICAL :: Scaled
+!------------------------------------------------------------------------------
+    LOGICAL :: Found, OverIntervals
+    REAL(KIND=dp) :: Scale
+!------------------------------------------------------------------------------
+    Scale = ListGetConstReal(Solver % Values, 'Timestep Scale', Found)
+    OverIntervals = ListGetLogical(Solver % Values, 'Timestep Over Intervals', Found)
+    Scaled = (Scale /= 0.0_dp .AND. Scale /= 1.0_dp) .OR. OverIntervals
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateScaledTimestep
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> BDF weights of the timestep of a transient A-V solver as its global time
+!> integration takes them (Add1stOrderTime_CRS: first order at its first step,
+!> the previous step size from 'Timestep size'),
+!>   x'(t^{n+1}) ~ ( a(1) x^{n+1} + a(2) x^n + a(3) x^{n-1} ) / dt.
+!------------------------------------------------------------------------------
+  FUNCTION LaminateStepBDFWeights(Solver, dt) RESULT(a)
+!------------------------------------------------------------------------------
+    USE CircuitUtils, ONLY : LadderBDFWeights
+    IMPLICIT NONE
+    TYPE(Solver_t) :: Solver
+    REAL(KIND=dp) :: dt, a(3)
+!------------------------------------------------------------------------------
+    TYPE(Variable_t), POINTER :: DtVar
+    REAL(KIND=dp) :: dtp
+!------------------------------------------------------------------------------
+    dtp = dt
+    DtVar => VariableGet(Solver % Mesh % Variables, 'Timestep size')
+    IF (ASSOCIATED(DtVar)) THEN
+      IF (ASSOCIATED(DtVar % PrevValues)) dtp = DtVar % PrevValues(1,1)
+    END IF
+    a = LadderBDFWeights(MIN(Solver % DoneTime, LaminateTimeOrder(Solver)), dt, dtp)
+!------------------------------------------------------------------------------
+  END FUNCTION LaminateStepBDFWeights
 !------------------------------------------------------------------------------
 
 

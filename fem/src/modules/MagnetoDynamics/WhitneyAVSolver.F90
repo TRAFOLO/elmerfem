@@ -325,12 +325,6 @@ SUBROUTINE WhitneyAVSolver_Init(Model,Solver,dt,Transient)
   ! needs all three. Each direction gets the largest ladder order of the sheets
   ! using it; a sheet of lower order uses the first dofs of its elements.
   IF (Transient) THEN
-    ! The lamination sheets of a 'layered' stack carry the net lamination
-    ! currents in the harmonic solver only: here they would be left out of the
-    ! equations, while CalcFields still reported them.
-    IF (ListCheckPresentAnyBC(Model, 'Thin Sheet Laminate Thickness')) CALL Fatal( &
-        'WhitneyAVSolver_Init', 'Lamination sheets ("Thin Sheet Laminate Thickness") '// &
-        'are available in the harmonic solver only!')
     BLOCK
       TYPE(ValueList_t), POINTER :: CPar
       INTEGER :: ic, nlad, slot, dStack, dPlane(2), d, nXi(3)
@@ -1218,19 +1212,10 @@ CONTAINS
     CALL LaminateNuFoster(tau0, LamLayerFill, mur, mu0, LamLayerOrder, .TRUE., Kappa, &
         r(1:LamLayerOrder), Tk(1:LamLayerOrder))
 
-    ! The BDF weights of the field itself (Add1stOrderTime_CRS: first order at the
-    ! first step only), so that the ladder integrates in step with dB/dt: with
-    ! F = 1 at order 1 the model is the low-frequency model at every step.
-    BLOCK
-      TYPE(Variable_t), POINTER :: DtVar
-      REAL(KIND=dp) :: dtp
-      dtp = dt
-      DtVar => VariableGet(Solver % Mesh % Variables, 'Timestep size')
-      IF (ASSOCIATED(DtVar)) THEN
-        IF (ASSOCIATED(DtVar % PrevValues)) dtp = DtVar % PrevValues(1,1)
-      END IF
-      LamBdf = LadderBDFWeights(MIN(Solver % DoneTime, LamTimeOrder), dt, dtp)
-    END BLOCK
+    ! The BDF weights of the field itself, so that the ladder integrates in step
+    ! with dB/dt: with F = 1 at order 1 the model is the low-frequency model at
+    ! every step.
+    LamBdf = LaminateStepBDFWeights(Solver, dt)
     LamDt = dt
     NuDyn = Kappa * LamBdf(1) / dt
     Hist = 0.0_dp
@@ -1270,6 +1255,9 @@ CONTAINS
    REAL(KIND=dp)::TOL,Norm,PrevNorm, NonLinError, LinTol, RelTol, BaseTol
    LOGICAL :: Found, FoundMagnetization, CalculateNonlinearResidual, LFactFound
    LOGICAL :: AdaptiveTols, FoundAny, ConstraintActive, GotCoil
+   ! a lamination sheet of a 'layered' stack (Thin Sheet Laminate Thickness)
+   LOGICAL :: LamSheet, LamSheetChecked
+   REAL(KIND=dp) :: SheetLamThick, SheetCond
 
    TYPE(Matrix_t), POINTER :: MMatrix
    REAL(KIND=dp), POINTER :: Mx(:), Mb(:), Mr(:)
@@ -1605,15 +1593,8 @@ CONTAINS
                'A transient layered laminate stack supports neither "Adaptive Timestepping", '// &
                '"Convergence Control" nor a predictor-corrector solver!')
            ! its ladder integrates with the field's BDF weights, of order 1 or 2;
-           ! implicit Euler is BDF1 (Solver % Order may keep a BDF order of a reload)
-           SELECT CASE (ListGetString(SolverParams, 'Timestepping Method', Found))
-           CASE ('bdf')
-             LamTimeOrder = Solver % Order
-           CASE ('implicit euler')
-             LamTimeOrder = 1
-           CASE DEFAULT
-             LamTimeOrder = 0
-           END SELECT
+           ! implicit Euler is BDF1
+           LamTimeOrder = LaminateTimeOrder(Solver)
            IF (LamTimeOrder < 1 .OR. LamTimeOrder > 2) CALL Fatal(Caller, &
                'A transient layered laminate stack needs "Timestepping Method" '// &
                '= BDF of order 1 or 2, or Implicit Euler!')
@@ -1622,7 +1603,7 @@ CONTAINS
                'A transient layered laminate stack needs a first order time derivative: '// &
                'it does not support "Electrodynamics Model"!')
          END IF
-         CALL GetLaminateLayeredParameters(Material, LamLayerThick, LamLayerCond, &
+         CALL GetLaminateLayeredParameters(Material, Element, LamLayerThick, LamLayerCond, &
              LamLayerFill, LamLayerNormal, LamLayerHasNormal, LamLayerOrder)
          LamLayered = .TRUE.
          IF (Transient) CALL LaminateElementLadder(Element, n, nd+nb)
@@ -1729,6 +1710,7 @@ CONTAINS
   !
   ! Robin type of BC in terms of H:
   !--------------------------------
+  LamSheetChecked = .FALSE.
   Active = GetNOFBoundaryElements()
   DO t=1,Active
      Element => GetBoundaryElement(t)
@@ -1792,6 +1774,31 @@ CONTAINS
        CYCLE
      END IF
  
+     ! A lamination sheet of a 'layered' stack carries the net current of its
+     ! lamination, as in the harmonic solver; a steady solve leaves it out (an
+     ! insulated lamination carries no current at DC).
+     IF (EigenSystem) THEN
+       IF (ListCheckPresent(BC, 'Thin Sheet Laminate Thickness')) CALL Fatal(Caller, &
+           'Lamination sheets ("Thin Sheet Laminate Thickness") are not supported in an '// &
+           'eigen analysis!')
+     END IF
+     IF (Transient) THEN
+       SheetLamThick = GetConstReal(BC, 'Thin Sheet Laminate Thickness', LamSheet)
+       IF (LamSheet) THEN
+         IF (.NOT. LamSheetChecked) CALL CheckLaminationSheetTimestepping()
+         LamSheetChecked = .TRUE.
+         CALL CheckLaminateSheetPartition(Element, Mesh)
+         ! per face, as the body's conductivity per element (it may follow the temperature)
+         SheetCond = LaminateElementMean(BC, 'Thin Sheet Electric Conductivity', Element, Found)
+         IF (.NOT. Found) SheetCond = 1.0_dp ! as the harmonic solver and CalcFields
+         CALL LocalMatrixLaminationSheet(MASS, STIFF, FORCE, SheetLamThick, SheetCond, &
+             Element, n, nd)
+         CALL DefaultUpdateEquations(STIFF, FORCE, Element)
+         CALL DefaultUpdateMass(MASS, Element)
+         CYCLE
+       END IF
+     END IF
+
      !If air gap length keyword is detected, use air gap boundary condition
      GapLength=GetConstReal( BC, 'Air Gap Length', Found)
      IF (Found) THEN
@@ -3829,6 +3836,107 @@ END SUBROUTINE LocalConstraintMatrix
   END SUBROUTINE LocalMatrixThinLine
 !------------------------------------------------------------------------------
 
+
+!------------------------------------------------------------------------------
+!> A lamination sheet of a 'layered' stack in transient: the conductance sigma d
+!> of the lamination on the mesh face, with the scalar potential of the face's
+!> nodes, and no magnetic term, as in the harmonic solver. The stack body holds
+!> the lamination's magnetic energy and, in its eddy current ladder, the
+!> currents of zero net value; the sheet carries the net current. Its
+!> conductance is the low-frequency one: with the body's share x tanh(x) the
+!> face impedance is 1 + x tanh(x) over sigma d for the exact x coth(x), off by
+!> 2x^2/3 at low and 1/x at high frequency. (The sheet's own share of the exact
+!> impedance has poles of both signs, so no passive ladder of its own carries
+!> it.) The mass terms take the solver's BDF steps, as the volume conductors.
+!------------------------------------------------------------------------------
+  SUBROUTINE LocalMatrixLaminationSheet(MASS, STIFF, FORCE, Thickness, Conductivity, &
+      Element, n, nd)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    REAL(KIND=dp) :: MASS(:,:), STIFF(:,:), FORCE(:)
+    REAL(KIND=dp) :: Thickness, Conductivity
+    TYPE(Element_t), POINTER :: Element
+    INTEGER :: n, nd
+!------------------------------------------------------------------------------
+    REAL(KIND=dp) :: Basis(n), dBasisdx(n,3), DetJ, WBasis(nd,3), RotWBasis(nd,3), wt
+    LOGICAL :: Stat
+    TYPE(GaussIntegrationPoints_t) :: IP
+    INTEGER :: t, i, j, np, p, q, EdgeBasisDegree
+    TYPE(Nodes_t), SAVE :: Nodes
+!------------------------------------------------------------------------------
+    CALL GetElementNodes(Nodes, Element)
+
+    EdgeBasisDegree = 1
+    IF (SecondOrder) EdgeBasisDegree = 2
+
+    MASS = 0.0_dp
+    STIFF = 0.0_dp
+    FORCE = 0.0_dp
+
+    ! the rule and edge basis of the harmonic sheet assembly
+    IP = GaussPoints(Element, EdgeBasis=.TRUE., PReferenceElement=PiolaVersion, &
+        EdgeBasisDegree=EdgeBasisDegree)
+
+    np = n*MAXVAL(Solver % Def_Dofs(GetElementFamily(Element),:,1))
+    DO t=1,IP % n
+      stat = ElementInfo(Element, Nodes, IP % U(t), IP % V(t), IP % W(t), detJ, Basis, &
+          dBasisdx, EdgeBasis = WBasis, RotBasis = RotWBasis, USolver = pSolver)
+      wt = Thickness * Conductivity * detJ * IP % s(t)
+
+      ! -div_s(sigma d (dA/dt + grad V)) = 0 on the sheet
+      DO p=1,np
+        DO q=1,np
+          STIFF(p,q) = STIFF(p,q) + wt * SUM(dBasisdx(q,:) * dBasisdx(p,:))
+        END DO
+        DO j=1,nd-np
+          q = j+np
+          MASS(p,q) = MASS(p,q) + wt * SUM(WBasis(j,:) * dBasisdx(p,:))
+          ! its current in the equation of A
+          STIFF(q,p) = STIFF(q,p) + wt * SUM(dBasisdx(p,:) * WBasis(j,:))
+        END DO
+      END DO
+
+      DO i=1,nd-np
+        p = i+np
+        DO j=1,nd-np
+          q = j+np
+          MASS(p,q) = MASS(p,q) + wt * SUM(WBasis(i,:) * WBasis(j,:))
+        END DO
+      END DO
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE LocalMatrixLaminationSheet
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
+!> Lamination sheets in transient take the solver's own BDF steps, and
+!> CalcFields reports their loss with the weights of those steps
+!> (LaminateStepBDFWeights): stop on time stepping it does not follow.
+!------------------------------------------------------------------------------
+  SUBROUTINE CheckLaminationSheetTimestepping()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    LOGICAL :: GotIt
+!------------------------------------------------------------------------------
+    ! a predictor-corrector solver advances its step count twice a timestep
+    IF (ListGetLogical(Model % Simulation, 'Adaptive Timestepping', GotIt) .OR. &
+        ListGetLogical(Model % Simulation, 'Convergence Control', GotIt) .OR. &
+        Solver % SolverExecWhen == SOLVER_EXEC_PREDCORR) CALL Fatal(Caller, &
+        'Transient lamination sheets support neither "Adaptive Timestepping", '// &
+        '"Convergence Control" nor a predictor-corrector solver!')
+    IF (LaminateTimeOrder(Solver) < 1 .OR. LaminateTimeOrder(Solver) > 2) CALL Fatal(Caller, &
+        'Transient lamination sheets need "Timestepping Method" = BDF of order 1 or 2, '// &
+        'or Implicit Euler!')
+    IF (Solver % TimeOrder /= 1) CALL Fatal(Caller, 'Transient lamination sheets need a '// &
+        'first order time derivative: they do not support "Electrodynamics Model"!')
+    ! CalcFields evaluates the sheet loss with the timestep of the simulation
+    IF (LaminateScaledTimestep(Solver)) CALL Fatal(Caller, 'Transient lamination sheets '// &
+        'support neither "Timestep Scale" nor "Timestep Over Intervals" on the AV solver!')
+!------------------------------------------------------------------------------
+  END SUBROUTINE CheckLaminationSheetTimestepping
+!------------------------------------------------------------------------------
+
  
 !------------------------------------------------------------------------------
   SUBROUTINE DirichletAfromB()
@@ -4533,7 +4641,7 @@ END SUBROUTINE LocalConstraintMatrix
       Mat => GetMaterial(El)
       IF (.NOT. ASSOCIATED(Mat)) CYCLE
       IF (GetString(Mat, 'Laminate Stack Model', GotIt) /= 'layered') CYCLE
-      CALL GetLaminateLayeredParameters(Mat, Thick, Sigma, Fill, Normal, HasNormal, nlad)
+      CALL GetLaminateLayeredParameters(Mat, El, Thick, Sigma, Fill, Normal, HasNormal, nlad)
       nel = GetElementNOFNodes(El)
       ndel = GetElementNOFDOFs(El)
       CALL LaminateSlots(El, xoff, loff, nmax)

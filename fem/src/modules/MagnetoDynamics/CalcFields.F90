@@ -646,6 +646,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
        LamPoleR(MaxHomogLadderOrder), LamPoleT(MaxHomogLadderOrder), LamXi(3,MaxHomogLadderOrder)
    TYPE(Variable_t), POINTER :: LamXiVar, LamLadVar
    REAL(KIND=dp) :: SheetLamThick, SheetMu, SheetImagCond, LamSheetEnergy, SheetNu, SheetMuAbs
+   ! BDF weights of the potential's timestep and its solution two steps back, for
+   ! the loss of transient lamination sheets
+   REAL(KIND=dp) :: SheetBdf(3)
+   LOGICAL :: RealTransient
+   REAL(KIND=dp), ALLOCATABLE :: PPSOL(:)
+   ! the loss density lamination sheets add to the 'Proximity Loss' of their layered
+   ! parents (per bulk element), the loss of the face at hand, and the power so placed
+   REAL(KIND=dp), ALLOCATABLE :: SheetHeat(:)
+   REAL(KIND=dp) :: SheetFaceLoss, SheetHeatPower
+   TYPE(Variable_t), POINTER :: SheetHeatVar
    LOGICAL :: SheetFollowsCurve
    COMPLEX(KIND=dp) :: SheetFactor
    INTEGER :: SheetPowerSeen     ! 1 where a transient foil sheet contributed to it
@@ -682,7 +692,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
    COMPLEX(KIND=dp) :: imag_value, Zs
    COMPLEX(KIND=dp), ALLOCATABLE :: Tcoef(:,:,:), Nu_el(:,:,:)
    COMPLEX(KIND=dp), POINTER, SAVE :: Reluct_Z(:,:,:) => NULL()
-   COMPLEX(KIND=dp) :: R_ip_Z, Nu(3,3)
+   COMPLEX(KIND=dp) :: R_ip_Z, Nu(3,3), NuPerm
    
    INTEGER, PARAMETER :: ind1(6) = [1,2,3,1,2,1]
    INTEGER, PARAMETER :: ind2(6) = [1,2,3,2,3,3]
@@ -1604,7 +1614,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
      IF ( dim == 3 .AND. .NOT. ( CoilBody .OR. &
          HasReluctivityFunction .OR. HasTensorReluctivity ) ) THEN
        LayeredLaminate = ( GetString(Material, 'Laminate Stack Model', Found) == 'layered' )
-       IF (LayeredLaminate) CALL GetLaminateLayeredParameters(Material, LamLayerThick, &
+       IF (LayeredLaminate) CALL GetLaminateLayeredParameters(Material, Element, LamLayerThick, &
            LamLayerCond, LamLayerFill, LamLayerNormal, LamLayerHasNormal)
      END IF
      LamOmega = Omega
@@ -2142,6 +2152,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
        
        Nu = CMPLX(0.0d0, 0.0d0, kind=dp)
+       R_ip_Z = CMPLX(0.0d0, 0.0d0, kind=dp)
        w_dens = 0._dp
        IF ( HasHBCurve .AND. LayeredLaminate ) THEN
          ! As in the harmonic solver: the curve is read at the flux density of the
@@ -2534,13 +2545,18 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
 
          IF ( ASSOCIATED(MPerm).OR.ASSOCIATED(EL_MPerm)) THEN
+           ! A layered laminate stack exports the permeability of its laminations, not of the
+           ! stack: a later solve may read it back as the material's permeability (TRAFOLO's
+           ! harmonics) and stack it again.
+           NuPerm = Nu(1,1)
+           IF (LayeredLaminate .AND. ABS(R_ip_Z) > 0.0_dp) NuPerm = R_ip_Z
            IF (Vdofs == 1) THEN
-              FORCE(p,k+1) = FORCE(p,k+1)+s*1_dp/Nu(1,1)/mu0*Basis(p)
+              FORCE(p,k+1) = FORCE(p,k+1)+s*1_dp/NuPerm/mu0*Basis(p)
               k = k+1
            ELSE
-              FORCE(p,k+1) = FORCE(p,k+1)+s*REAL(1_dp/Nu(1,1)/mu0)*Basis(p)
+              FORCE(p,k+1) = FORCE(p,k+1)+s*REAL(1_dp/NuPerm/mu0)*Basis(p)
               k = k+1
-              FORCE(p,k+1) = FORCE(p,k+1)+s*AIMAG(1_dp/Nu(1,1)/mu0) * Basis(p)
+              FORCE(p,k+1) = FORCE(p,k+1)+s*AIMAG(1_dp/NuPerm/mu0) * Basis(p)
               k = k+1
            END IF
          END IF
@@ -3677,6 +3693,40 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
   IF(Found) THEN
     ALLOCATE(SheetThickness(n), ThinLineCond(n))
     Power = 0.0_dp
+    ! A lamination sheet of a real transient field dissipates sigma d |E|^2 with the
+    ! E of the AV solver's own BDF step (the derivative of the gauge part of A
+    ! cancels in it); a harmonic field takes the harmonic law, also in a transient
+    ! simulation. The AV solver keeps a timestep of its own only during its solve,
+    ! so both have to step with the one of the simulation.
+    RealTransient = Transient .AND. vDOFS == 1
+    IF (RealTransient .AND. ListCheckPresentAnyBC(Model,'Thin Sheet Laminate Thickness')) THEN
+      IF (LaminateScaledTimestep(Solver) .OR. LaminateScaledTimestep(pSolver)) CALL Fatal( &
+          'MagnetoDynamicsCalcFields', 'Transient lamination sheets support neither '// &
+          '"Timestep Scale" nor "Timestep Over Intervals", here or on the AV solver!')
+      SheetBdf = LaminateStepBDFWeights(pSolver, dt)
+      IF (.NOT. ALLOCATED(PPSOL)) ALLOCATE(PPSOL(SIZE(PSOL)))
+    END IF
+    ! The loss of a lamination sheet goes as a uniform density into the 'Proximity
+    ! Loss' of its layered parent elements, from which ProcessFields takes the heat
+    ! load: the DG field of this solver in harmonic, the elemental one of the AV
+    ! solver in transient.
+    SheetHeatVar => NULL()
+    SheetHeatPower = 0.0_dp
+    IF (ListCheckPresentAnyBC(Model,'Thin Sheet Laminate Thickness')) THEN
+      IF (RealTransient) THEN
+        SheetHeatVar => VariableGet(Mesh % Variables, 'Proximity Loss', ThisOnly = .TRUE.)
+        IF (ASSOCIATED(SheetHeatVar)) THEN
+          IF (SheetHeatVar % TYPE /= Variable_on_elements .OR. SheetHeatVar % DOFs /= 1) &
+              SheetHeatVar => NULL()
+        END IF
+      ELSE IF (vDOFS == 2) THEN
+        SheetHeatVar => EL_PL
+      END IF
+    END IF
+    IF (ASSOCIATED(SheetHeatVar)) THEN
+      ALLOCATE(SheetHeat(Mesh % NumberOfBulkElements))
+      SheetHeat = 0.0_dp
+    END IF
     DO i=1,GetNOFBoundaryElements()
       Element => GetBoundaryElement(i)
       BC => GetBC()
@@ -3686,16 +3736,19 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
       SheetLamThick = GetCReal( BC, 'Thin Sheet Laminate Thickness', LamSheet)
       IF (Found .OR. LamSheet) THEN
         ! Technically, there is no skin but why create yet another conductivity variable?
-        ThinLineCond = GetConstReal(BC, 'Thin Sheet Electric Conductivity', Found)
-        IF (.NOT. Found) ThinLineCond = 1.0_dp ! if not found default to "air" property
+        ! (a lamination sheet reads its own below, per face)
+        IF (.NOT. LamSheet) THEN
+          ThinLineCond = GetConstReal(BC, 'Thin Sheet Electric Conductivity', Found)
+          IF (.NOT. Found) ThinLineCond = 1.0_dp ! if not found default to "air" property
+        END IF
         SheetImagCond = 0.0_dp
         IF (LamSheet) THEN
           ! a lamination sheet of a 'layered' stack: its complex conductance follows below,
-          ! on the mesh face, as in the solver
+          ! on the mesh face, as in the solver; for a real transient field it is sigma d
           SheetMu = GetCReal(BC, 'Thin Sheet Relative Permeability', Found)
           IF (.NOT. Found) SheetMu = 1.0_dp
           SheetThickness = SheetLamThick
-          Omega = GetAngularFrequency(pSolver % Values, Found)
+          IF (vDOFS == 2) Omega = GetAngularFrequency(pSolver % Values, Found)
         END IF
       ELSE
         CYCLE
@@ -3717,6 +3770,12 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
       Model % CurrentElement => Element
 
       IF (LamSheet) THEN
+        ! the conductivity per face, as in the solvers
+        ThinLineCond = LaminateElementMean(BC, 'Thin Sheet Electric Conductivity', Element, Found)
+        IF (.NOT. Found) ThinLineCond = 1.0_dp
+      END IF
+
+      IF (LamSheet .AND. vDOFS == 2) THEN
         ! the same permeability as the solver: the steel's next to a body with an H-B curve
         SheetNu = LaminateSheetSteelReluctivity(Element, pSolver, PiolaVersion, EdgeBasisDegree, &
             SheetFollowsCurve)
@@ -3740,7 +3799,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
       CALL GetLocalSolution(SOL, Pname, uElement=Element, uSolver=pSolver)
       IF (Transient) THEN
         CALL GetLocalSolution(PSOL,Pname,uSolver=pSolver,Tstep=-1)
-        PSOL(1:nd)=(SOL(1,1:nd)-PSOL(1:nd))/dt
+        IF (LamSheet .AND. vDOFS == 1) THEN
+          PSOL(1:nd) = SheetBdf(1) * SOL(1,1:nd) + SheetBdf(2) * PSOL(1:nd)
+          IF (SheetBdf(3) /= 0.0_dp) THEN
+            CALL GetLocalSolution(PPSOL,Pname,uSolver=pSolver,Tstep=-2)
+            PSOL(1:nd) = PSOL(1:nd) + SheetBdf(3) * PPSOL(1:nd)
+          END IF
+          PSOL(1:nd) = PSOL(1:nd) / dt
+        ELSE
+          PSOL(1:nd)=(SOL(1,1:nd)-PSOL(1:nd))/dt
+        END IF
       END IF
 
       ! Numerical integration:
@@ -3752,6 +3820,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
 
       np = n*MAXVAL(pSolver % Def_Dofs(GetElementFamily(Element),:,1))
 
+      SheetFaceLoss = 0.0_dp
       DO j=1,IP % n
          stat = ElementInfo( Element, Nodes, IP % U(j), IP % V(j), &
               IP % W(j), detJ, Basis, dBasisdx, EdgeBasis = WBasis, RotBasis = RotWBasis, &
@@ -3789,6 +3858,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          Power = Power + Coeff
          IF (LamSheet) THEN
            LamSheetPower = LamSheetPower + Coeff
+           SheetFaceLoss = SheetFaceLoss + Coeff
            ! reactive part of the complex sheet conductance, as twice the time
            ! average energy like the field energies of this solver
            IF (vDOFS == 2) LamSheetEnergy = LamSheetEnergy - localThickness * SheetImagCond * &
@@ -3796,17 +3866,29 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
          END IF
 
       END DO
+      ! the field holds the time average, as the Im(Nu) loss of the bodies
+      IF (LamSheet .AND. ALLOCATED(SheetHeat)) THEN
+        IF (vDOFS == 2) SheetFaceLoss = SheetFaceLoss * 0.5_dp / HarmPowerCoeff
+        CALL SpreadSheetHeat(Element, SheetFaceLoss)
+      END IF
     END DO
+    IF (ALLOCATED(SheetHeat)) CALL ApplySheetHeat()
     
     IF( Parallel ) THEN
       Power = ParallelReduction(Power) / NoSlices
       LamSheetPower = ParallelReduction(LamSheetPower) / NoSlices
       LamSheetEnergy = ParallelReduction(LamSheetEnergy) / NoSlices
+      SheetHeatPower = ParallelReduction(SheetHeatPower) / NoSlices
     END IF
       
     WRITE(Message,*) 'Thin sheet current power (the Joule effect): ', Power
     CALL Info( Caller, Message )
     CALL ListAddConstReal(Model % Simulation, 'res: Thin sheet current power', Power)
+    IF (SheetHeatPower /= 0.0_dp) THEN
+      WRITE(Message,'(A,ES15.6)') 'Lamination sheet loss in the Proximity Loss of their layered '// &
+          'parents:', SheetHeatPower
+      CALL Info( Caller, Message, Level=6 )
+    END IF
 
   END IF
 
@@ -4334,6 +4416,122 @@ CONTAINS
 
 !------------------------------------------------------------------------------
  END SUBROUTINE NodalTorque
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Spread the loss of a lamination sheet face as one density over the volume of
+!> its layered parent elements (SheetHeat, W/m^3 per bulk element). In parallel
+!> each partition takes the share of its own parents.
+!------------------------------------------------------------------------------
+  SUBROUTINE SpreadSheetHeat(Face, FaceLoss)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: Face
+    REAL(KIND=dp) :: FaceLoss
+!------------------------------------------------------------------------------
+    TYPE(Element_t), POINTER :: Parent
+    TYPE(ValueList_t), POINTER :: PMaterial
+    REAL(KIND=dp) :: Vol(2), Density
+    LOGICAL :: Layered(2), GotIt
+    LOGICAL, SAVE :: NoLayeredWarned = .FALSE.
+    INTEGER :: side
+!------------------------------------------------------------------------------
+    IF (.NOT. ASSOCIATED(Face % BoundaryInfo)) RETURN
+    Vol = 0.0_dp
+    Layered = .FALSE.
+    DO side = 1, 2
+      IF (side == 1) Parent => Face % BoundaryInfo % Left
+      IF (side == 2) Parent => Face % BoundaryInfo % Right
+      IF (.NOT. ASSOCIATED(Parent)) CYCLE
+      PMaterial => GetMaterial(Parent, GotIt)
+      IF (.NOT. GotIt) CYCLE
+      Layered(side) = (GetString(PMaterial, 'Laminate Stack Model', GotIt) == 'layered')
+      IF (Layered(side)) Vol(side) = SheetParentVolume(Parent)
+    END DO
+    IF (SUM(Vol) <= 0.0_dp) THEN
+      IF (.NOT. NoLayeredWarned) CALL Warn(Caller, 'A lamination sheet has no layered parent '// &
+          'element: its loss is left out of the Proximity Loss')
+      NoLayeredWarned = .TRUE.
+      RETURN
+    END IF
+    Density = FaceLoss / SUM(Vol)
+    DO side = 1, 2
+      IF (.NOT. Layered(side)) CYCLE
+      IF (side == 1) Parent => Face % BoundaryInfo % Left
+      IF (side == 2) Parent => Face % BoundaryInfo % Right
+      IF (ParEnv % PEs > 1) THEN
+        IF (Parent % PartIndex /= ParEnv % MyPE) CYCLE
+      END IF
+      SheetHeat(Parent % ElementIndex) = SheetHeat(Parent % ElementIndex) + Density
+      SheetHeatPower = SheetHeatPower + Density * Vol(side)
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE SpreadSheetHeat
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+  FUNCTION SheetParentVolume(El) RESULT(V)
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: El
+    REAL(KIND=dp) :: V
+!------------------------------------------------------------------------------
+    TYPE(Nodes_t), SAVE :: ENodes
+    TYPE(GaussIntegrationPoints_t) :: EIP
+    REAL(KIND=dp) :: EBasis(El % TYPE % NumberOfNodes), EdetJ
+    INTEGER :: q
+    LOGICAL :: st
+!------------------------------------------------------------------------------
+    CALL GetElementNodes(ENodes, UElement=El)
+    EIP = GaussPoints(El)
+    V = 0.0_dp
+    DO q = 1, EIP % n
+      st = ElementInfo(El, ENodes, EIP % U(q), EIP % V(q), EIP % W(q), EdetJ, EBasis)
+      V = V + EdetJ * EIP % s(q)
+    END DO
+!------------------------------------------------------------------------------
+  END FUNCTION SheetParentVolume
+!------------------------------------------------------------------------------
+
+!------------------------------------------------------------------------------
+!> Add the lamination sheet loss density (SheetHeat) to the 'Proximity Loss' of
+!> the elements. Harmonic: the DG field, computed by this call. Transient: the
+!> elemental field of the AV solver, set to the element's eddy current ladder
+!> loss (as the solver set it) plus the sheets'. Both give the same values at
+!> every call.
+!------------------------------------------------------------------------------
+  SUBROUTINE ApplySheetHeat()
+!------------------------------------------------------------------------------
+    IMPLICIT NONE
+    TYPE(Element_t), POINTER :: El
+    REAL(KIND=dp) :: Base
+    INTEGER :: e, k, j, jl
+!------------------------------------------------------------------------------
+    DO e = 1, Mesh % NumberOfBulkElements
+      IF (SheetHeat(e) == 0.0_dp) CYCLE
+      El => Mesh % Elements(e)
+      IF (RealTransient) THEN
+        j = e
+        IF (ASSOCIATED(SheetHeatVar % Perm)) j = SheetHeatVar % Perm(e)
+        IF (j <= 0 .OR. j > SIZE(SheetHeatVar % Values)) CYCLE
+        Base = 0.0_dp
+        IF (ASSOCIATED(LamLadVar)) THEN
+          jl = LamLadVar % Perm(e)
+          IF (jl > 0) Base = LamLadVar % Values((jl-1) * LamLadVar % DOFs + LamLadLoss)
+        END IF
+        SheetHeatVar % Values(j) = Base + SheetHeat(e)
+      ELSE
+        IF (.NOT. ASSOCIATED(El % DGIndexes)) CYCLE
+        DO k = 1, El % TYPE % NumberOfNodes
+          j = SheetHeatVar % Perm(El % DGIndexes(k))
+          IF (j <= 0) CYCLE
+          j = SheetHeatVar % DOFs * (j-1) + 1
+          SheetHeatVar % Values(j) = SheetHeatVar % Values(j) + SheetHeat(e)
+        END DO
+      END IF
+    END DO
+!------------------------------------------------------------------------------
+  END SUBROUTINE ApplySheetHeat
 !------------------------------------------------------------------------------
 
 !------------------------------------------------------------------------------
