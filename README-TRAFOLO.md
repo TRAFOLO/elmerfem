@@ -592,6 +592,26 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
     implicit Euler weights, the step-size and start logic, the heat field and the sheet assembly in
     turn). Models without lamination sheets give the same results to the last printed digit (six
     transient, harmonic and thin-sheet tests compared).
+- Random crashes and locale switches in formatted output on Windows (DEV-1612). libgfortran (MSYS2
+  UCRT64, GNU Fortran 16.1, the `libgfortran-5.dll` of the bundle) wraps every formatted transfer in
+  `old = setlocale(LC_NUMERIC, NULL)`, `setlocale(LC_NUMERIC, "C")` and `setlocale(LC_NUMERIC,
+  old)`. The UCRT rebuilds its locale data on every set, also "C" over "C", so `old` points to freed
+  memory when it is restored. Once that memory has been released the restore crashes: a SIGSEGV at
+  random, the more likely the more the heap is used (the TRAFOLO tube case on 8 ranks with MUMPS
+  refinement crashed in each of 5 runs, within 60 - 1957 steps, at a `WRITE` of `ComputeChange`).
+  When the freed bytes start with a NUL it sets the user's Windows locale instead of "C" (in a plain
+  gfortran program after 2 - 8 % of the formatted writes), and C code between two transfers (MATC,
+  Lua) then parses and prints numbers with that locale's decimal separator, a comma on many European
+  systems. `ElmerSolver` now points libgfortran's `setlocale` import at a wrapper that returns a
+  copy of the queried name (`GfortranLocale.c`, MinGW only, needs the shared libgfortran), first
+  thing in the program and in the `ElmerSolver` routine, keeps the DLL of the wrapper loaded, and
+  says so in the banner (`libgfortran locale workaround installed.`; a warning, also in silent mode,
+  if it cannot or finds no import of libgfortran that resolves to `setlocale`). `ViewFactors` and
+  `Radiators` are not covered. With it the tube case ran through in 5 of 5 runs (2400 steps; the
+  unchanged build crashed at step 1135), the plain gfortran program kept "C" in all 200 000 writes,
+  and six tests give outputs identical to the last bit. Test: `robustness_gfortran_locale` (MinGW
+  builds: 200 000 formatted writes inside ElmerSolver leave the C runtime's numeric locale "C", and
+  the banner line; it also fails once a libgfortran no longer imports `setlocale`).
 
 ## Building the distributed bundle
 

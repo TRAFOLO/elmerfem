@@ -1,0 +1,29 @@
+! libgfortran on MinGW restores the numeric locale after each formatted transfer from a name the
+! UCRT has freed (GfortranLocale.c). LocaleCheck runs 200 000 formatted writes with allocation
+! traffic and counts those after which the C runtime's numeric locale is no longer "C".
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "line"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = "Cartesian 1D"
+  Simulation Type = Steady State
+  Steady State Max Iterations = 1
+End
+
+Body 1
+  Equation = 1
+End
+
+Equation 1
+  Active Solvers(1) = 1
+End
+
+Solver 1
+  Equation = "LocaleCheck"
+  Procedure = "LocaleCheck" "LocaleCheck"
+End
