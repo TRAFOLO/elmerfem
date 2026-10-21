@@ -1,7 +1,15 @@
-! DEV-1606: lamination sheets in the transient solver. The model of
-! mgdyn_laminate_layered_transient with a 'Thin Sheet Laminate Thickness' boundary, which only the
-! harmonic solver couples: the transient one would leave the sheet's net currents out of the
-! equations while CalcFields still reported its loss, so the run stops with a Fatal.
+! Lamination sheets in the transient A-V solver. The model of mgdyn_laminate_layered_harmonic_thick
+! (1/16 of a copper bar through two insulated CoNiFe tubes, one 'layered' block with one lamination
+! sheet per tube) driven by a sinusoidal current density of 1 A peak in the full bar at 5 kHz on the
+! terminal (lamination thickness 5.3 skin depths), two periods of 20 implicit Euler steps (the time
+! stepping of the TRAFOLO app; the BDF2 weights are in _transient_sheet_dt). The sheets are the
+! resistive sheets of the transient solver (conductance sigma d), the block carries the eddy
+! current ladder. Each sheet face's loss also goes as one density into the elemental 'Proximity
+! Loss' of its two parent elements, on top of their ladder loss. Norms at the last step (all free of
+! the gauge of A): the laminate stack loss (W, ladder and sheets; solver 3), the thin sheet current
+! power (W, solver 4), the integral of the terminal potential (V m^2, solver 5), whose product with
+! the current density is the input power, and the largest 'Proximity Loss' (W/m^3, solver 6).
+! Columns of transient.dat: time, that integral, then the res: values.
 
 Check Keywords "Warn"
 
@@ -13,10 +21,9 @@ Simulation
   Max Output Level = 5
   Coordinate System = "Cartesian"
   Simulation Type = Transient
-  Timestepping Method = BDF
-  BDF Order = 2
-  Timestep Sizes = Real 1.25e-05
-  Timestep Intervals = Integer 80
+  Timestepping Method = implicit euler
+  Timestep Sizes = Real 1.0e-05
+  Timestep Intervals = Integer 40
   Output Intervals = 0
   Steady State Max Iterations = 1
 End
@@ -24,54 +31,72 @@ End
 Body 1
   Equation = 1
   Material = 1
-  stack = Logical True
 End
 
 Body 2
   Equation = 1
   Material = 2
-  surface air = Logical True
+End
+
+Body 3
+  Equation = 1
+  Material = 3
+End
+
+Body 4
+  Equation = 1
+  Material = 4
+End
+
+Body 5
+  Equation = 1
+  Material = 5
 End
 
 Equation 1
   Active Solvers(2) = 1 2
 End
 
-Material 2
+Material 1
   Relative Permeability = 1.0
   Electric Conductivity = 0.0
 End
 
-Material 1
-  Relative Permeability = Real 2000.0
+Material 2
+  Relative Permeability = 1.0
+  Electric Conductivity = 52200000.0
+End
+
+Material 3
+  Relative Permeability = 1.0
+  Electric Conductivity = 0.0
+End
+
+Material 4
+  Relative Permeability = 250.0
+  Electric Conductivity = 3333333.0
+End
+
+Material 5
+  Relative Permeability = 250.0
   Electric Conductivity = 0.0
   Laminate Stack Model = String "layered"
-  Laminate Stacking Factor = Real 0.96
-  Laminate Normal(3) = Real 0 0 1
-  Laminate Thickness = Real 0.00035
-  Laminate Stack Conductivity = Real 2000000.0
-  Harmonic Loss Linear Coefficient = Real 0.0
-  Harmonic Loss Linear Frequency Exponent = Real 1.0
-  Harmonic Loss Linear Exponent = Real 2.0
-  Harmonic Loss Quadratic Coefficient = Real 0.403008846378
-  Harmonic Loss Quadratic Frequency Exponent = Real 2.0
-  Harmonic Loss Quadratic Exponent = Real 2.0
+  Laminate Thickness = Real 0.0013
+  Laminate Stack Conductivity = Real 3333333
+  Laminate Stacking Factor = Real 0.722222222222
+  Laminate Normal(3) = Real 1 0 0
 End
 
 Solver 1
   Equation = "MGDynamics"
   Variable = "AV"
   Procedure = "MagnetoDynamics" "WhitneyAVSolver"
+  Exported Variable 1 = -dofs 1 -elem "Proximity Loss"
   Linear System Symmetric = True
   Linear System Solver = "Direct"
   Linear System Direct Method = "MUMPS"
   Use Tree Gauge = Logical False
   Mumps Diagonal Regularization = Real 1e-09
-  Newton-Raphson Iteration = Logical True
-  Nonlinear System Relaxation Factor = Real 1.0
-  Nonlinear System Max Iterations = 1
-  Nonlinear System Convergence Tolerance = 1e-07
-  Nonlinear System Convergence Measure = String "flux density"
 End
 
 Solver 2
@@ -95,51 +120,69 @@ Solver 3
   Filename = transient.dat
   Parallel Reduce = Logical True
   Variable 1 = Time
-  Variable 2 = Magnetic Flux Density e 1
-  Operator 2 = body int mean
-  Mask Name 2 = String "stack"
-  Variable 3 = Magnetic Flux Density e 1
-  Operator 3 = body int mean
-  Mask Name 3 = String "surface air"
+  Variable 2 = AV
+  Operator 2 = boundary int
   Show Norm Index = 8
 End
 
 Solver 4
-  Equation = "SaveEnergy"
+  Equation = "SaveSheet"
   Procedure = "SaveData" "SaveScalars"
-  Filename = energy.dat
-  Show Norm Index = 3
+  Filename = sheet.dat
+  Show Norm Index = 5
 End
 
 Solver 5
-  Equation = "SaveSurfaceField"
+  Equation = "SaveTerminal"
   Procedure = "SaveData" "SaveScalars"
-  Filename = surface.dat
+  Filename = terminal.dat
   Parallel Reduce = Logical True
-  Variable 1 = Magnetic Flux Density e 1
-  Operator 1 = body int mean
-  Mask Name 1 = String "surface air"
+  Variable 1 = AV
+  Operator 1 = boundary int
   Show Norm Index = 1
 End
 
 Boundary Condition 1
   Target Boundaries(1) = 1
   AV {e} = Real 0.0
-  AV = Real 0.0
-End
-
-Boundary Condition 3
-  Target Boundaries(1) = 1
-  Thin Sheet Laminate Thickness = Real 0.00035
-  Thin Sheet Electric Conductivity = Real 2000000
-  Thin Sheet Relative Permeability = Real 2000
+  Electric Current Density = Variable Time
+    Real LUA "27777.777777777777*math.sin(31415.926535897932*tx[0])"
+  Save Scalars = Logical True
 End
 
 Boundary Condition 2
   Target Boundaries(1) = 2
-  AV {e} 1 = Real 0.0
-  AV {e} 2 = Variable Coordinate 3, Time
-    Real LUA "-0.41950503355704694*math.sin(12566.370614359172*tx[1])*tx[0]"
-  AV {e} 3 = Real 0.0
+  AV {e} = Real 0.0
+  AV = Real 0.0
 End
 
+Boundary Condition 3
+  Target Boundaries(1) = 3
+  AV {e} = Real 0.0
+End
+
+Boundary Condition 4
+  Target Boundaries(1) = 4
+  Thin Sheet Laminate Thickness = Real 0.0013
+  Thin Sheet Relative Permeability = Real 250.0
+  Thin Sheet Electric Conductivity = Real 3333333
+End
+
+Solver 6
+  Equation = "SaveProximityLoss"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = proximity.dat
+  Parallel Reduce = Logical True
+  Variable 1 = Proximity Loss
+  Operator 1 = max
+  Show Norm Index = 1
+End
+
+Solver 3 :: Reference Norm = Real 1.70945046E-05
+Solver 3 :: Reference Norm Tolerance = Real 1.0e-6
+Solver 4 :: Reference Norm = Real 1.52057604E-07
+Solver 4 :: Reference Norm Tolerance = Real 1.0e-6
+Solver 5 :: Reference Norm = Real 2.36370515E-09
+Solver 5 :: Reference Norm Tolerance = Real 1.0e-6
+Solver 6 :: Reference Norm = Real 4.83850683E+02
+Solver 6 :: Reference Norm Tolerance = Real 1.0e-6

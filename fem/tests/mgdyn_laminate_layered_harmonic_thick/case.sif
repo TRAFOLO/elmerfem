@@ -1,0 +1,154 @@
+! Lamination sheets of laminations much thicker than the skin depth. 1/16 of a copper bar (6 x 6 mm)
+! through two insulated square CoNiFe tubes (1.3 mm, mu_r 250, 3.33 MS/m, 0.5 mm insulation before
+! each, stacking factor 0.722, 8 mm long) at 100 MHz: lamination thickness 746 skin depths, beyond
+! the overflow limit (k d = 600) of the plain sheet law sinh(kd)/kd. The tubes are one 'layered'
+! block flush with the copper, with one lamination sheet per tube on its period centre, whose
+! floored law tends to a perfect conductor: A x n = 0 on the sheet faces gives the same impedance to
+! 1.4e-6 (the resistance to 9e-6) and the same stack loss to 7e-6. Wedge 0 <= y <= x, z >= 0 (planes
+! y = 0, x = y natural; z = 0: V = 0, A x n = 0; the copper end face at the top is the terminal at
+! 1 V). Columns of scalars.dat: current into the wedge's terminal re, im (A), then the res: values;
+! the norm is the laminate stack loss (W).
+
+Check Keywords "Warn"
+
+Header
+  Mesh DB "." "mesh"
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = "Cartesian"
+  Simulation Type = Steady
+  Steady State Max Iterations = 1
+  Angular Frequency = Real 628318530.718
+End
+
+Body 1
+  Equation = 1
+  Material = 1
+End
+
+Body 2
+  Equation = 1
+  Material = 2
+End
+
+Body 3
+  Equation = 1
+  Material = 3
+End
+
+Body 4
+  Equation = 1
+  Material = 4
+End
+
+Body 5
+  Equation = 1
+  Material = 5
+End
+
+Equation 1
+  Active Solvers(2) = 1 2
+End
+
+Material 1
+  Relative Permeability = 1.0
+  Electric Conductivity = 0.0
+End
+
+Material 2
+  Relative Permeability = 1.0
+  Electric Conductivity = 52200000.0
+End
+
+Material 3
+  Relative Permeability = 1.0
+  Electric Conductivity = 0.0
+End
+
+Material 4
+  Relative Permeability = 250.0
+  Electric Conductivity = 3333333.0
+End
+
+Material 5
+  Relative Permeability = 250.0
+  Electric Conductivity = 0.0
+  Laminate Stack Model = String "layered"
+  Laminate Thickness = Real 0.0013
+  Laminate Stack Conductivity = Real 3333333
+  Laminate Stacking Factor = Real 0.722222222222
+  Laminate Normal(3) = Real 1 0 0
+End
+
+Solver 1
+  Equation = "MGDynamics"
+  Variable = "AV[AV re:1 AV im:1]"
+  Procedure = "MagnetoDynamics" "WhitneyAVHarmonicSolver"
+  Linear System Symmetric = True
+  Linear System Solver = "Direct"
+  Linear System Direct Method = "MUMPS"
+  Use Tree Gauge = Logical False
+  Mumps Diagonal Regularization = Real 1e-09
+End
+
+Solver 2
+  Equation = "MGDynamicsCalc"
+  Procedure = "MagnetoDynamics" "MagnetoDynamicsCalcFields"
+  Potential Variable = String "AV"
+  Calculate Current Density = Logical True
+  Calculate Nodal Fields = Logical False
+  Calculate Elemental Fields = Logical True
+  Separate Magnetic Energy = Logical True
+  Linear System Solver = "Iterative"
+  Linear System Iterative Method = CG
+  Linear System Preconditioning = None
+  Linear System Max Iterations = 5000
+  Linear System Convergence Tolerance = 1.0e-8
+End
+
+Solver 3
+  Exec Solver = after all
+  Equation = "SaveScalars"
+  Procedure = "SaveData" "SaveScalars"
+  Filename = scalars.dat
+  Variable 1 = Current Density re e 3
+  Operator 1 = boundary int
+  Variable 2 = Current Density im e 3
+  Operator 2 = boundary int
+  Show Norm Index = 8
+End
+
+Boundary Condition 1
+  Target Boundaries(1) = 1
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  AV re = Real 1.0
+  AV im = Real 0.0
+  Save Scalars = Logical True
+End
+
+Boundary Condition 2
+  Target Boundaries(1) = 2
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+  AV re = Real 0.0
+  AV im = Real 0.0
+End
+
+Boundary Condition 3
+  Target Boundaries(1) = 3
+  AV re {e} = Real 0.0
+  AV im {e} = Real 0.0
+End
+
+Boundary Condition 4
+  Target Boundaries(1) = 4
+  Thin Sheet Laminate Thickness = Real 0.0013
+  Thin Sheet Relative Permeability = Real 250.0
+  Thin Sheet Electric Conductivity = Real 3333333
+End
+
+Solver 3 :: Reference Norm = Real 8.36335117E-03
+Solver 3 :: Reference Norm Tolerance = Real 1.0e-6

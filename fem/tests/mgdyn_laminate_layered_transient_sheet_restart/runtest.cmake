@@ -1,0 +1,10 @@
+include(test_macros)
+# the restart file of an earlier run must not stand in for a failed initial run
+FILE(REMOVE mesh/init.result)
+EXECUTE_ELMER_SOLVER(init.sif)
+FILE(READ init.sif-stdout.log _init_log)
+STRING(FIND "${_init_log}" "ALL DONE" _init_done)
+IF(_init_done EQUAL -1 OR NOT EXISTS mesh/init.result)
+  MESSAGE(FATAL_ERROR "The initial run (init.sif) did not finish or wrote no mesh/init.result")
+ENDIF()
+RUN_ELMER_TEST()
