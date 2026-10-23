@@ -73,6 +73,22 @@ else
   MUMPS_FLAGS=(-DWITH_Mumps=OFF)
 fi
 
+# MS-MPI from its files, not through the MSYS2 mpicc/mpicxx/mpifort drivers: their rewrite in
+# msmpi 10.1.1-25 (2026-10-20) no longer answers FindMPI, which then finds no MPI. These are the
+# settings the old drivers gave: headers and mpi.mod in the prefix, libmsmpi, and for Fortran
+# libmsmpifec, which holds the gfortran interface since msmpi 10.1.1-23 (see license_audit.sh).
+# No guessing either: else a reconfigure (deploy_msys2.sh) adds the SDK headers of $MSMPI_INC.
+MPI_FORTRAN_LIBS=msmpi
+MPI_FLAGS=(-DMPI_SKIP_COMPILER_WRAPPER=ON -DMPI_SKIP_GUESSING=ON -DMPI_ASSUME_NO_BUILTIN_MPI=ON
+  "-DMPI_C_HEADER_DIR=$PW/include" "-DMPI_CXX_HEADER_DIR=$PW/include"
+  "-DMPI_Fortran_F77_HEADER_DIR=$PW/include" "-DMPI_Fortran_MODULE_DIR=$PW/include"
+  -DMPI_C_LIB_NAMES=msmpi -DMPI_CXX_LIB_NAMES=msmpi "-DMPI_msmpi_LIBRARY=$PW/lib/libmsmpi.dll.a")
+if [ -f "$PFX/lib/libmsmpifec.dll.a" ]; then
+  MPI_FORTRAN_LIBS="msmpi;msmpifec"
+  MPI_FLAGS+=("-DMPI_msmpifec_LIBRARY=$PW/lib/libmsmpifec.dll.a")
+fi
+MPI_FLAGS+=("-DMPI_Fortran_LIB_NAMES=$MPI_FORTRAN_LIBS")
+
 rm -rf -- "$BUILD_ABS"
 mkdir -p "$BUILD_ABS"
 cd "$BUILD_ABS"
@@ -88,6 +104,7 @@ cmake -G Ninja \
   -DWITH_OpenMP=OFF \
   -DWITH_LUA=ON \
   -DWITH_MPI=ON \
+  "${MPI_FLAGS[@]}" \
   -DMPIEXEC_EXECUTABLE="/c/Program Files/Microsoft MPI/Bin/mpiexec.exe" \
   -DBUNDLE_MSMPI_REDIST=ON \
   -DWITH_UMFPACK=ON \
@@ -97,9 +114,21 @@ cmake -G Ninja \
   -DWITH_ELMERGUI=OFF \
   -DWITH_ElmerIce=OFF \
   -DCMAKE_C_FLAGS="-Wno-error=incompatible-pointer-types" \
-  "$SRC_ABS" > configure.log 2>&1
+  "$SRC_ABS" > configure.log 2>&1 || {
+    tail -25 configure.log; echo "ERROR: configure failed, see $BUILD_ABS/configure.log"; exit 1; }
 
 grep -E "MPI|BLAS|Mumps|Fortran compiler|Build type|install prefix|Configuring done|Generating done" configure.log | head -18
+
+for lang in C CXX Fortran; do
+  grep -q "Found MPI_$lang: $PW/lib/libmsmpi.dll.a" configure.log || {
+    echo "ERROR: configure did not take MPI_$lang from $PW/lib/libmsmpi.dll.a"; exit 1; }
+done
+grep -q "MPI Fortran include dir: $PW/include\$" configure.log || {
+  echo "ERROR: the MPI Fortran include dirs are not $PW/include alone"; exit 1; }
+if [ "$MPI_FORTRAN_LIBS" != msmpi ]; then
+  grep -q "MPI Fortran libraries: .*$PW/lib/libmsmpifec.dll.a" configure.log || {
+    echo "ERROR: configure did not link Fortran MPI with $PW/lib/libmsmpifec.dll.a"; exit 1; }
+fi
 
 if [ -n "${MUMPS_PREFIX:-}" ]; then
   libs=$(grep -m1 "Mumps libraries:" configure.log) || { echo "ERROR: configure found no MUMPS"; exit 1; }
