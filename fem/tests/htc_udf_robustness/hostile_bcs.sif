@@ -1,0 +1,76 @@
+! Face 1 is physical; faces 2-6 have unphysical or missing convection parameters.
+
+Boundary Condition 1
+  Target Boundaries(1) = 1
+  External Temperature = 20.0
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+  T_ambient = Real 20.0
+  NatOrient = Integer 3
+  FcdOrient = Integer 0
+  Lc_nat = Real 0.01
+End
+
+! Unknown orientation codes and fluid, no natural length, a forced flow beyond any speed and length.
+Boundary Condition 2
+  Target Boundaries(1) = 2
+  External Temperature = 20.0
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+  T_ambient = Real 20.0
+  NatOrient = Integer 99
+  FcdOrient = Integer 77
+  Lc_nat = Real 0.0
+  Lc_forced = Real 1.0e300
+  velocity_mag = Real 1.0e300
+  Fluid Id = Integer 42
+End
+
+! A channel without a gap or a length, and a negative natural length.
+Boundary Condition 3
+  Target Boundaries(1) = 3
+  External Temperature = 20.0
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+  T_ambient = Real 20.0
+  NatOrient = Integer 4
+  FcdOrient = Integer 0
+  Lc_nat = Real -1000.0
+  channel_gap = Real 0.0
+  channel_length = Real -1.0
+End
+
+! An inclined face at an angle of 1e300 deg, ambient below absolute zero, a length of 1e-300 m.
+Boundary Condition 4
+  Target Boundaries(1) = 4
+  External Temperature = 20.0
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+  T_ambient = Real -500.0
+  NatOrient = Integer 5
+  FcdOrient = Integer 0
+  theta_deg = Real 1.0e300
+  Lc_nat = Real 1.0e-300
+End
+
+! Ambient at a million degrees, a negative wind speed on a windward face without a forced length, and a
+! natural length above 1000 m.
+Boundary Condition 5
+  Target Boundaries(1) = 5
+  External Temperature = 20.0
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+  T_ambient = Real 1.0e6
+  NatOrient = Integer 1
+  FcdOrient = Integer 1
+  Lc_nat = Real 2000.0
+  Lc_forced = Real 0.0
+  velocity_mag = Real -50.0
+End
+
+! None of the convection parameters.
+Boundary Condition 6
+  Target Boundaries(1) = 6
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+End

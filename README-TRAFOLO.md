@@ -612,6 +612,23 @@ TRAFOLO-authored additions/fixes on the `trafolo` branch (all GPL-2.0+, in
   and six tests give outputs identical to the last bit. Test: `robustness_gfortran_locale` (MinGW
   builds: 200 000 formatted writes inside ElmerSolver leave the C runtime's numeric locale "C", and
   the banner line; it also fails once a libgfortran no longer imports `setlocale`).
+- Convection BC (`htc_udf`) that never stops a run (DEV-1622). `htc_evaluate` called `Fatal` when a
+  surface passed 1500 K ("T_surface out of plausible range -- check SIF units") or a keyword was
+  missing, so a model with unphysical losses (a reversed winding polarity, a voltage source far too
+  large) ended as a failed thermal run without results. `htc_evaluate_safe` now takes every input
+  outside the range of the model at its nearest valid value: surface and ambient temperatures at
+  200 - 1500 K (a surface that is not a number: the ambient), lengths at 1e-6 - 1e3 m (not positive:
+  0.05 m, or the natural length for the forced one; a channel without gap or length: a vertical
+  plate), speeds at 0 - 1000 m/s, an angle that is not finite at 0, and the inclination through
+  |cos(theta)| (NaN before for theta > 90 deg). Missing keywords take a vertical face, no forced flow,
+  0.05 m and the BC's `External Temperature` (else 20 C). Each kind of correction is warned about
+  once per process (`WARNING:: htc_evaluate: Surface temperature ... C is above the range of the
+  convection model ...`, which the TRAFOLO app reports). Valid inputs give the same h as before (the
+  test's reference to the last digit). Test: `htc_udf_robustness` (a block heated to 5000 C;
+  unphysical or missing parameters on every face with a heat sink; `HtcSweep`: 102 calls at surface
+  temperatures from -HUGE to +HUGE C, NaN and +-Infinity, and 74 970 calls with each parameter NaN,
+  +-Infinity, +-HUGE, -1, 0, 1e-300 or 1e300 for every orientation code, all finite and >= 0, the
+  last-resort h never needed).
 
 ## Building the distributed bundle
 

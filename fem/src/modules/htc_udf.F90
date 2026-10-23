@@ -89,6 +89,18 @@ MODULE htc_convection_constants
   ! Working-fluid codes (SIF: Fluid Id). Only air is implemented today;
   ! oils / water / glycol plug into compute_fluid_properties below.
   INTEGER, PARAMETER :: FLUID_AIR = 1
+
+  ! Range of the air property fits; temperatures outside it are taken at the nearest limit.
+  REAL(KIND=dp), PARAMETER :: T_MIN_K = 200.0_dp
+  REAL(KIND=dp), PARAMETER :: T_MAX_K = 1500.0_dp
+  REAL(KIND=dp), PARAMETER :: T_AMBIENT_FALLBACK_K = 293.15_dp
+  ! Lengths and speeds are kept in a range where Ra, Re and h stay finite.
+  REAL(KIND=dp), PARAMETER :: LENGTH_MIN = 1.0e-6_dp
+  REAL(KIND=dp), PARAMETER :: LENGTH_MAX = 1.0e3_dp
+  REAL(KIND=dp), PARAMETER :: LENGTH_FALLBACK = 0.05_dp
+  REAL(KIND=dp), PARAMETER :: VELOCITY_MAX = 1.0e3_dp
+  ! Returned when the correlations still give no finite coefficient (W/m^2/K).
+  REAL(KIND=dp), PARAMETER :: H_FALLBACK = 10.0_dp
 END MODULE htc_convection_constants
 
 
@@ -187,7 +199,9 @@ CONTAINS
     REAL(KIND=dp), INTENT(IN) :: Ra_s, s, L
     REAL(KIND=dp) :: Nu, El
     El = Ra_s * (s / L)
-    Nu = (576.0_dp / El**2 + 2.873_dp / SQRT(El))**(-0.5_dp)
+    ! El = 0 (surface at ambient temperature) is the conduction limit; skip the division by zero.
+    Nu = 1.0_dp
+    IF (El > 0.0_dp) Nu = (576.0_dp / El**2 + 2.873_dp / SQRT(El))**(-0.5_dp)
     Nu = MAX(Nu, 1.0_dp)
   END FUNCTION nu_vertical_channel
 
@@ -223,13 +237,25 @@ END MODULE htc_correlations
 ! Pure inner function -- all physics, no Elmer types -- so it stays mathematically
 ! total (Nu=1 conduction floor instead of aborting on degenerate Ra/Re).
 MODULE htc_core
+  USE, INTRINSIC :: IEEE_ARITHMETIC, ONLY: IEEE_IS_FINITE, IEEE_IS_NAN
   USE htc_convection_constants
   USE htc_fluid_properties, ONLY: compute_fluid_properties
   USE htc_correlations,     ONLY: nu_churchill_chu, nu_horiz_up, nu_horiz_down, &
                                   nu_vertical_channel, nu_parallel, nu_churchill_bernstein
   IMPLICIT NONE
   PRIVATE
-  PUBLIC :: htc_evaluate_core
+  PUBLIC :: htc_evaluate_core, htc_evaluate_safe
+
+  ! Bits of the status of htc_evaluate_safe, one per kind of input it had to correct.
+  INTEGER, PARAMETER, PUBLIC :: STATUS_HOT_SURFACE  = 0
+  INTEGER, PARAMETER, PUBLIC :: STATUS_COLD_SURFACE = 1
+  INTEGER, PARAMETER, PUBLIC :: STATUS_NAN_SURFACE  = 2
+  INTEGER, PARAMETER, PUBLIC :: STATUS_BAD_AMBIENT  = 3
+  INTEGER, PARAMETER, PUBLIC :: STATUS_BAD_LENGTH   = 4
+  INTEGER, PARAMETER, PUBLIC :: STATUS_BAD_VELOCITY = 5
+  INTEGER, PARAMETER, PUBLIC :: STATUS_BAD_ANGLE    = 6
+  INTEGER, PARAMETER, PUBLIC :: STATUS_BAD_RESULT   = 7
+  INTEGER, PARAMETER, PUBLIC :: STATUS_BITS         = 8
 
 CONTAINS
 
@@ -267,8 +293,8 @@ CONTAINS
       Ra     = Ra_base * Lc_nat**3
       Nu_nat = nu_churchill_chu(Ra, Pr)
     CASE (INCLINED)
-      ! g_eff = g * cos(theta) folded into Ra; slant Lc_nat baked at SIF.
-      Ra     = Ra_base * Lc_nat**3 * COS(theta_deg * DEG_TO_RAD)
+      ! g_eff = g * |cos(theta)| folded into Ra; slant Lc_nat baked at SIF.
+      Ra     = Ra_base * Lc_nat**3 * ABS(COS(theta_deg * DEG_TO_RAD))
       Nu_nat = nu_churchill_chu(Ra, Pr)
     CASE (VERTICAL_CHANNEL)
       Ra_s         = Ra_base * channel_gap**3
@@ -302,16 +328,120 @@ CONTAINS
     h_final = (h_nat**3 + h_forced**3)**(1.0_dp / 3.0_dp)
   END FUNCTION htc_evaluate_core
 
+  ! htc_evaluate_core for any input, physical or not: a finite h >= 0 always. Inputs outside the range of the
+  ! model are taken at the nearest valid value, and each kind of correction sets its STATUS_* bit.
+  PURE SUBROUTINE htc_evaluate_safe(fluid_id, T_surface_K, T_ambient_K, NatOrient_in, FcdOrient_in, &
+                                    Lc_nat, Lc_forced, theta_deg, velocity_mag, &
+                                    channel_gap, channel_length, h_final, status)
+    INTEGER,       INTENT(IN)  :: fluid_id, NatOrient_in, FcdOrient_in
+    REAL(KIND=dp), INTENT(IN)  :: T_surface_K, T_ambient_K, Lc_nat, Lc_forced, theta_deg, velocity_mag
+    REAL(KIND=dp), INTENT(IN)  :: channel_gap, channel_length
+    REAL(KIND=dp), INTENT(OUT) :: h_final
+    INTEGER,       INTENT(OUT) :: status
+
+    REAL(KIND=dp) :: T_s, T_a, L_nat, L_fcd, theta, speed, gap, ch_length
+    INTEGER :: nat_orient
+
+    status = 0
+    T_a = T_ambient_K
+    IF (IEEE_IS_NAN(T_a)) THEN
+      T_a = T_AMBIENT_FALLBACK_K
+      status = IBSET(status, STATUS_BAD_AMBIENT)
+    ELSE IF (T_a < T_MIN_K .OR. T_a > T_MAX_K) THEN
+      T_a = MIN(MAX(T_a, T_MIN_K), T_MAX_K)
+      status = IBSET(status, STATUS_BAD_AMBIENT)
+    END IF
+
+    T_s = T_surface_K
+    IF (IEEE_IS_NAN(T_s)) THEN
+      T_s = T_a
+      status = IBSET(status, STATUS_NAN_SURFACE)
+    ELSE IF (T_s > T_MAX_K) THEN
+      T_s = T_MAX_K
+      status = IBSET(status, STATUS_HOT_SURFACE)
+    ELSE IF (T_s < T_MIN_K) THEN
+      T_s = T_MIN_K
+      status = IBSET(status, STATUS_COLD_SURFACE)
+    END IF
+
+    L_nat = Lc_nat
+    CALL fix_length(L_nat, LENGTH_FALLBACK, status)
+
+    nat_orient = NatOrient_in
+    gap = channel_gap
+    ch_length = channel_length
+    IF (nat_orient == VERTICAL_CHANNEL) THEN
+      IF (is_length(gap) .AND. is_length(ch_length)) THEN
+        CALL fix_length(gap, LENGTH_FALLBACK, status)
+        CALL fix_length(ch_length, LENGTH_FALLBACK, status)
+      ELSE
+        ! No usable channel: the face is taken as a vertical plate.
+        nat_orient = VERTICAL
+        status = IBSET(status, STATUS_BAD_LENGTH)
+      END IF
+    END IF
+
+    theta = theta_deg
+    IF (nat_orient == INCLINED .AND. .NOT. IEEE_IS_FINITE(theta)) THEN
+      theta = 0.0_dp
+      status = IBSET(status, STATUS_BAD_ANGLE)
+    END IF
+
+    speed = velocity_mag
+    IF (IEEE_IS_NAN(speed)) THEN
+      speed = 0.0_dp
+      status = IBSET(status, STATUS_BAD_VELOCITY)
+    ELSE IF (speed < 0.0_dp .OR. speed > VELOCITY_MAX) THEN
+      speed = MIN(ABS(speed), VELOCITY_MAX)
+      status = IBSET(status, STATUS_BAD_VELOCITY)
+    END IF
+
+    ! TRAFOLO writes Lc_forced = 0 for still air: it only has to be valid where forced convection acts.
+    L_fcd = Lc_forced
+    IF (FcdOrient_in /= FCD_NONE .AND. speed >= STILL_AIR_VELOCITY_THRESHOLD) &
+      CALL fix_length(L_fcd, L_nat, status)
+
+    h_final = htc_evaluate_core(fluid_id, T_s, T_a, nat_orient, FcdOrient_in, L_nat, L_fcd, theta, speed, &
+                                gap, ch_length)
+    IF (.NOT. IEEE_IS_FINITE(h_final) .OR. h_final < 0.0_dp) THEN
+      h_final = H_FALLBACK
+      status = IBSET(status, STATUS_BAD_RESULT)
+    END IF
+  END SUBROUTINE htc_evaluate_safe
+
+  PURE LOGICAL FUNCTION is_length(L)
+    REAL(KIND=dp), INTENT(IN) :: L
+    is_length = IEEE_IS_FINITE(L) .AND. L > 0.0_dp
+  END FUNCTION is_length
+
+  ! A length that is not positive and finite becomes fallback; one outside [LENGTH_MIN, LENGTH_MAX] its limit.
+  PURE SUBROUTINE fix_length(L, fallback, status)
+    REAL(KIND=dp), INTENT(INOUT) :: L
+    REAL(KIND=dp), INTENT(IN)    :: fallback
+    INTEGER,       INTENT(INOUT) :: status
+    IF (.NOT. is_length(L)) THEN
+      L = fallback
+    ELSE IF (L < LENGTH_MIN .OR. L > LENGTH_MAX) THEN
+      L = MIN(MAX(L, LENGTH_MIN), LENGTH_MAX)
+    ELSE
+      RETURN
+    END IF
+    status = IBSET(status, STATUS_BAD_LENGTH)
+  END SUBROUTINE fix_length
+
 END MODULE htc_core
 
 
 ! Elmer shim -- external (non-module) function so it is callable by name from a
-! SIF Procedure line. Reads BC parameters via DefUtils, clamps T_surface,
-! asserts unit sanity, then defers to the pure htc_evaluate_core.
+! SIF Procedure line. Reads BC parameters via DefUtils and defers to htc_evaluate_safe,
+! which corrects any unphysical input. It never stops the run: missing parameters get
+! defaults, and each kind of correction is warned about once per process.
 FUNCTION htc_evaluate(Model, n, T_surface) RESULT(h_final)
   USE DefUtils
-  USE htc_core,                 ONLY: htc_evaluate_core
-  USE htc_convection_constants, ONLY: FLUID_AIR
+  USE htc_core,                 ONLY: htc_evaluate_safe, STATUS_HOT_SURFACE, STATUS_COLD_SURFACE, &
+                                      STATUS_NAN_SURFACE, STATUS_BAD_AMBIENT, STATUS_BAD_LENGTH, &
+                                      STATUS_BAD_VELOCITY, STATUS_BAD_ANGLE, STATUS_BAD_RESULT, STATUS_BITS
+  USE htc_convection_constants, ONLY: FLUID_AIR, VERTICAL, FCD_NONE, T_MIN_K, T_MAX_K, H_FALLBACK
   IMPLICIT NONE
   ! dp comes from DefUtils (Elmer's Types module). It is numerically equal to
   ! SELECTED_REAL_KIND(15, 307), the kind used by htc_core / htc_convection_constants.
@@ -322,31 +452,56 @@ FUNCTION htc_evaluate(Model, n, T_surface) RESULT(h_final)
 
   TYPE(ValueList_t), POINTER :: BC, Constants
   TYPE(Variable_t),  POINTER :: htc_var
-  INTEGER       :: NatOrient_in, FcdOrient_in, fluid_id
+  INTEGER       :: NatOrient_in, FcdOrient_in, fluid_id, status
   REAL(KIND=dp) :: Lc_nat, Lc_forced, theta_deg, T_ambient_C, velocity_mag
-  REAL(KIND=dp) :: channel_gap, channel_length, T_surf_K, T_amb_K
+  REAL(KIND=dp) :: channel_gap, channel_length
   REAL(KIND=dp), PARAMETER :: CELSIUS_TO_KELVIN = 273.15_dp
-  LOGICAL       :: Found
+  REAL(KIND=dp), PARAMETER :: T_AMBIENT_DEFAULT_C = 20.0_dp
+  ! The report of a missing parameter, after those of the STATUS_* bits.
+  INTEGER, PARAMETER :: MISSING_PARAMETER = STATUS_BITS
+  LOGICAL       :: Found, Missing
+  LOGICAL, SAVE :: Reported(0:STATUS_BITS) = .FALSE.
 
   BC => GetBC()
-  IF (.NOT. ASSOCIATED(BC)) CALL Fatal('htc_evaluate', 'No active boundary condition')
+  IF (.NOT. ASSOCIATED(BC)) THEN
+    CALL Report(MISSING_PARAMETER, 'Called without a boundary condition, h = '//TRIM(Num(H_FALLBACK))// &
+        ' W/m^2/K is used.')
+    h_final = H_FALLBACK
+    RETURN
+  END IF
   Constants => GetConstants()
+  Missing = .FALSE.
 
   NatOrient_in = GetInteger(BC, 'NatOrient', Found)
-  IF (.NOT. Found) CALL Fatal('htc_evaluate', 'Missing SIF parameter: NatOrient')
+  IF (.NOT. Found) THEN
+    NatOrient_in = VERTICAL
+    Missing = .TRUE.
+  END IF
   FcdOrient_in = GetInteger(BC, 'FcdOrient', Found)
-  IF (.NOT. Found) CALL Fatal('htc_evaluate', 'Missing SIF parameter: FcdOrient')
-
+  IF (.NOT. Found) THEN
+    FcdOrient_in = FCD_NONE
+    Missing = .TRUE.
+  END IF
   Lc_nat = GetConstReal(BC, 'Lc_nat', Found)
-  IF (.NOT. Found) CALL Fatal('htc_evaluate', 'Missing SIF parameter: Lc_nat')
+  IF (.NOT. Found) THEN
+    Lc_nat = 0.0_dp    ! htc_evaluate_safe takes LENGTH_FALLBACK
+    Missing = .TRUE.
+  END IF
 
   ! T_ambient, velocity_mag and Fluid Id are uniform across the case in this
   ! workflow. Read from the BC first (per-face override); fall back to the SIF
-  ! Constants block. Temperatures are Celsius (matches Elmer's Temperature).
+  ! Constants block, then to the BC's External Temperature. Temperatures are
+  ! Celsius (matches Elmer's Temperature).
   T_ambient_C = GetConstReal(BC, 'T_ambient', Found)
   IF (.NOT. Found .AND. ASSOCIATED(Constants)) &
     T_ambient_C = GetConstReal(Constants, 'T_ambient', Found)
-  IF (.NOT. Found) CALL Fatal('htc_evaluate', 'Missing T_ambient (BC or Constants)')
+  IF (.NOT. Found) T_ambient_C = GetConstReal(BC, 'External Temperature', Found)
+  IF (.NOT. Found) THEN
+    T_ambient_C = T_AMBIENT_DEFAULT_C
+    Missing = .TRUE.
+  END IF
+  IF (Missing) CALL Report(MISSING_PARAMETER, 'A convection parameter (NatOrient, FcdOrient, Lc_nat or '// &
+      'T_ambient) is missing, defaults are used: vertical face, no forced flow, 0.05 m, 20 C.')
 
   velocity_mag = GetConstReal(BC, 'velocity_mag', Found)
   IF (.NOT. Found .AND. ASSOCIATED(Constants)) &
@@ -362,19 +517,12 @@ FUNCTION htc_evaluate(Model, n, T_surface) RESULT(h_final)
   channel_gap    = GetConstReal(BC, 'channel_gap',    Found); IF (.NOT. Found) channel_gap    = 0.0_dp
   channel_length = GetConstReal(BC, 'channel_length', Found); IF (.NOT. Found) channel_length = 0.0_dp
 
-  ! SIF Temperature variable and T_ambient are both Celsius; convert to Kelvin
-  ! before the core (air-property correlations require absolute temperature).
-  ! Clamp T_surface here, not in core -- Elmer may call with T_surface = 0 C on
-  ! the first iteration of a fresh run, which is in range; defend against a
-  ! stray sub-physical value instead.
-  T_amb_K  = T_ambient_C + CELSIUS_TO_KELVIN
-  T_surf_K = MAX(T_surface + CELSIUS_TO_KELVIN, 200.0_dp)
-  IF (T_surf_K < 100.0_dp .OR. T_surf_K > 1500.0_dp) &
-    CALL Fatal('htc_evaluate', 'T_surface out of plausible range -- check SIF units')
-
-  h_final = htc_evaluate_core(fluid_id, T_surf_K, T_amb_K, NatOrient_in, FcdOrient_in, &
-                              Lc_nat, Lc_forced, theta_deg, velocity_mag, &
-                              channel_gap, channel_length)
+  ! SIF Temperature variable and T_ambient are both Celsius; the core works in
+  ! Kelvin (air-property correlations require absolute temperature).
+  CALL htc_evaluate_safe(fluid_id, T_surface + CELSIUS_TO_KELVIN, T_ambient_C + CELSIUS_TO_KELVIN, &
+                         NatOrient_in, FcdOrient_in, Lc_nat, Lc_forced, theta_deg, velocity_mag, &
+                         channel_gap, channel_length, h_final, status)
+  IF (status /= 0) CALL ReportCorrections()
 
   ! Expose h as a nodal field for the full-results output. The "Htc" variable
   ! is declared on the HeatSolver only when Save Full Results is enabled, so
@@ -387,4 +535,48 @@ FUNCTION htc_evaluate(Model, n, T_surface) RESULT(h_final)
       htc_var % Values(n) = h_final
     END IF
   END IF
+
+CONTAINS
+
+  SUBROUTINE ReportCorrections()
+    IF (BTEST(status, STATUS_HOT_SURFACE)) CALL Report(STATUS_HOT_SURFACE, 'Surface temperature '// &
+        TRIM(Num(T_surface))//' C is above the range of the convection model, h taken at '// &
+        TRIM(Num(T_MAX_K - CELSIUS_TO_KELVIN))//' C. Check the losses and the cooling.')
+    IF (BTEST(status, STATUS_COLD_SURFACE)) CALL Report(STATUS_COLD_SURFACE, 'Surface temperature '// &
+        TRIM(Num(T_surface))//' C is below the range of the convection model, h taken at '// &
+        TRIM(Num(T_MIN_K - CELSIUS_TO_KELVIN))//' C. Check the heat sources and the ambient temperature.')
+    IF (BTEST(status, STATUS_NAN_SURFACE)) CALL Report(STATUS_NAN_SURFACE, &
+        'Surface temperature is not a number, h taken at the ambient temperature.')
+    IF (BTEST(status, STATUS_BAD_AMBIENT)) CALL Report(STATUS_BAD_AMBIENT, 'Ambient temperature '// &
+        TRIM(Num(T_ambient_C))//' C is outside the range of the convection model, the nearest valid value is used.')
+    IF (BTEST(status, STATUS_BAD_LENGTH)) CALL Report(STATUS_BAD_LENGTH, 'A characteristic length (Lc_nat '// &
+        TRIM(Num(Lc_nat))//', Lc_forced '//TRIM(Num(Lc_forced))//', channel '//TRIM(Num(channel_gap))//' x '// &
+        TRIM(Num(channel_length))//' m) is not a positive length up to 1000 m, a valid one is used.')
+    IF (BTEST(status, STATUS_BAD_VELOCITY)) CALL Report(STATUS_BAD_VELOCITY, 'Air velocity '// &
+        TRIM(Num(velocity_mag))//' m/s is not a valid speed, the nearest valid value is used.')
+    IF (BTEST(status, STATUS_BAD_ANGLE)) CALL Report(STATUS_BAD_ANGLE, 'Inclination '//TRIM(Num(theta_deg))// &
+        ' deg is not a number, 0 deg is used.')
+    IF (BTEST(status, STATUS_BAD_RESULT)) CALL Report(STATUS_BAD_RESULT, &
+        'The convection model gave no finite h, '//TRIM(Num(H_FALLBACK))//' W/m^2/K is used.')
+  END SUBROUTINE ReportCorrections
+
+  SUBROUTINE Report(kind, text)
+    INTEGER,          INTENT(IN) :: kind
+    CHARACTER(LEN=*), INTENT(IN) :: text
+    IF (Reported(kind)) RETURN
+    Reported(kind) = .TRUE.
+    CALL Warn('htc_evaluate', text)
+  END SUBROUTINE Report
+
+  ! Plain for ordinary magnitudes; exponent form for the others, NaN and Infinity.
+  FUNCTION Num(x) RESULT(text)
+    REAL(KIND=dp), INTENT(IN) :: x
+    CHARACTER(LEN=32) :: text
+    IF (ABS(x) >= 0.1_dp .AND. ABS(x) < 1.0e6_dp) THEN
+      WRITE(text, '(F0.1)') x
+    ELSE
+      WRITE(text, '(ES12.4E3)') x
+    END IF
+    text = ADJUSTL(text)
+  END FUNCTION Num
 END FUNCTION htc_evaluate
