@@ -3069,6 +3069,7 @@ END FUNCTION isComponentName
   TYPE(Element_t), POINTER :: Element
   TYPE(Mesh_t), POINTER :: Mesh
   INTEGER :: t, n, BCid, NoSlices
+  REAL(KIND=dp) :: WFlux
   LOGICAL :: Found
   LOGICAL :: Parallel 
   
@@ -3120,11 +3121,114 @@ END FUNCTION isComponentName
       IF (.NOT. ASSOCIATED(BC) ) CALL Fatal('ComputeElectrodeArea', 'Boundary not found!')
       Comp % ElArea = GetConstReal(BC, 'Area', Found)
       IF (.NOT. Found) CALL Fatal('ComputeElectrodeArea', '"Area" not found!')
+
+      ! DEV-1624: the stranded current density is J = N I w / A. With the W vector, w has the
+      ! flux of the meshed body, not the area of the meshed electrode face; on a mesh coarser
+      ! than the wire the two differ wire by wire, and parallel wires get unequal turns.
+      IF (Comp % CoilType == 'stranded' .AND. GetLogical(CompParams, 'Coil Use W Vector', Found)) THEN
+        WFlux = WVectorElectrodeFlux(Comp, CompParams, BCid)
+        IF (WFlux > 0._dp) THEN
+          WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Component '//I2S(Comp % ComponentId)// &
+              ' W vector flux ', WFlux, ' replaces the electrode face area ', Comp % ElArea
+          CALL Info('ComputeElectrodeArea', Message, Level=8)
+          Comp % ElArea = WFlux
+        ELSE
+          CALL Warn('ComputeElectrodeArea', 'No W vector flux for component '// &
+              I2S(Comp % ComponentId)//', using the electrode face area')
+        END IF
+      END IF
     END IF
   END IF    
   
 !-------------------------------------------------------------------
  END SUBROUTINE ComputeElectrodeArea
+!-------------------------------------------------------------------
+
+!-------------------------------------------------------------------
+!> DEV-1624: flux of a stranded coil's W vector through its electrode BCid.
+!> CoilSolver scales the W vector to unit length and then removes its divergence
+!> ('Fix Input Current Density'), so the flux is the same through every section of
+!> the meshed body. Discrete form: int_V w . grad(s) dV with s = 1 on the electrode
+!> nodes and 0 elsewhere. Returns 0 when the W vector variable does not exist.
+!-------------------------------------------------------------------
+ FUNCTION WVectorElectrodeFlux(Comp, CompParams, BCid) RESULT(Flux)
+!-------------------------------------------------------------------
+  IMPLICIT NONE
+  TYPE(Component_t), POINTER :: Comp
+  TYPE(ValueList_t), POINTER :: CompParams
+  INTEGER :: BCid
+  REAL(KIND=dp) :: Flux
+
+  TYPE(Mesh_t), POINTER :: Mesh
+  TYPE(Element_t), POINTER :: Element
+  TYPE(Variable_t), POINTER :: WVar
+  TYPE(ValueList_t), POINTER :: BC
+  TYPE(Nodes_t), SAVE :: Nodes
+  TYPE(GaussIntegrationPoints_t) :: IP
+  CHARACTER(LEN=MAX_NAME_LEN) :: WName
+  REAL(KIND=dp), ALLOCATABLE :: OnElectrode(:), Basis(:), dBasisdx(:,:), Wn(:,:), s(:)
+  INTEGER, POINTER :: NodePerm(:)
+  REAL(KIND=dp) :: detJ, w(3), GradS(3)
+  INTEGER :: i, j, k, t, n, nmax, dofs
+  LOGICAL :: Found, Stat, Parallel
+
+  Flux = 0._dp
+  Mesh => CurrentModel % Mesh
+  Parallel = ( ParEnv % PEs > 1 ) .AND. ( .NOT. Mesh % SingleMesh )
+
+  WName = GetString(CompParams, 'W Vector Variable Name', Found)
+  IF (.NOT. Found) WName = 'CoilCurrent e'
+  WVar => VariableGet(Mesh % Variables, WName)
+  IF (.NOT. ASSOCIATED(WVar)) RETURN
+  dofs = WVar % DOFs
+
+  ALLOCATE(OnElectrode(Mesh % NumberOfNodes))
+  OnElectrode = 0._dp
+  DO t = Mesh % NumberOfBulkElements + 1, Mesh % NumberOfBulkElements + Mesh % NumberOfBoundaryElements
+    Element => Mesh % Elements(t)
+    BC => GetBC(Element)
+    IF (.NOT. ASSOCIATED(BC)) CYCLE
+    IF (GetInteger(BC, 'Boundary Id', Found) /= BCid) CYCLE
+    n = Element % TYPE % NumberOfNodes
+    OnElectrode(Element % NodeIndexes(1:n)) = 1._dp
+  END DO
+  ! A bulk element may touch the electrode only through nodes it shares with another partition.
+  IF (Parallel) THEN
+    ALLOCATE(NodePerm(Mesh % NumberOfNodes))
+    NodePerm = [(i, i = 1, Mesh % NumberOfNodes)]
+    CALL ParallelSumNodalVector(Mesh, OnElectrode, NodePerm, Op = 2)
+    DEALLOCATE(NodePerm)
+  END IF
+
+  nmax = Mesh % MaxElementNodes
+  ALLOCATE(Basis(nmax), dBasisdx(nmax,3), Wn(3,nmax), s(nmax))
+  DO t = 1, Mesh % NumberOfBulkElements
+    Element => Mesh % Elements(t)
+    IF (.NOT. ElAssocToComp(Element, Comp)) CYCLE
+    n = Element % TYPE % NumberOfNodes
+    s(1:n) = OnElectrode(Element % NodeIndexes(1:n))
+    IF (ALL(s(1:n) == 0._dp)) CYCLE
+    IF (.NOT. ASSOCIATED(Element % DGIndexes)) CYCLE
+    Wn = 0._dp
+    DO i = 1, n
+      j = WVar % Perm(Element % DGIndexes(i))
+      IF (j == 0) CYCLE
+      Wn(1:MIN(dofs,3), i) = WVar % Values(dofs*(j-1)+1 : dofs*(j-1)+MIN(dofs,3))
+    END DO
+    CALL GetElementNodes(Nodes, UElement = Element)
+    IP = GaussPoints(Element)
+    DO k = 1, IP % n
+      Stat = ElementInfo(Element, Nodes, IP % U(k), IP % V(k), IP % W(k), detJ, Basis, dBasisdx)
+      w = MATMUL(Wn(1:3,1:n), Basis(1:n))
+      GradS = MATMUL(s(1:n), dBasisdx(1:n,1:3))
+      Flux = Flux + IP % s(k) * detJ * SUM(w * GradS)
+    END DO
+  END DO
+
+  IF (Parallel) Flux = ParallelReduction(Flux)
+  Flux = ABS(Flux)
+!-------------------------------------------------------------------
+ END FUNCTION WVectorElectrodeFlux
 !-------------------------------------------------------------------
 
 ! This function is originally from ElementUtils. However, there is 
