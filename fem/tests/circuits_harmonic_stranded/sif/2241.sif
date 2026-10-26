@@ -246,7 +246,8 @@ End
 
 Solver 4 :: Reference Norm = Real 5.88944303E-01 
 Solver 4 :: Reference Norm Tolerance = Real 1E-3
-Solver 6 :: Reference Norm = Real 4.11924917E-07
+! DEV-1624: the electrode area is now the flux of the W potential, 1.0262 times the face area here, so the coil carries N I instead of 1.026 N I and the Solver 6 norm drops 2.55 %.
+Solver 6 :: Reference Norm = Real 4.01419764E-07
 Solver 6 :: Reference Norm Tolerance = Real 1E-3
 !Solver 7 :: Reference Norm = Real 3.09010812E-11 // This is too small to be tested, How to test the other components?
 !Solver 7 :: Reference Norm Tolerance = Real 1E-3
