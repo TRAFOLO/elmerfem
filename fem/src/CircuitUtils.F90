@@ -3234,9 +3234,9 @@ END FUNCTION isComponentName
   TYPE(Nodes_t), SAVE :: Nodes
   TYPE(GaussIntegrationPoints_t) :: IP
   REAL(KIND=dp), ALLOCATABLE :: OnElectrode(:), Basis(:), dBasisdx(:,:), Wbase(:), s(:)
-  INTEGER, POINTER :: NodePerm(:)
+  INTEGER, ALLOCATABLE :: LocIds(:), AllIds(:), Order(:), Counts(:), Displ(:)
   REAL(KIND=dp) :: detJ, w(3), GradS(3)
-  INTEGER :: i, k, t, n, nmax
+  INTEGER :: i, k, t, n, nmax, nLoc, nAll, nPE, comm, ierr
   LOGICAL :: Found, Stat, Parallel
 
   Flux = 0._dp
@@ -3264,11 +3264,31 @@ END FUNCTION isComponentName
     OnElectrode(Element % NodeIndexes(1:n)) = 1._dp
   END DO
   ! A bulk element may touch the electrode only through nodes it shares with another partition.
+  ! Their global numbers are gathered over the ranks ParallelReduction sums over. Not with
+  ! ParallelSumNodalVector: in the circuit solver, which has no matrix, its neighbour exchange
+  ! runs on the neighbour lists of whichever solver ran last on each rank, and hung.
   IF (Parallel) THEN
-    ALLOCATE(NodePerm(Mesh % NumberOfNodes))
-    NodePerm = [(i, i = 1, Mesh % NumberOfNodes)]
-    CALL ParallelSumNodalVector(Mesh, OnElectrode, NodePerm, Op = 2)
-    DEALLOCATE(NodePerm)
+    comm = ParEnv % ActiveComm
+    IF (COUNT(ParEnv % Active) <= 0) comm = ELMER_COMM_WORLD
+    CALL MPI_COMM_SIZE(comm, nPE, ierr)
+    ALLOCATE(Counts(nPE), Displ(nPE))
+    nLoc = COUNT(OnElectrode > 0._dp)
+    ALLOCATE(LocIds(MAX(nLoc,1)))
+    LocIds(1:nLoc) = PACK(Mesh % ParallelInfo % GlobalDOFs(1:Mesh % NumberOfNodes), OnElectrode > 0._dp)
+    CALL MPI_ALLGATHER(nLoc, 1, MPI_INTEGER, Counts, 1, MPI_INTEGER, comm, ierr)
+    nAll = SUM(Counts)
+    Displ(1) = 0
+    DO i = 2, nPE
+      Displ(i) = Displ(i-1) + Counts(i-1)
+    END DO
+    ALLOCATE(AllIds(MAX(nAll,1)), Order(MAX(nAll,1)))
+    AllIds = 0
+    Order = 0
+    CALL MPI_ALLGATHERV(LocIds, nLoc, MPI_INTEGER, AllIds, Counts, Displ, MPI_INTEGER, comm, ierr)
+    CALL SortI(nAll, AllIds, Order)
+    DO i = 1, Mesh % NumberOfNodes
+      IF (SearchI(nAll, AllIds, Mesh % ParallelInfo % GlobalDOFs(i)) > 0) OnElectrode(i) = 1._dp
+    END DO
   END IF
 
   nmax = Mesh % MaxElementDOFs
