@@ -105,7 +105,17 @@ IF(CMAKE_SYSTEM_NAME MATCHES "Windows")
     ENDIF()
 
     # msys2 runtime dynamic link libraries
-    INSTALL(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../bundle_msys2/bin" DESTINATION ".")
+    # TRAFOLO: install these only when the sibling dir actually exists. Before:
+    # the INSTALL was unconditional, so `cmake --install` failed on any checkout
+    # without a ../bundle_msys2 (e.g. the PR CI workspace), aborting before ctest.
+    # Upstream devel later replaced this whole block with an opt-in
+    # BUNDLE_MSYS2_PACKAGES option; this guard is the minimal equivalent until
+    # that merge lands. Limitation: a packaging run that EXPECTS the DLLs gets no
+    # error if the dir is missing - the pruned TRAFOLO bundle pipeline supplies
+    # its own runtime closure and does not rely on this rule.
+    IF(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../bundle_msys2/bin")
+      INSTALL(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/../bundle_msys2/bin" DESTINATION ".")
+    ENDIF()
 
 # Here we augment the installation by some needed dll's that should be included with QT5. 
 # This is a quick and dirty remedy. I'm sure there is a prettier way too. 
