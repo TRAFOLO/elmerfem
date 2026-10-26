@@ -239,8 +239,7 @@ Boundary Condition 7  !---- Beta0
    Target Boundaries = $ A1_beta0
    Body 3: Beta = Real 0
 End
-! DEV-1624: the electrode area is now the flux of the W potential, 1.1043 times the face area here, so the coil carries N I instead of 1.104 N I and both norms drop 9.45 %.
-Solver 6 :: Reference Norm = Real 2.08891330E-03
+Solver 6 :: Reference Norm = Real 2.30686587E-03
 Solver 6 :: Reference Norm Tolerance = Real 1E-03
-Solver 7 :: Reference Norm = Real 4.60769701E+04 
+Solver 7 :: Reference Norm = Real 5.08844468E+04 
 Solver 7 :: Reference Norm Tolerance = Real 1E-03
