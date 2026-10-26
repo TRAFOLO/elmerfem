@@ -23,11 +23,11 @@
 !
 !/******************************************************************************
 ! *
-! *  Authors: TRAFOLO Sp. z o.o.
+! *  Authors: TRAFOLO Engineering
 ! *  Email:   info@trafolo.eu
 ! *  Web:     https://trafolo.eu
-! *  Address: Pl. Solny 15,
-! *           50-062 Wrocław, Poland
+! *  Address: Lastādijas Street 12 k-3,
+! *           Riga, LV-1050, Latvia
 ! *
 ! *  Original Date: July 22, 2022
 ! *  Last mod Date: April 30, 2026 - added iGSE post-processing combining logic

@@ -23,11 +23,11 @@
 !
 !/******************************************************************************
 ! *
-! *  Authors: TRAFOLO Sp. z o.o.
+! *  Authors: TRAFOLO Engineering
 ! *  Email:   info@trafolo.eu
 ! *  Web:     https://trafolo.eu
-! *  Address: Pl. Solny 15,
-! *           50-062 Wroclaw, Poland
+! *  Address: Lastādijas Street 12 k-3,
+! *           Riga, LV-1050, Latvia
 ! *
 ! *  Original Date: June 9, 2026
 ! *
