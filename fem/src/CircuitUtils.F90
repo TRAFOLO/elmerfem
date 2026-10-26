@@ -2514,6 +2514,12 @@ MODULE CircuitsMod
   ! A narrower span is a direction field that is missing or constant over the winding.
   REAL(KIND=dp), PARAMETER :: SHEET_FIELD_MIN_SPAN = 1.0e-6_dp
 
+  ! The flux of a stranded coil's direction field through its electrode (StrandedElectrodeFlux)
+  ! is within a few % of the electrode face area, or above it in a thick ring (DEV-1624). Far
+  ! below it the electrode is no end face of the coil, e.g. an inner section whose two sides
+  ! cancel, and the face area stays.
+  REAL(KIND=dp), PARAMETER :: STRANDED_FLUX_MIN_AREA_RATIO = 0.5_dp
+
 CONTAINS 
 
 !------------------------------------------------------------------------------
@@ -3069,6 +3075,9 @@ END FUNCTION isComponentName
   TYPE(Element_t), POINTER :: Element
   TYPE(Mesh_t), POINTER :: Mesh
   INTEGER :: t, n, BCid, NoSlices
+  REAL(KIND=dp) :: WFlux
+  LOGICAL :: UseWvec
+  CHARACTER(LEN=MAX_NAME_LEN) :: WName, Field
   LOGICAL :: Found
   LOGICAL :: Parallel 
   
@@ -3120,11 +3129,179 @@ END FUNCTION isComponentName
       IF (.NOT. ASSOCIATED(BC) ) CALL Fatal('ComputeElectrodeArea', 'Boundary not found!')
       Comp % ElArea = GetConstReal(BC, 'Area', Found)
       IF (.NOT. Found) CALL Fatal('ComputeElectrodeArea', '"Area" not found!')
+
+      ! DEV-1624: the stranded current density is J = N I w / A. Its direction field w, the W
+      ! vector or the gradient of the W potential, has the flux of the meshed body, not the area
+      ! of the meshed electrode face; on a mesh coarser than the wire the two differ wire by
+      ! wire, and parallel wires get unequal turns. A closed coil has no end face to measure it.
+      IF (Comp % CoilType == 'stranded' .AND. .NOT. GetLogical(CompParams, 'Coil Closed', Found)) THEN
+        CALL GetStrandedDirectionField(CompParams, UseWvec, WName)
+        WFlux = StrandedElectrodeFlux(Comp, BCid, UseWvec, WName)
+        IF (UseWvec) THEN
+          Field = 'W vector "'//TRIM(WName)//'"'
+        ELSE
+          Field = 'W potential'
+        END IF
+        IF (WFlux > 0._dp .AND. WFlux >= STRANDED_FLUX_MIN_AREA_RATIO * Comp % ElArea) THEN
+          WRITE(Message,'(A,ES12.5,A,ES12.5)') 'Component '//I2S(Comp % ComponentId)//' '// &
+              TRIM(Field)//' flux ', WFlux, ' replaces the electrode face area ', Comp % ElArea
+          CALL Info('ComputeElectrodeArea', Message, Level=8)
+          Comp % ElArea = WFlux
+        ELSE
+          WRITE(Message,'(A,ES12.5,A,ES12.5,A)') 'Component '//I2S(Comp % ComponentId)//' '// &
+              TRIM(Field)//' flux ', WFlux, ' is far below the electrode face area ', Comp % ElArea, &
+              ', which stays'
+          CALL Warn('ComputeElectrodeArea', Message)
+        END IF
+      END IF
     END IF
   END IF    
   
 !-------------------------------------------------------------------
  END SUBROUTINE ComputeElectrodeArea
+!-------------------------------------------------------------------
+
+!-------------------------------------------------------------------
+!> DEV-1624: the direction field Add_stranded (CircuitsAndDynamics) gives a 3D stranded
+!> component, by the same rule, which the two must keep. UseWvec: the component's 'Coil Use
+!> W Vector', else the circuit solver's, else whether a W vector is named. WName: the W vector
+!> of all stranded components, the first a stranded component names, else the solver's.
+!-------------------------------------------------------------------
+ SUBROUTINE GetStrandedDirectionField(CompParams, UseWvec, WName)
+!-------------------------------------------------------------------
+  IMPLICIT NONE
+  TYPE(ValueList_t), POINTER :: CompParams
+  LOGICAL :: UseWvec
+  CHARACTER(LEN=MAX_NAME_LEN) :: WName
+
+  TYPE(ValueList_t), POINTER :: SolverParams
+  CHARACTER(LEN=MAX_NAME_LEN) :: CoilType
+  LOGICAL :: Found, Found2, UseWvec0
+  INTEGER :: i
+
+  SolverParams => CurrentModel % Solver % Values
+  UseWvec0 = GetLogical(SolverParams, 'Coil Use W Vector', Found2)
+  Found = .FALSE.
+  DO i = 1, CurrentModel % NumberOfComponents
+    CoilType = ListGetString(CurrentModel % Components(i) % Values, 'Coil Type', Found)
+    IF (.NOT. Found) CYCLE
+    IF (CoilType == 'stranded') THEN
+      WName = GetString(CurrentModel % Components(i) % Values, 'W Vector Variable Name', Found)
+      IF (Found) EXIT
+    END IF
+  END DO
+  IF (.NOT. Found) THEN
+    WName = GetString(SolverParams, 'W Vector Variable Name', Found)
+    IF (.NOT. Found) THEN
+      IF (GetLogical(SolverParams, 'Use Nodal CoilCurrent', Found)) WName = 'CoilCurrent'
+    END IF
+    IF (.NOT. Found) THEN
+      IF (GetLogical(SolverParams, 'Use Elemental CoilCurrent', Found)) WName = 'CoilCurrent e'
+    END IF
+    IF (.NOT. Found2) UseWvec0 = Found
+  END IF
+  IF (.NOT. Found) WName = 'W Vector E'
+
+  UseWvec = GetLogical(CompParams, 'Coil Use W Vector', Found)
+  IF (.NOT. Found) UseWvec = UseWvec0
+!-------------------------------------------------------------------
+ END SUBROUTINE GetStrandedDirectionField
+!-------------------------------------------------------------------
+
+!-------------------------------------------------------------------
+!> DEV-1624: flux of a stranded coil's direction field through its electrode BCid, read as
+!> Add_stranded reads it: the W vector WName, or minus the gradient of the W potential. The
+!> flux is the same through every section of the meshed body: CoilSolver removes the
+!> divergence of the W vector ('Fix Input Current Density'), and the W potential solves a
+!> Laplace equation. Discrete form: int_V w . grad(s) dV with s = 1 on the electrode nodes
+!> and 0 elsewhere. Returns 0 when the field does not exist.
+!-------------------------------------------------------------------
+ FUNCTION StrandedElectrodeFlux(Comp, BCid, UseWvec, WName) RESULT(Flux)
+!-------------------------------------------------------------------
+  USE CircuitUtils
+  IMPLICIT NONE
+  TYPE(Component_t), POINTER :: Comp
+  INTEGER :: BCid
+  LOGICAL :: UseWvec
+  CHARACTER(LEN=*) :: WName
+  REAL(KIND=dp) :: Flux
+
+  TYPE(Mesh_t), POINTER :: Mesh
+  TYPE(Element_t), POINTER :: Element
+  TYPE(Variable_t), POINTER :: Wpot
+  TYPE(VariableHandle_t) :: Wvec_h
+  TYPE(ValueList_t), POINTER :: BC
+  TYPE(Nodes_t), SAVE :: Nodes
+  TYPE(GaussIntegrationPoints_t) :: IP
+  REAL(KIND=dp), ALLOCATABLE :: OnElectrode(:), Basis(:), dBasisdx(:,:), Wbase(:), s(:)
+  INTEGER, POINTER :: NodePerm(:)
+  REAL(KIND=dp) :: detJ, w(3), GradS(3)
+  INTEGER :: i, k, t, n, nmax
+  LOGICAL :: Found, Stat, Parallel
+
+  Flux = 0._dp
+  Mesh => CurrentModel % Mesh
+  Parallel = ( ParEnv % PEs > 1 ) .AND. ( .NOT. Mesh % SingleMesh )
+
+  IF (UseWvec) THEN
+    CALL ListInitElementVariable(Wvec_h, WName, Found = Found)
+  ELSE
+    CALL GetWPotentialVar(Wpot)
+    Found = ASSOCIATED(Wpot)
+  END IF
+  ! All partitions return together, or the parallel sums below would wait for the others.
+  IF (Parallel) Found = ParallelReduction(MERGE(1._dp, 0._dp, Found), 1) > 0.5_dp
+  IF (.NOT. Found) RETURN
+
+  ALLOCATE(OnElectrode(Mesh % NumberOfNodes))
+  OnElectrode = 0._dp
+  DO t = Mesh % NumberOfBulkElements + 1, Mesh % NumberOfBulkElements + Mesh % NumberOfBoundaryElements
+    Element => Mesh % Elements(t)
+    BC => GetBC(Element)
+    IF (.NOT. ASSOCIATED(BC)) CYCLE
+    IF (GetInteger(BC, 'Boundary Id', Found) /= BCid) CYCLE
+    n = Element % TYPE % NumberOfNodes
+    OnElectrode(Element % NodeIndexes(1:n)) = 1._dp
+  END DO
+  ! A bulk element may touch the electrode only through nodes it shares with another partition.
+  IF (Parallel) THEN
+    ALLOCATE(NodePerm(Mesh % NumberOfNodes))
+    NodePerm = [(i, i = 1, Mesh % NumberOfNodes)]
+    CALL ParallelSumNodalVector(Mesh, OnElectrode, NodePerm, Op = 2)
+    DEALLOCATE(NodePerm)
+  END IF
+
+  nmax = Mesh % MaxElementDOFs
+  ALLOCATE(Basis(nmax), dBasisdx(nmax,3), Wbase(nmax), s(nmax))
+  DO t = 1, Mesh % NumberOfBulkElements
+    Element => Mesh % Elements(t)
+    ! A halo copy of an element of another partition is summed there, as the assembly does.
+    IF (Parallel) THEN
+      IF (Element % PartIndex /= ParEnv % MyPE) CYCLE
+    END IF
+    IF (.NOT. ElAssocToComp(Element, Comp)) CYCLE
+    n = Element % TYPE % NumberOfNodes
+    s(1:n) = OnElectrode(Element % NodeIndexes(1:n))
+    IF (ALL(s(1:n) == 0._dp)) CYCLE
+    IF (.NOT. UseWvec) CALL GetLocalSolution(Wbase, UElement = Element, UVariable = Wpot, Found = Found)
+    CALL GetElementNodes(Nodes, UElement = Element)
+    IP = GaussPoints(Element)
+    DO k = 1, IP % n
+      Stat = ElementInfo(Element, Nodes, IP % U(k), IP % V(k), IP % W(k), detJ, Basis, dBasisdx)
+      IF (UseWvec) THEN
+        w = ListGetElementVectorSolution(Wvec_h, Basis, Element, dofs = 3)
+      ELSE
+        w = -MATMUL(Wbase(1:n), dBasisdx(1:n,1:3))
+      END IF
+      GradS = MATMUL(s(1:n), dBasisdx(1:n,1:3))
+      Flux = Flux + IP % s(k) * detJ * SUM(w * GradS)
+    END DO
+  END DO
+
+  IF (Parallel) Flux = ParallelReduction(Flux)
+  Flux = ABS(Flux)
+!-------------------------------------------------------------------
+ END FUNCTION StrandedElectrodeFlux
 !-------------------------------------------------------------------
 
 ! This function is originally from ElementUtils. However, there is 
