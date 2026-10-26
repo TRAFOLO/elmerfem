@@ -1,0 +1,61 @@
+! DEV-1622: unphysical or missing convection parameters on every face (hostile_bcs.sif)
+! and a heat sink that cools the block far below the range of the convection model.
+
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "block"
+  Include Path ""
+  Results Directory ""
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Steady State
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+End
+
+Constants
+  Stefan Boltzmann = 5.67e-08
+End
+
+Body 1
+  Target Bodies(1) = 1
+  Equation = 1
+  Material = 1
+  Body Force = 1
+End
+
+Equation 1
+  Active Solvers(1) = 1
+End
+
+Solver 1
+  Equation = heat equation
+  Variable = Temperature
+  Procedure = "HeatSolve" "HeatSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Preconditioning = Diagonal
+  Linear System Max Iterations = 1000
+  Linear System Convergence Tolerance = 1.0e-10
+  Nonlinear System Max Iterations = 30
+  Nonlinear System Convergence Tolerance = 1.0e-8
+  Steady State Convergence Tolerance = 1.0e-8
+  Reference Norm = 5.33907139E+02
+  Reference Norm Tolerance = 1.0e-6
+End
+
+Material 1
+  Heat Conductivity = 401.0
+  Density = 8960.0
+  Heat Capacity = 385.0
+End
+
+! A sink of about 900 W: one face (1e-300 m clamped to 1 um) holds about 26000 W/m^2/K.
+Body Force 1
+  Heat Source = -1.0e5
+End
+
+INCLUDE hostile_bcs.sif

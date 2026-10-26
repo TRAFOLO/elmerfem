@@ -1,0 +1,33 @@
+! DEV-1622: HtcSweep calls htc_evaluate for one face of each boundary condition of
+! hostile_bcs.sif at surface temperatures from -HUGE to +HUGE C, NaN and +-Infinity,
+! then with each parameter of boundary condition 1 spoilt in memory.
+
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "block"
+  Include Path ""
+  Results Directory ""
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Steady State
+  Steady State Max Iterations = 1
+End
+
+Body 1
+  Target Bodies(1) = 1
+  Equation = 1
+End
+
+Equation 1
+  Active Solvers(1) = 1
+End
+
+Solver 1
+  Equation = "HtcSweep"
+  Procedure = "HtcSweep" "HtcSweep"
+End
+
+INCLUDE hostile_bcs.sif

@@ -1,0 +1,71 @@
+! A copper block whose losses heat its surface far above the 1500 K range of the
+! convection UDF. htc_evaluate warns once and evaluates h at the limit instead of
+! stopping the run (DEV-1622).
+
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "block"
+  Include Path ""
+  Results Directory ""
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Steady State
+  Steady State Max Iterations = 1
+  Output Intervals = 1
+End
+
+Constants
+  Stefan Boltzmann = 5.67e-08
+End
+
+Body 1
+  Target Bodies(1) = 1
+  Equation = 1
+  Material = 1
+  Body Force = 1
+End
+
+Equation 1
+  Active Solvers(1) = 1
+End
+
+Solver 1
+  Equation = heat equation
+  Variable = Temperature
+  Procedure = "HeatSolve" "HeatSolver"
+  Linear System Solver = Iterative
+  Linear System Iterative Method = CG
+  Linear System Preconditioning = Diagonal
+  Linear System Max Iterations = 1000
+  Linear System Convergence Tolerance = 1.0e-10
+  Nonlinear System Max Iterations = 30
+  Nonlinear System Convergence Tolerance = 1.0e-8
+  Steady State Convergence Tolerance = 1.0e-8
+  Reference Norm = 5.08489609E+03
+  Reference Norm Tolerance = 1.0e-6
+End
+
+Material 1
+  Heat Conductivity = 401.0
+  Density = 8960.0
+  Heat Capacity = 385.0
+End
+
+! 8000 W/kg x 8960 kg/m^3 over 1 cm^3: about 72 W.
+Body Force 1
+  Heat Source = 8000.0
+End
+
+Boundary Condition 1
+  Target Boundaries(6) = 1 2 3 4 5 6
+  External Temperature = 20.0
+  Heat Transfer Coefficient = Variable Temperature
+    Real Procedure "htc_udf" "htc_evaluate"
+  T_ambient = Real 20.0
+  NatOrient = Integer 3
+  FcdOrient = Integer 0
+  Lc_nat = Real 0.01
+End
