@@ -4187,6 +4187,8 @@ END SUBROUTINE LocalConstraintMatrix
           q(m) = Mesh % Nodes % y(je2)
           q(n) = Mesh % Nodes % z(je2)
 
+          ! p, q and cx are stored as (l,m,n) = (x,y,z), so components 1 and 2
+          ! already span the dominant plane chosen above.
           IF ((q(2)>cx(2)).NEQV.(p(2)>cx(2))) THEN
             IF (cx(1)<(p(1)-q(1))*(cx(2)-q(2))/(p(2)-q(2))+q(1)) L1=.NOT.L1
           END IF
