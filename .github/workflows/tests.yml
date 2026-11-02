@@ -57,6 +57,7 @@ jobs:
             -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_INSTALL_PREFIX="${GITHUB_WORKSPACE}/install" \
+            -DCPACK_BUNDLE_EXTRA_WINDOWS_DLLS=OFF \
             -DBLA_VENDOR=OpenBLAS \
             -DWITH_MPI=ON \
             -DMPI_TEST_MAXPROC=$(nproc) \
