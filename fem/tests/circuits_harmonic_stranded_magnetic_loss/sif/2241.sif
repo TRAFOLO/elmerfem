@@ -112,6 +112,9 @@ Solver 7
    Calculate Current Density = Logical True
    Loss Estimation = Logical True
    Calculate Homogenization Loss = Logical True
+   ! The fields after Proximity Loss: an element that skipped its column wrote them into it.
+   Calculate Maxwell Stress = Logical True
+   Calculate Nodal Forces = Logical True
    Steady State Convergence Tolerance = 0
    Linear System Solver = "Iterative"
    Linear System Preconditioning = None
@@ -140,9 +143,13 @@ Solver 10
    Procedure = "SaveData" "SaveScalars"
    Filename = "power.dat"
    Variable 1 = String "res: Eddy current power"
-   Show Norm Index = Integer 1
-   ! Pins the power; Solver 11 checks it against the circuit's active power.
-   Reference Norm = 5.169902732623E-004
+   Variable 2 = String "Proximity Loss"
+   Operator 2 = String "int"
+   Show Norm Index = Integer 2
+   ! Pins the integral of the Proximity Loss field, which TRAFOLO reads body losses from: the magnetic
+   ! loss, 'res: Eddy current power' - 'res: joule loss' = 5.1699027E-04 - 4.9883969E-06.
+   ! Solver 11 checks the power against the circuit's active power.
+   Reference Norm = 5.120018764395E-004
    Reference Norm Tolerance = 1.0e-5
 End
 Solver 11
