@@ -2749,8 +2749,9 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END IF
 
            ! The magnetic loss is in no Joule loss: without it 'res: Eddy current
-           ! power' misses the circuit power by it.
-           IF (MagneticLoss) Power = Power + 2 * HarmPowerCoeff * Coeff
+           ! power' misses the circuit power by it. A foil sheet has added it above.
+           IF (MagneticLoss .AND. CoilType /= 'foil sheet') &
+               Power = Power + 2 * HarmPowerCoeff * Coeff
          END IF
 
          ! Every element advances the column: an element that skipped it wrote the
