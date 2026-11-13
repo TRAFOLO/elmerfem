@@ -718,7 +718,7 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
               ItoJCoeffFound, ImposeBodyForceCurrent, HasVelocity, HasAngularVelocity, &
               HasLorenzVelocity, HaveAirGap, UseElementalNF, HasTensorReluctivity, &
               ImposeBodyForcePotential, JouleHeatingFromCurrent, HasZirka, DoAve, &
-              HomogenizationModel, CalculateFluxLinkage, NodalForceJxB
+              HomogenizationModel, CalculateFluxLinkage, NodalForceJxB, MagneticLoss
    LOGICAL :: PiolaVersion, ElementalFields, NodalFields, RealField, pRef
    LOGICAL :: CSymmetry, HasHBCurve, LorentzConductivity, HasThinLines=.FALSE., NewMaterial
    
@@ -2703,8 +2703,14 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
            END IF
          END IF
 
+         ! A complex reluctivity outside the winding and stack models is the
+         ! complex permeability of a material: its Im(Nu) loss is the magnetic loss.
+         MagneticLoss = .NOT. ( RealField .OR. StrandedHarmonicHomog .OR. SheetHarmonicHomog &
+             .OR. LayeredLaminate ) .AND. ANY( AIMAG(Nu(1:3,1:3)) /= 0.0_dp )
+
+         Coeff = 0.0_dp
          IF ( (StrandedHarmonicHomog .AND. HomogenizationLoss) .OR. SheetHarmonicHomog &
-             .OR. LayeredLaminate ) THEN
+             .OR. LayeredLaminate .OR. MagneticLoss ) THEN
            ! homogenization loss should be real part of im omega b . conj(h)/2
            BLOCK
              COMPLEX(KIND=dp) :: Bloc(3)=0._dp
@@ -2742,11 +2748,16 @@ END SUBROUTINE MagnetoDynamicsCalcFields_Init
              LamStackPowerSeen = 1
            END IF
 
-           IF ( ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL) ) THEN
-             FORCE(p,k+1) = FORCE(p,k+1) + Coeff
-             k = k + 1
-           END IF
+           ! The magnetic loss is in no Joule loss: without it 'res: Eddy current
+           ! power' misses the circuit power by it.
+           IF (MagneticLoss) Power = Power + 2 * HarmPowerCoeff * Coeff
+         END IF
 
+         ! Every element advances the column: an element that skipped it wrote the
+         ! fields that follow (Maxwell stress, nodal force) into this one.
+         IF ( ASSOCIATED(PL) .OR. ASSOCIATED(EL_PL) ) THEN
+           FORCE(p,k+1) = FORCE(p,k+1) + Coeff
+           k = k + 1
          END IF
 
          IF ( ASSOCIATED(MST).OR.ASSOCIATED(EL_MST)) THEN
