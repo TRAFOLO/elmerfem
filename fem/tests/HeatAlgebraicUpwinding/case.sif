@@ -1,0 +1,75 @@
+! Skewed thin triangles, convection-dominated step profile. Algebraic upwinding
+! must keep the temperature inside the boundary values 300..310 (see extrema.dat).
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "mesh"
+End
+Simulation
+  Coordinate System = Cartesian 2D
+  Simulation Type = Steady State
+  Steady State Max Iterations = 20
+  Max Output Level = 5
+  Post File = case.vtu
+End
+Body 1
+  Equation = 1
+  Material = 1
+  Initial Condition = 1
+End
+Equation 1
+  Active Solvers(1) = 1
+  Convection = Constant
+End
+Initial Condition 1
+  Temperature = 300
+End
+Material 1
+  Density = 1
+  Heat Capacity = 1
+  Heat Conductivity = 0.0001
+  Convection Velocity 1 = 1
+  Convection Velocity 2 = 0.002
+End
+Solver 1
+  Equation = Heat Equation
+  Procedure = "HeatSolve" "HeatSolver"
+  Variable = Temperature
+  Algebraic Upwinding = Logical True
+  Nonlinear System Max Iterations = 4
+  Nonlinear System Convergence Tolerance = 1e-8
+  Nonlinear System Convergence Measure = solution
+  Nonlinear System Relaxation Factor = 0.7
+  Steady State Convergence Measure = solution
+  Steady State Convergence Tolerance = 1e-8
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Preconditioning = ILU1
+  Linear System Max Iterations = 200
+  Linear System Convergence Tolerance = 1e-12
+  Linear System Abort Not Converged = True
+End
+Solver 2
+  Equation = SaveScalars
+  Procedure = "SaveData" "SaveScalars"
+  Exec Solver = After Simulation
+  Filename = extrema.dat
+  Variable 1 = Temperature
+  Operator 1 = min
+  Operator 2 = max
+End
+Solver 3
+  Equation = String "CheckBounds"
+  Procedure = "CheckBounds" "CheckBounds"
+  Exec Solver = String "After Simulation"
+End
+Boundary Condition 1
+  Target Boundaries(1) = 1
+  Temperature = Variable Coordinate 2
+    Real MATC "300+10*(tx>0.009)"
+End
+Boundary Condition 2
+  Target Boundaries(2) = 3 4
+  Temperature = Variable Coordinate 2
+    Real MATC "300+500*tx"
+End
+Solver 1 :: Reference Norm = Real 305.21360

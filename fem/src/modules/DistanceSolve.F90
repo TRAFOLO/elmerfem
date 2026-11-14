@@ -78,11 +78,14 @@ SUBROUTINE DistanceSolver( Model,Solver,dt,TransientSimulation )
      END IF
 
      n = Mesh % NumberOfNodes
-     IF ( ALL( Solver % Variable % Values == 0.0_dp ) ) &
-       Solver % Variable % Values(Solver % Variable % Perm(1:n)) = &
-           SQRT( Mesh % Nodes % x(1:n)**2 + &
-                 Mesh % Nodes % y(1:n)**2 + &
-                 Mesh % Nodes % z(1:n)**2 )
+     IF (ALL(Solver % Variable % Values == 0.0_dp)) THEN
+       DO i=1,n
+         j = Solver % Variable % Perm(i)
+         IF (j <= 0) CYCLE
+         Solver % Variable % Values(j) = SQRT(Mesh % Nodes % x(i)**2 + &
+             Mesh % Nodes % y(i)**2 + Mesh % Nodes % z(i)**2)
+       END DO
+     END IF
 
      AllocationsDone = .TRUE.
   END IF

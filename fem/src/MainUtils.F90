@@ -43,6 +43,7 @@
 !------------------------------------------------------------------------------
 MODULE MainUtils
 !------------------------------------------------------------------------------
+  USE, INTRINSIC :: IEEE_ARITHMETIC, ONLY : IEEE_IS_FINITE
   USE Messages
   USE BlockSolve
   USE IterSolve, ONLY : NumericalError
@@ -78,7 +79,281 @@ MODULE MainUtils
     
     LOGICAL, PRIVATE :: isParallel=.FALSE.
 
+    ! History belongs to the complete steady coupled map, across SolveEquations calls.
+    TYPE, PRIVATE :: SteadyAndersonField_t
+      TYPE(Solver_t), POINTER :: Solver => NULL()
+      REAL(KIND=dp), ALLOCATABLE :: x(:), oldx(:), f(:), oldf(:), trial(:)
+      REAL(KIND=dp), ALLOCATABLE :: dx(:,:), df(:,:), scale(:)
+    END TYPE
+    TYPE(SteadyAndersonField_t), ALLOCATABLE, PRIVATE, SAVE :: AA(:)
+    INTEGER, PRIVATE, SAVE :: AADepth=0, AACount=0, AALast=0
+    LOGICAL, PRIVATE, SAVE :: AAHistory=.FALSE.
+
 CONTAINS
+
+!------------------------------------------------------------------------------
+! Owner-only scalar products, following ComputeNorm's consistent parallel norm.
+! ParallelDOT reduces the caller-provided entries; pack owned rows of each
+! component and select that solver's communicator before calling it.
+  FUNCTION SteadyFieldDot(Solver, u, v, component) RESULT(s)
+    TYPE(Solver_t), POINTER :: Solver
+    REAL(KIND=dp), INTENT(IN) :: u(:), v(:)
+    INTEGER, INTENT(IN) :: component
+    REAL(KIND=dp) :: s
+    INTEGER :: j, stride,n
+    REAL(KIND=dp), ALLOCATABLE :: ownedU(:),ownedV(:)
+    TYPE(ParEnv_t), POINTER :: SavedEnv
+
+    SavedEnv => ParEnv
+    ParEnv => Solver % ParEnv
+    IF(Solver % Parallel) ParEnv % ActiveComm = Solver % Matrix % Comm
+    stride = Solver % Variable % DOFs
+    IF(Solver % Parallel) THEN
+      ALLOCATE(ownedU((SIZE(u)+stride-1)/stride),ownedV((SIZE(u)+stride-1)/stride))
+      n=0
+      DO j=component,SIZE(u),stride
+        IF(Solver % Matrix % ParallelInfo % NeighbourList(j) % Neighbours(1) /= ParEnv % MyPE) CYCLE
+        n=n+1
+        ownedU(n)=u(j)
+        ownedV(n)=v(j)
+      END DO
+      s=ParallelDOT(n,ownedU,ownedV)
+    ELSE
+      s=DOT_PRODUCT(u(component::stride),v(component::stride))
+    END IF
+    ParEnv => SavedEnv
+  END FUNCTION SteadyFieldDot
+
+  FUNCTION SteadyAndersonDot(aCol,bCol) RESULT(s)
+    ! Column zero denotes the current map residual; positive columns are df.
+    INTEGER :: aCol,bCol,k,c
+    REAL(KIND=dp) :: s,t
+    s = 0.0_dp
+    DO k=1,SIZE(AA)
+      IF(.NOT.ASSOCIATED(AA(k) % Solver)) CYCLE
+      DO c=1,SIZE(AA(k) % scale)
+        IF(aCol==0 .AND. bCol==0) THEN
+          t = SteadyFieldDot(AA(k) % Solver,AA(k) % f,AA(k) % f,c)
+        ELSE IF(bCol==0) THEN
+          t = SteadyFieldDot(AA(k) % Solver,AA(k) % df(:,aCol),AA(k) % f,c)
+        ELSE
+          t = SteadyFieldDot(AA(k) % Solver,AA(k) % df(:,aCol),AA(k) % df(:,bCol),c)
+        END IF
+        s = s + t / AA(k) % scale(c)
+      END DO
+    END DO
+  END FUNCTION SteadyAndersonDot
+
+  ! Same naming rule as the rotation set-up in SolverUtils.
+  FUNCTION SteadyRotatedBCs(Model,S) RESULT(Rotated)
+    TYPE(Model_t) :: Model
+    TYPE(Solver_t), POINTER :: S
+    LOGICAL :: Rotated
+
+    Rotated = .FALSE.
+    IF(.NOT.ASSOCIATED(S % Variable)) RETURN
+    Rotated = S % NormalTangential % NormalTangentialNOFNodes > 0
+    IF(Rotated) RETURN
+    IF(SEQL(S % Variable % Name,'flow solution')) THEN
+      Rotated = ListGetLogicalAnyBC(Model,'Normal-Tangential Velocity')
+    ELSE
+      Rotated = ListGetLogicalAnyBC(Model,'Normal-Tangential '//GetVarName(S % Variable))
+    END IF
+  END FUNCTION SteadyRotatedBCs
+
+  SUBROUTINE SteadyAndersonBegin(Model,Enabled)
+    TYPE(Model_t) :: Model
+    LOGICAL, INTENT(OUT) :: Enabled
+    TYPE(Solver_t), POINTER :: S
+    TYPE(Variable_t), POINTER :: Iter
+    LOGICAL :: Found
+    INTEGER :: k,j,n,m,after,it
+
+    Enabled = ListGetLogical(Model % Simulation,'Steady State Anderson',Found)
+    IF(.NOT.Enabled) RETURN
+    Iter => VariableGet(Model % Solvers(1) % Mesh % Variables,'coupled iter')
+    IF(.NOT.ASSOCIATED(Iter)) CALL Fatal('SteadyAnderson','Missing coupled iter')
+    it = NINT(Iter % Values(1))
+    after = ListGetInteger(Model % Simulation,'Steady State Anderson After',Found,minv=0)
+    IF(.NOT.Found) after=0
+    ! Solver parallel environments exist only after the first sweep.
+    after = MAX(after,1)
+    m = ListGetInteger(Model % Simulation,'Steady State Anderson Depth',Found,minv=1,maxv=20)
+    IF(.NOT.Found) m=3
+    IF(it/=AALast+1 .OR. m/=AADepth .OR. it<=after) THEN
+      IF(ALLOCATED(AA)) DEALLOCATE(AA)
+      AAHistory=.FALSE.
+      AACount=0
+    END IF
+    AALast=it
+    AADepth=m
+    Enabled=it>after
+    IF(.NOT.Enabled) RETURN
+    IF(.NOT.ALLOCATED(AA)) ALLOCATE(AA(Model % NumberOfSolvers))
+    IF(SIZE(AA)/=Model % NumberOfSolvers) CALL Fatal('SteadyAnderson','Solver set changed')
+    DO k=1,Model % NumberOfSolvers
+      S => Model % Solvers(k)
+      IF(S % SolverExecWhen/=SOLVER_EXEC_ALWAYS) CYCLE
+      IF(.NOT.ASSOCIATED(S % Variable)) CYCLE
+      IF(.NOT.ASSOCIATED(S % Variable % Values)) CYCLE
+      IF(.NOT.ASSOCIATED(S % Matrix)) &
+          CALL Fatal('SteadyAnderson','Active variables must have a matrix')
+      ! Prescribed values are restored in Cartesian components only.
+      IF(SteadyRotatedBCs(Model,S)) &
+          CALL Fatal('SteadyAnderson','Normal-tangential conditions are not supported')
+      IF(S % ParEnv % PEs/=ParEnv_Common % PEs) &
+          CALL Fatal('SteadyAnderson','Solver subcommunicators are not supported')
+      IF(ASSOCIATED(S % ParEnv % Active)) THEN
+        IF(.NOT.ALL(S % ParEnv % Active)) &
+            CALL Fatal('SteadyAnderson','All ranks must participate in every accelerated solver')
+      END IF
+      IF(ListCheckPresent(S % Values,'Exec Intervals') .OR. &
+          ListCheckPresent(S % Values,'Exec Condition') .OR. &
+          ListCheckPresent(S % Values,'Coupled System After Others Converged')) &
+          CALL Fatal('SteadyAnderson','Requires a fixed set of active solvers')
+      n=SIZE(S % Variable % Values)
+      IF(S % Variable % DOFs<1 .OR. n/=S % Matrix % NumberOfRows) &
+          CALL Fatal('SteadyAnderson','Requires primary variables in matrix row ordering')
+      IF(.NOT.ALLOCATED(AA(k) % x)) THEN
+        DO j=1,k-1
+          IF(.NOT.ASSOCIATED(AA(j) % Solver)) CYCLE
+          IF(ASSOCIATED(S % Variable % Values,AA(j) % Solver % Variable % Values)) &
+              CALL Fatal('SteadyAnderson','Two solvers share the same primary variable')
+        END DO
+        AA(k) % Solver=>S
+        ALLOCATE(AA(k) % x(n),AA(k) % oldx(n),AA(k) % f(n),AA(k) % oldf(n), &
+            AA(k) % trial(n),AA(k) % dx(n,m),AA(k) % df(n,m),AA(k) % scale(S % Variable % DOFs))
+      END IF
+      IF(n/=SIZE(AA(k) % x) .OR. (S % Mesh % Changed .AND. AAHistory)) &
+          CALL Fatal('SteadyAnderson','Requires a fixed mesh and variable layout')
+      AA(k) % x=S % Variable % Values
+    END DO
+  END SUBROUTINE SteadyAndersonBegin
+
+  SUBROUTINE SteadyAndersonEnd(Model,Done)
+    TYPE(Model_t) :: Model
+    LOGICAL :: Done(:),Found,Accept
+    INTEGER :: k,c,j,l,h,lapackInfo
+    REAL(KIND=dp) :: beta,reg,growth,r2,old2,t,step2,lambda
+    REAL(KIND=dp), ALLOCATABLE :: gram(:,:),gamma(:)
+
+    beta=ListGetConstReal(Model % Simulation,'Steady State Anderson Relaxation',Found)
+    IF(.NOT.Found) beta=1.0_dp
+    reg=ListGetConstReal(Model % Simulation,'Steady State Anderson Regularization',Found)
+    IF(.NOT.Found) reg=1.0e-10_dp
+    growth=ListGetConstReal(Model % Simulation,'Steady State Anderson Restart Factor',Found)
+    IF(.NOT.Found) growth=2.0_dp
+    IF(.NOT.IEEE_IS_FINITE(beta) .OR. beta<=0 .OR. beta>1 .OR. &
+        .NOT.IEEE_IS_FINITE(reg) .OR. reg<=0 .OR. &
+        .NOT.IEEE_IS_FINITE(growth) .OR. growth<=1) &
+        CALL Fatal('SteadyAnderson','Invalid relaxation, regularization or restart factor')
+    old2=0.0_dp
+    DO k=1,SIZE(AA)
+      IF(.NOT.ASSOCIATED(AA(k) % Solver)) CYCLE
+      IF(SIZE(AA(k) % Solver % Variable % Values)/=SIZE(AA(k) % x)) &
+          CALL Fatal('SteadyAnderson','Variable layout changed during the coupled sweep')
+      AA(k) % f=AA(k) % Solver % Variable % Values-AA(k) % x
+      DO c=1,SIZE(AA(k) % scale)
+        t=SteadyFieldDot(AA(k) % Solver,AA(k) % x,AA(k) % x,c)
+        IF(.NOT.IEEE_IS_FINITE(t)) CALL Fatal('SteadyAnderson','Nonfinite field norm')
+        AA(k) % scale(c)=MAX(t,1.0e-30_dp)
+        IF(AAHistory) old2=old2+ &
+            SteadyFieldDot(AA(k) % Solver,AA(k) % oldf,AA(k) % oldf,c)/AA(k) % scale(c)
+      END DO
+    END DO
+    r2=SteadyAndersonDot(0,0)
+    IF(.NOT.IEEE_IS_FINITE(r2)) CALL Fatal('SteadyAnderson','Nonfinite map residual')
+    IF(AAHistory) THEN
+      IF(r2>growth**2*old2) THEN
+        AAHistory=.FALSE.
+        AACount=0
+        CALL Info('SteadyAnderson','Residual growth: reset history, keep ordinary coupled step',Level=4)
+      END IF
+    END IF
+    IF(AAHistory) THEN
+      AACount=MIN(AACount+1,AADepth)
+      DO k=1,SIZE(AA)
+        IF(.NOT.ASSOCIATED(AA(k) % Solver)) CYCLE
+        DO j=AACount,2,-1
+          AA(k) % dx(:,j)=AA(k) % dx(:,j-1)
+          AA(k) % df(:,j)=AA(k) % df(:,j-1)
+        END DO
+        AA(k) % dx(:,1)=AA(k) % x-AA(k) % oldx
+        AA(k) % df(:,1)=AA(k) % f-AA(k) % oldf
+      END DO
+    END IF
+    h=AACount
+    Accept=h>0 .AND. .NOT.ALL(Done) .AND. r2>TINY(1.0_dp)
+    IF(Accept) THEN
+      ALLOCATE(gram(h,h),gamma(h))
+      DO j=1,h
+        gamma(j)=SteadyAndersonDot(j,0)
+        DO l=1,j
+          gram(j,l)=SteadyAndersonDot(j,l)
+          gram(l,j)=gram(j,l)
+        END DO
+      END DO
+      lambda=reg*MAX(MAXVAL(ABS(gram)),TINY(1.0_dp))
+      DO j=1,h
+        gram(j,j)=gram(j,j)+lambda
+      END DO
+      ! Small regularized SPD normal equations, LAPACK Cholesky solve.
+      CALL DPOSV('U',h,1,gram,h,gamma,h,lapackInfo)
+      Accept=lapackInfo==0 .AND. ALL(IEEE_IS_FINITE(gamma))
+      IF(Accept) Accept=SUM(ABS(gamma))<=1.0e3_dp
+      step2=0.0_dp
+      IF(Accept) THEN
+        DO k=1,SIZE(AA)
+          IF(.NOT.ASSOCIATED(AA(k) % Solver)) CYCLE
+          AA(k) % trial=beta*AA(k) % f
+          DO j=1,h
+            AA(k) % trial=AA(k) % trial-gamma(j)*(AA(k) % dx(:,j)+beta*AA(k) % df(:,j))
+          END DO
+          ! Invariant Dirichlet entries have zero differences throughout history.
+          DO c=1,SIZE(AA(k) % scale)
+            step2=step2+SteadyFieldDot(AA(k) % Solver,AA(k) % trial,AA(k) % trial,c)/AA(k) % scale(c)
+          END DO
+        END DO
+        Accept=IEEE_IS_FINITE(step2)
+        IF(Accept .AND. step2>100.0_dp*r2) THEN
+          ! Slow modes legitimately require large coefficients. Bound the step
+          ! instead of rejecting all acceleration of a nearly stagnant map.
+          t=10.0_dp*SQRT(r2/step2)
+          DO k=1,SIZE(AA)
+            IF(.NOT.ASSOCIATED(AA(k) % Solver)) CYCLE
+            AA(k) % trial=t*AA(k) % trial
+          END DO
+          CALL Info('SteadyAnderson','Limited extrapolation to ten ordinary step norms',Level=4)
+        END IF
+      END IF
+      IF(.NOT.Accept) THEN
+        AACount=0
+        CALL Info('SteadyAnderson','Rejected extrapolation: keep ordinary coupled step',Level=4)
+      END IF
+    END IF
+    DO k=1,SIZE(AA)
+      IF(.NOT.ASSOCIATED(AA(k) % Solver)) CYCLE
+      AA(k) % oldx=AA(k) % x
+      AA(k) % oldf=AA(k) % f
+      IF(.NOT.Accept) CYCLE
+      AA(k) % trial=AA(k) % x+AA(k) % trial
+      ! Preserve prescribed values exactly, including the first populated BC.
+      IF(ALLOCATED(AA(k) % Solver % Matrix % ConstrainedDOF)) THEN
+        WHERE(AA(k) % Solver % Matrix % ConstrainedDOF(1:SIZE(AA(k) % x))) &
+            AA(k) % trial=AA(k) % Solver % Variable % Values
+      END IF
+      AA(k) % Solver % Variable % Values=AA(k) % trial
+      AA(k) % Solver % Variable % ValuesChanged=.TRUE.
+      AA(k) % Solver % Variable % Norm=ComputeNorm(AA(k) % Solver,SIZE(AA(k) % x))
+      AA(k) % Solver % Variable % SteadyConverged=0
+      CALL InvalidateVariable(Model % Meshes,AA(k) % Solver % Mesh,AA(k) % Solver % Variable % Name)
+      Done(k)=.FALSE.
+    END DO
+    AAHistory=.TRUE.
+    WRITE(Message,'(A,I0,A,ES12.4,A,L1)') 'iteration=',AALast,' scaled map residual=',SQRT(r2), &
+        ' accelerated=',Accept
+    CALL Info('SteadyAnderson',Message,Level=4)
+  END SUBROUTINE SteadyAndersonEnd
 
 !------------------------------------------------------------------------------
 !> Routine checks the feasibility of solver options.
@@ -3318,6 +3593,7 @@ CONTAINS
     TYPE(Mesh_t), POINTER, SAVE :: PrevMesh
     INTEGER, SAVE :: PrevMeshNoNodes
     LOGICAL, SAVE :: FirstTime=.TRUE.
+    LOGICAL :: AndersonEnabled
 
     IF(FirstTime) THEN
       PrevMesh => Model % Mesh
@@ -3343,6 +3619,10 @@ CONTAINS
        IF( GetNamespaceCheck() ) CALL ListPushNamespace('coupled '//i2s(i)//': ')
 
        DoneThis = .FALSE.
+       AndersonEnabled=.FALSE.
+       IF(.NOT.TransientSimulation .AND. .NOT.Scanning) THEN
+         CALL SteadyAndersonBegin(Model,AndersonEnabled)
+       END IF
 
 !      Initialize the mesh output flag to FALSE here, reactivated
 !      later for meshes connected to active solvers.
@@ -3504,6 +3784,7 @@ CONTAINS
 !------------------------------------------------------------------------------
          END DO
 !------------------------------------------------------------------------------
+         IF(AndersonEnabled) CALL SteadyAndersonEnd(Model,DoneThis)
          CALL ListPopNamespace()
 
          !Check if the mesh changed - should do this elsewhere too?

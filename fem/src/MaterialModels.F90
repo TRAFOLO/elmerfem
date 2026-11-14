@@ -473,7 +473,7 @@ this ise not in USE
            KE_E = SUM(Basis(1:n) * Var % Values(Var % Perm(Element % NodeIndexes)))
 
            Vals(1:n) = ListGetReal( Material, 'KE Cmu',n,Element % NodeIndexes,gotIt )
-           IF ( .NOT. GotIt ) THEN
+           IF ( GotIt ) THEN
               Cmu = SUM( Basis(1:n) * Vals(1:n) )
            ELSE
               Cmu = 0.09_dp 
@@ -554,6 +554,60 @@ this ise not in USE
         F3 = 1
 
         mu = Viscosity+0.31_dp*Density*KE_K/MAX(0.31_dp*KE_E,SQRT(ss)*F2*F3)
+
+     CASE( 'mixing length' )
+        ! Zero-equation closure: Prandtl mixing length with strain-based van Driest
+        ! damping plus an optional ambient eddy viscosity damped to zero at walls.
+     IF (Viscosity <= 0.0_dp .OR. Density <= 0.0_dp) &
+       CALL Fatal('EffectiveViscosity','Mixing length requires positive mu and rho')
+
+     Var => VariableGet(CurrentModel % Variables, 'Wall distance')
+     IF (.NOT.ASSOCIATED(Var)) &
+       CALL Fatal('EffectiveViscosity','Wall distance is missing')
+     IF (ANY(Var % Perm(Element % NodeIndexes(1:n)) <= 0)) &
+       CALL Fatal('EffectiveViscosity','Mixing length outside wall-distance domain')
+
+     Dist = MAX(SUM(Basis(1:n) * &
+         Var % Values(Var % Perm(Element % NodeIndexes(1:n)))), 0.0_dp)
+
+     c1 = ListGetCReal(Material, 'Mixing Length Max', GotIt)
+     IF (.NOT.GotIt) &
+       CALL Fatal('EffectiveViscosity','Mixing Length Max must be specified')
+     IF (c1 < 0.0_dp) &
+       CALL Fatal('EffectiveViscosity','Mixing Length Max must be nonnegative')
+
+     c2 = MIN(0.41_dp*Dist, c1)              ! Undamped length
+     s  = SQRT(MAX(ss, 0.0_dp))             ! Strain magnitude
+     c3 = Dist/(26.0_dp*SQRT(Viscosity/Density))
+     c4 = c3*SQRT(s)                       ! Damping argument
+     c5 = EXP(-c4)
+
+     ! c6 = (1-exp(-c4))/c4, including its zero-strain limit.
+     IF (c4 < 1.0e-4_dp) THEN
+       c6 = 1.0_dp-c4/2.0_dp+c4**2/6.0_dp-c4**3/24.0_dp
+     ELSE
+       c6 = (1.0_dp-c5)/c4
+     END IF
+
+     mu = Viscosity + Density*(c2*c4*c6)**2*s
+     IF (PRESENT(muder)) &
+       muder = 0.5_dp*Density*(c2*c3)**2*c6*(c6+c5)
+
+     c1 = ListGetCReal(Material, 'Ambient Eddy Viscosity', GotIt)
+     IF (.NOT.GotIt) c1 = 0.0_dp
+     IF (c1 < 0.0_dp) &
+       CALL Fatal('EffectiveViscosity','Ambient Eddy Viscosity must be nonnegative')
+
+     IF (c1 > 0.0_dp) THEN
+       c2 = ListGetCReal(Material, &
+           'Ambient Eddy Viscosity Damping Distance', GotIt)
+       IF (.NOT.GotIt) &
+         CALL Fatal('EffectiveViscosity','Ambient damping distance is required')
+       IF (c2 <= 0.0_dp) &
+         CALL Fatal('EffectiveViscosity','Ambient damping distance must be positive')
+       c3 = MIN(1.0_dp, Dist/c2)
+       mu = mu + Density*c1*c3**2
+     END IF
 
      CASE( 'levelset' )
         TempSol => VariableGet( CurrentModel % Variables, 'Surface' )

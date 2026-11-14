@@ -1,0 +1,70 @@
+! Two-rank version of the skewed-triangle algebraic-upwinding bounds test.
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "mesh"
+End
+Simulation
+  Coordinate System = String "Cartesian 2D"
+  Simulation Type = String "Steady State"
+  Steady State Max Iterations = Integer 20
+  Max Output Level = Integer 5
+  Post File = "case.vtu"
+End
+Body 1
+  Equation = Integer 1
+  Material = Integer 1
+  Initial Condition = Integer 1
+End
+Equation 1
+  Active Solvers(1) = Integer 1
+  Convection = String "Constant"
+End
+Initial Condition 1
+  Temperature = Real 300
+End
+Material 1
+  Density = Real 1
+  Heat Capacity = Real 1
+  Heat Conductivity = Real 0.0001
+  Convection Velocity 1 = Real 1
+  Convection Velocity 2 = Real 0.002
+End
+Solver 1
+  Equation = String "Heat Equation"
+  Procedure = "HeatSolve" "HeatSolver"
+  Variable = String "Temperature"
+  Algebraic Upwinding = Logical True
+  Nonlinear System Max Iterations = Integer 4
+  Nonlinear System Convergence Tolerance = Real 1e-8
+  Nonlinear System Convergence Measure = String "solution"
+  Nonlinear System Relaxation Factor = Real 0.7
+  Steady State Convergence Measure = String "solution"
+  Steady State Convergence Tolerance = Real 1e-8
+  Linear System Solver = String "Direct"
+  Linear System Direct Method = String "MUMPS"
+End
+Solver 2
+  Equation = String "SaveScalars"
+  Procedure = "SaveData" "SaveScalars"
+  Exec Solver = String "After Simulation"
+  Filename = "extrema.dat"
+  Variable 1 = String "Temperature"
+  Operator 1 = String "min"
+  Operator 2 = String "max"
+End
+Solver 3
+  Equation = String "CheckBounds"
+  Procedure = "CheckBounds" "CheckBounds"
+  Exec Solver = String "After Simulation"
+End
+Boundary Condition 1
+  Target Boundaries(1) = Integer 1
+  Temperature = Variable Coordinate 2
+    Real MATC "300+10*(tx>0.009)"
+End
+Boundary Condition 2
+  Target Boundaries(2) = Integer 3 4
+  Temperature = Variable Coordinate 2
+    Real MATC "300+500*tx"
+End
+Solver 1 :: Reference Norm = Real 305.20043

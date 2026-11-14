@@ -23929,7 +23929,7 @@ CONTAINS
         END IF
         EXIT
       ELSE 
-        DO j=1,SIZE( Perm ) 
+        DO j=1,MIN(MAXVAL(Perm),n/Dofs)
           jk = Dofs*(j-1)+k
           IF( Mode == 3 ) Coeff = CoeffVar % Values(j)
           Rhs( jk ) = Coeff * Rhs( jk )
@@ -23984,7 +23984,7 @@ CONTAINS
             Values = Coeff * Values
           END IF
         ELSE 
-          DO j=1,SIZE( Perm ) 
+          DO j=1,MIN(MAXVAL(Perm),n/Dofs)
             jk = Dofs*(j-1)+k
             IF( Mode == 3 ) Coeff = CoeffVar % Values(j)
             DO i=Rows(jk),Rows(jk+1)-1 
@@ -24055,7 +24055,7 @@ CONTAINS
         END IF
         EXIT
       ELSE 
-        DO j=1,SIZE( Perm ) 
+        DO j=1,MIN(MAXVAL(Perm),n/Dofs)
           jk = Dofs*(j-1)+k
           IF( Mode == 3 ) Coeff = CoeffVar % Values(j)
 

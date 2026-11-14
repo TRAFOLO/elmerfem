@@ -154,6 +154,9 @@ END SUBROUTINE HeatSolver_Init
        RealWork(:,:)
 
      REAL(KIND=dp), ALLOCATABLE :: vals(:)
+     LOGICAL :: UseUpwind, UpwindParallel, UpwindGraphChanged, UpwindWarnedRows
+     INTEGER, ALLOCATABLE :: UpwindRows(:), UpwindCols(:), UpwindTranspose(:), UpwindDiag(:)
+     REAL(KIND=dp), ALLOCATABLE :: UpwindDiff(:), UpwindConv(:)
      REAL(KIND=dp) :: Jx,Jy,Jz,JAbs, Power, MeltPoint, IntHeatSource
 
      INTEGER, ALLOCATABLE, SAVE :: Indexes(:), SaveIndexes(:)
@@ -626,6 +629,16 @@ END SUBROUTINE HeatSolver_Init
      SaveBulk = ConstantBulk .OR. GetLogical( SolverParams, 'Save Bulk System', Found )
      SaveBulk = ConstantBulk .OR. GetLogical( SolverParams, 'Calculate Loads', Found )
 
+     UseUpwind = GetLogical( SolverParams, 'Algebraic Upwinding', Found )
+     IF (UseUpwind) THEN
+       UpwindParallel = (ParEnv % PEs > 1) .AND. (.NOT. Solver % Mesh % SingleMesh)
+       UpwindWarnedRows = .FALSE.
+       ! The upwinding replaces SUPG and bubbles: it needs the Galerkin convection matrix.
+       Stabilize = .FALSE.
+       UseBubbles = .FALSE.
+       CALL CheckAlgebraicOptions()
+     END IF
+
 !------------------------------------------------------------------------------
 
      SaveRelax = Relax
@@ -695,7 +708,15 @@ END SUBROUTINE HeatSolver_Init
 !------------------------------------------------------------------------------
        CALL DefaultInitialize()
 !------------------------------------------------------------------------------
- 
+
+       IF ( UseUpwind ) THEN
+         IF ( ALLOCATED(UpwindConv) ) THEN
+           IF ( SIZE(UpwindConv) /= SIZE(Solver % Matrix % Values) ) DEALLOCATE(UpwindConv)
+         END IF
+         IF ( .NOT. ALLOCATED(UpwindConv) ) ALLOCATE(UpwindConv(SIZE(Solver % Matrix % Values)))
+         UpwindConv = 0.0_dp
+       END IF
+
        IF ( SmartHeaterControl .OR. IntegralHeaterControl ) THEN
           IF( SmartHeaterControl) ForceHeater = 0.0d0
           HeaterArea = 0.0d0
@@ -1059,6 +1080,8 @@ END SUBROUTINE HeatSolver_Init
            END IF
          END IF
 
+         IF ( UseUpwind .AND. ( ConvectionFlag == 'computed' .OR. &
+             ConvectionFlag == 'constant' ) ) CALL UpwindAddConvection()
 
          IF ( HeaterControlLocal .AND. .NOT. TransientHeaterControl) THEN
 
@@ -1154,6 +1177,8 @@ END SUBROUTINE HeatSolver_Init
       CALL DefaultFinishAssembly()
       CALL Info( 'HeatSolve', 'Assembly done', Level=4 )
 
+      IF (UseUpwind) CALL AlgebraicUpwinding( Solver % Matrix )
+
       CALL DefaultDirichletBCs()
 
 !------------------------------------------------------------------------------
@@ -1244,10 +1269,15 @@ END SUBROUTINE HeatSolver_Init
 !     Check stepsize for nonlinear iteration
 !------------------------------------------------------------------------------
         IF( DefaultLinesearch( Converged ) ) GOTO 500
-        IF( Converged ) EXIT
+        IF( Converged ) THEN
+          IF (UseUpwind) CALL AlgebraicLoads( Solver % Matrix )
+          EXIT
+        END IF
 
         Norm = DefaultSolve()
       END IF
+
+      IF (UseUpwind) CALL AlgebraicLoads( Solver % Matrix )
 
 
       IF( SmartHeaterControl .OR. IntegralHeaterControl) THEN
@@ -1384,6 +1414,212 @@ END SUBROUTINE HeatSolver_Init
      
 CONTAINS
 
+   SUBROUTINE CheckAlgebraicOptions()
+     LOGICAL :: Flag
+     TYPE(Element_t), POINTER :: Elem
+     INTEGER :: e
+
+     IF (TempSol % DOFs /= 1) CALL Fatal('HeatSolve','A scalar nodal temperature is required')
+     ! Added after time discretization it would smooth independently of the timestep.
+     IF (TransientSimulation) &
+         CALL Fatal('HeatSolve','Algebraic Upwinding is implemented for steady state only')
+     IF (CurrentCoordinateSystem() /= Cartesian) &
+         CALL Fatal('HeatSolve','Algebraic Upwinding requires Cartesian coordinates')
+     IF (Solver % Matrix % FORMAT /= MATRIX_CRS) &
+         CALL Fatal('HeatSolve','Algebraic Upwinding requires a CRS matrix')
+     IF (ListGetLogicalAnyBC(Model,'Periodic BC '//TRIM(VarName)) .OR. &
+         ListGetLogicalAnyBC(Model,'Anti Periodic BC '//TRIM(VarName)) .OR. &
+         ListCheckPresentAnyBC(Model,'Periodic BC Scale '//TRIM(VarName)) .OR. &
+         GetLogical(SolverParams,'Apply Mortar BCs',Flag) .OR. &
+         GetLogical(SolverParams,'Apply Contact BCs',Flag) .OR. &
+         GetLogical(SolverParams,'Apply Integral BCs',Flag) .OR. &
+         GetLogical(SolverParams,'Apply Conforming BCs',Flag) .OR. &
+         ASSOCIATED(Solver % MortarBCs)) &
+         CALL Fatal('HeatSolve','Algebraic Upwinding does not support periodic or mortar temperature')
+     DO e=1,GetNOFActive()
+       Elem => GetActiveElement(e)
+       IF (Elem % Type % BasisFunctionDegree > 1) &
+           CALL Fatal('HeatSolve','Algebraic Upwinding requires first-order nodal elements')
+     END DO
+     IF (Solver % Matrix % NumberOfRows /= &
+         COUNT(TempPerm(1:Solver % Mesh % NumberOfNodes) > 0)) &
+         CALL Fatal('HeatSolve','Algebraic Upwinding requires one matrix row per temperature node')
+     IF (GetLogical(SolverParams,'Linear System FCT',Flag)) &
+         CALL Fatal('HeatSolve','Do not combine algebraic upwinding with Linear System FCT')
+     IF (GetLogical(SolverParams,'Linear System Remove Zeros',Flag)) &
+         CALL Fatal('HeatSolve','Linear System Remove Zeros must be disabled to retain the upwinding graph')
+     IF (ConstantBulk) &
+         CALL Fatal('HeatSolve','Algebraic Upwinding does not support Constant Bulk System')
+     IF (StabilizeFlag == 'vms') &
+         CALL Fatal('HeatSolve','Algebraic Upwinding does not support Stabilization Method = vms')
+     ! These rescale the assembled matrix after the convection part was collected.
+     IF (GetLogical(SolverParams,'Bulk System Multiply',Flag) .OR. &
+         GetLogical(SolverParams,'Linear System Multiply',Flag)) &
+         CALL Fatal('HeatSolve','Algebraic Upwinding does not support Bulk or Linear System Multiply')
+   END SUBROUTINE CheckAlgebraicOptions
+
+   ! Element convection matrix = assembled matrix minus the same element without
+   ! the convection coefficient. The velocity stays, so that a velocity-dependent
+   ! (turbulent) conductivity is the same in both and remains with the conduction.
+   SUBROUTINE UpwindAddConvection()
+     REAL(KIND=dp) :: StillMass(SIZE(MASS,1),SIZE(MASS,2)), &
+         StillStiff(SIZE(STIFF,1),SIZE(STIFF,2)), StillForce(SIZE(FORCE)), NoConvection(n), Scale
+     TYPE(Matrix_t), POINTER :: A
+     LOGICAL :: Flag
+     INTEGER :: p,q,row,col,l
+
+     IF ( CheckPassiveElement(Element) ) RETURN
+     NoConvection = 0.0_dp
+     CALL DiffuseConvectiveCompose( StillMass, StillStiff, StillForce, LOAD, &
+         HeatCapacity, C0, NoConvection, HeatConductivity, &
+         PhaseSpatial, LocalTemperature, Enthalpy, U, V, W, &
+         MU(1,1:n),MU(2,1:n),MU(3,1:n), Viscosity, Density, Pressure, &
+         dPressureDt, PressureCoeff, CompressibilityModel /= Incompressible, &
+         Stabilize, UseBubbles, Element, n, ElementNodes )
+     Scale = 1.0_dp
+     IF ( AnyMultiply ) THEN
+       Scale = GetCReal( Material, 'Heat Transfer Multiplier', Flag )
+       IF ( .NOT. Flag ) Scale = 1.0_dp
+     END IF
+
+     A => Solver % Matrix
+     DO p=1,n
+       row = TempPerm(Element % NodeIndexes(p))
+       IF ( row <= 0 ) CYCLE
+       DO q=1,n
+         col = TempPerm(Element % NodeIndexes(q))
+         IF ( col <= 0 ) CYCLE
+         DO l=A % Rows(row),A % Rows(row+1)-1
+           IF ( A % Cols(l) == col ) THEN
+             UpwindConv(l) = UpwindConv(l) + STIFF(p,q) - Scale*StillStiff(p,q)
+             EXIT
+           END IF
+         END DO
+       END DO
+     END DO
+   END SUBROUTINE UpwindAddConvection
+
+   SUBROUTINE AlgebraicUpwinding( A )
+!------------------------------------------------------------------------------
+     TYPE(Matrix_t), POINTER :: A
+     INTEGER :: i,j,l,m,n,nz
+     REAL(KIND=dp) :: d
+     REAL(KIND=dp), ALLOCATABLE :: RowSum(:), RowScale(:)
+!------------------------------------------------------------------------------
+     IF (A % FORMAT /= MATRIX_CRS) CALL Fatal('HeatSolve','A full CRS matrix is required')
+     n = A % NumberOfRows
+     IF (n > SIZE(Temperature)) CALL Fatal('HeatSolve','Non-nodal matrix rows are not supported')
+     IF (.NOT. ASSOCIATED(A % Rows)) CALL Fatal('HeatSolve','Missing CRS rows')
+     IF (.NOT. ASSOCIATED(A % Cols)) CALL Fatal('HeatSolve','Missing CRS columns')
+     nz = A % Rows(n+1)-1
+     UpwindGraphChanged = .TRUE.
+     IF (ALLOCATED(UpwindRows)) THEN
+       IF (SIZE(UpwindRows) == n+1 .AND. SIZE(UpwindCols) == nz) THEN
+         UpwindGraphChanged = ANY(UpwindRows /= A % Rows(1:n+1)) .OR. ANY(UpwindCols /= A % Cols(1:nz))
+       END IF
+     END IF
+     IF (UpwindGraphChanged) THEN
+       IF (ALLOCATED(UpwindRows)) THEN
+         DEALLOCATE(UpwindRows,UpwindCols,UpwindTranspose,UpwindDiag,UpwindDiff)
+       END IF
+       ALLOCATE(UpwindRows(n+1),UpwindCols(nz),UpwindTranspose(nz),UpwindDiag(n),UpwindDiff(nz))
+       UpwindRows = A % Rows(1:n+1)
+       UpwindCols = A % Cols(1:nz)
+       UpwindDiag = 0
+       UpwindTranspose = 0
+       DO i=1,n
+         DO l=UpwindRows(i),UpwindRows(i+1)-1
+           j = UpwindCols(l)
+           IF (j < 1 .OR. j > n) CALL Fatal('HeatSolve','CRS column outside local square matrix')
+           IF (j == i) UpwindDiag(i) = l
+           DO m=UpwindRows(j),UpwindRows(j+1)-1
+             IF (UpwindCols(m) == i) THEN
+               UpwindTranspose(l) = m
+               EXIT
+             END IF
+           END DO
+           IF (UpwindTranspose(l) == 0) CALL Fatal('HeatSolve', &
+               'Structurally symmetric CRS graph required: missing transpose entry')
+         END DO
+         IF (UpwindDiag(i) == 0) CALL Fatal('HeatSolve','Missing diagonal entry in CRS graph')
+       END DO
+       DO l=1,nz
+         IF (UpwindTranspose(UpwindTranspose(l)) /= l) &
+             CALL Fatal('HeatSolve','Duplicate entries in the CRS graph are not supported')
+       END DO
+     END IF
+     ! Diag is optional in CRS assembly; derive and validate it from the graph.
+     IF (ASSOCIATED(A % Diag)) THEN
+       IF (SIZE(A % Diag) /= n) DEALLOCATE(A % Diag)
+     END IF
+     IF (.NOT. ASSOCIATED(A % Diag)) ALLOCATE(A % Diag(n))
+     A % Diag = UpwindDiag
+
+     IF (UpwindParallel) THEN
+       A % Solver => Solver
+       IF (.NOT. ASSOCIATED(A % ParMatrix)) CALL ParallelInitMatrix(Solver,A)
+       IF (.NOT. ASSOCIATED(A % ParallelInfo)) &
+           CALL Fatal('HeatSolve','MPI matrix metadata are unavailable')
+     END IF
+
+     ! Keep diffusion as per-rank partial entries; the linear solver sums them.
+     UpwindDiff = 0.0_dp
+     DO i=1,n
+       DO l=A % Rows(i),A % Rows(i+1)-1
+         j = A % Cols(l)
+         IF ( j <= i ) CYCLE
+         m = UpwindTranspose(l)
+         ! Upwind the convection matrix only. Conduction keeps its consistent
+         ! stencil; a negative conduction entry counts towards the diffusion.
+         d = MAX( 0.0_dp, MAX( UpwindConv(l), UpwindConv(m) ) + MIN( 0.0_dp, &
+             0.5_dp*(A % Values(l) - UpwindConv(l) + A % Values(m) - UpwindConv(m)) ) )
+         UpwindDiff(l) = -d
+         UpwindDiff(m) = -d
+         UpwindDiff(UpwindDiag(i)) = UpwindDiff(UpwindDiag(i)) + d
+         UpwindDiff(UpwindDiag(j)) = UpwindDiff(UpwindDiag(j)) + d
+       END DO
+     END DO
+     IF (.NOT. UpwindWarnedRows) THEN
+       ALLOCATE(RowSum(n),RowScale(n))
+       DO i=1,n
+         RowSum(i) = SUM(A % Values(UpwindRows(i):UpwindRows(i+1)-1))
+         RowScale(i) = SUM(ABS(A % Values(UpwindRows(i):UpwindRows(i+1)-1)))
+       END DO
+       IF (UpwindParallel) THEN
+         CALL ParallelSumVector(A,RowSum)
+         CALL ParallelSumVector(A,RowScale)
+       END IF
+       IF (ANY(RowSum < -1.0e-12_dp * MAX(RowScale,TINY(1.0_dp)))) &
+           CALL Warn('HeatSolve','Negative assembled row sums: a temperature maximum principle is not assured')
+       UpwindWarnedRows = .TRUE.
+     END IF
+     A % Values(1:nz) = A % Values(1:nz) + UpwindDiff
+!------------------------------------------------------------------------------
+   END SUBROUTINE AlgebraicUpwinding
+!------------------------------------------------------------------------------
+
+   SUBROUTINE AlgebraicLoads(A)
+     TYPE(Matrix_t), POINTER :: A
+     TYPE(Variable_t), POINTER :: LoadsVar
+     REAL(KIND=dp), ALLOCATABLE :: SavedValues(:)
+     LOGICAL :: Flag
+     INTEGER :: nz,n
+
+     IF (.NOT. GetLogical(SolverParams,'Calculate Loads',Flag)) RETURN
+     LoadsVar => VariableGet(Solver % Mesh % Variables,TRIM(VarName)//' Loads')
+     IF (.NOT. ASSOCIATED(LoadsVar)) RETURN
+     IF (.NOT. ASSOCIATED(A % BulkValues) .OR. .NOT. ASSOCIATED(A % BulkRHS)) &
+         CALL Fatal('HeatSolve','Calculate Loads requires the original bulk matrix and RHS')
+     nz = SIZE(UpwindDiff)
+     n = SIZE(UpwindDiag)
+     IF (SIZE(A % BulkValues) < nz .OR. SIZE(A % BulkRHS) < n) &
+         CALL Fatal('HeatSolve','Bulk copy and upwinding graph have incompatible sizes')
+     ! Include D*T at the relaxed iterate without changing the bulk assembly cache.
+     SavedValues = A % BulkValues
+     A % BulkValues(1:nz) = A % BulkValues(1:nz) + UpwindDiff
+     CALL CalculateLoads(Solver,A,Temperature,1,.TRUE.,LoadsVar)
+     A % BulkValues = SavedValues
+   END SUBROUTINE AlgebraicLoads
 
 !------------------------------------------------------------------------------
 ! To save some time tabulate data needed for the diffuse gray radiation. 

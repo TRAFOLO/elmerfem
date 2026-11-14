@@ -1,0 +1,6 @@
+if(HAVE_MUMPS)
+  include(test_macros)
+  configure_file(case.sif case.sif COPYONLY)
+  file(COPY ELMERSOLVER_STARTINFO cavity.grd DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+  ADD_ELMER_TEST(CHTAndersonMumps NPROCS 2 LABELS cht)
+endif()

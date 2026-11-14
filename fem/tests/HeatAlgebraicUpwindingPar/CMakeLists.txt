@@ -1,0 +1,8 @@
+if(HAVE_MUMPS)
+  include(test_macros)
+  include_directories(${CMAKE_BINARY_DIR}/fem/src)
+  ADD_ELMERTEST_MODULE(HeatAlgebraicUpwindingPar CheckBounds CheckBounds.F90)
+  configure_file(case.sif case.sif COPYONLY)
+  file(COPY ELMERSOLVER_STARTINFO mesh DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+  ADD_ELMER_TEST(HeatAlgebraicUpwindingPar NPROCS 2 LABELS cht)
+endif()
