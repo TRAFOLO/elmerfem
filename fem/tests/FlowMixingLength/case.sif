@@ -1,0 +1,82 @@
+! Tiny warped-wedge cavity. Analytic wall distance to the nearest box face
+! is initialized as an exported field, isolating the constitutive model.
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "mesh"
+End
+Simulation
+  Coordinate System = Cartesian 3D
+  Simulation Type = Steady State
+  Steady State Max Iterations = 60
+  Max Output Level = 5
+  Post File = case.vtu
+End
+Body 1
+  Equation = 1
+  Material = 1
+  Initial Condition = 1
+End
+Equation 1
+  Active Solvers(1) = 1
+End
+Initial Condition 1
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Pressure = 0
+  Wall Distance = Variable Coordinate 1, Coordinate 2, Coordinate 3
+    Real MATC "a=0.5-abs(tx(0)-0.5); b=0.005-abs(tx(1)-0.005); c=0.5-abs(tx(2)-0.5); d=(a+b-abs(a-b))/2; (d+c-abs(d-c))/2"
+End
+Material 1
+  Density = 1
+  Viscosity = 0.001
+  Viscosity Model = mixing length
+  Mixing Length Max = Real 0.002
+  Ambient Eddy Viscosity = Real 0.0001
+  Ambient Eddy Viscosity Damping Distance = Real 0.003
+End
+Solver 1
+  Equation = Navier-Stokes
+  Procedure = "FlowSolve" "FlowSolver"
+  Variable = Flow Solution[Velocity:3 Pressure:1]
+  Exported Variable 1 = "-dofs 1 Wall Distance"
+  Stabilization Method = Stabilized
+  Nonlinear System Max Iterations = 1
+  Nonlinear System Newton After Iterations = 0
+  Nonlinear System Newton After Tolerance = 1
+  Nonlinear System Reset Newton = False
+  Nonlinear System Convergence Measure = solution
+  Nonlinear System Convergence Tolerance = 1e-9
+  Steady State Convergence Measure = solution
+  Steady State Convergence Tolerance = 1e-8
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStabL
+  Linear System Preconditioning = ILU1
+  Linear System Max Iterations = 500
+  Linear System Convergence Tolerance = 1e-11
+  Linear System Abort Not Converged = True
+  Linear System Multiply = Logical True
+  Linear System Multiply Consistent = Logical True
+  Linear System Diagonal Factor 1 = Real 2
+  Linear System Diagonal Factor 2 = Real 2
+  Linear System Diagonal Factor 3 = Real 2
+End
+Boundary Condition 1
+  Target Boundaries(5) = 1 2 3 5 6
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+End
+Boundary Condition 2
+  Target Boundaries(1) = 4
+  Velocity 1 = Variable Coordinate 1, Coordinate 3
+    Real MATC "16*tx(0)*(1-tx(0))*tx(1)*(1-tx(1))"
+  Velocity 2 = 0
+  Velocity 3 = 0
+End
+! One pressure gauge only; do not prescribe a whole pressure boundary.
+Boundary Condition 3
+  Target Coordinates(1,3) = 0 0 0
+  Pressure = 0
+End
+Solver 1 :: Reference Norm = Real 0.10631526

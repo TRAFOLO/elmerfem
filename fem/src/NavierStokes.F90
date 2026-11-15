@@ -189,7 +189,8 @@ MODULE NavierStokes
 
      LOGICAL :: Found, Transient, stat, Bubbles, PBubbles, Stabilize, &
                 VMS, P2P1, Isotropic, drhodp_found, Compressible, ViscNewtonLin, &
-                ViscNonnewtonian, LaplaceDiscretization,OutOfPlaneFlow
+                ViscNonnewtonian, LaplaceDiscretization,OutOfPlaneFlow, &
+                AnyViscNewtonLin
 
      ! local transposed values 
      REAL(KIND=dp) :: dBasisdxp(n*2)
@@ -377,6 +378,7 @@ MODULE NavierStokes
      END IF
 
      ViscNewtonLin = .FALSE.
+     AnyViscNewtonLin = .FALSE.
 
 !------------------------------------------------------------------------------
 !   Now we start integrating
@@ -534,6 +536,7 @@ MODULE NavierStokes
               Element, Nodes, n, n, u, v, w,  muder0, LocalIP=t )
 
           ViscNewtonLin = NewtonLinearization .AND. muder0/=0._dp
+          AnyViscNewtonLin = AnyViscNewtonLin .OR. ViscNewtonLin
           IF ( ViscNewtonLin )  Strain = (Grad+TRANSPOSE(Grad))/2
         END IF
 
@@ -1254,7 +1257,7 @@ MODULE NavierStokes
       END DO
     END DO
 
-   IF ( ViscNewtonLin ) THEN
+   IF ( AnyViscNewtonLin ) THEN
      SOL=0._dp
      SOL(1:c*n:c) = Ux(1:n)
      SOL(2:c*n:c) = Uy(1:n)

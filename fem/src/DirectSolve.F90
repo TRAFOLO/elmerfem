@@ -1570,10 +1570,11 @@ CONTAINS
   INCLUDE 'mpif.h'
 #  endif
 
-  INTEGER, ALLOCATABLE :: Owner(:)
-  INTEGER :: i,j,n,ip,ierr,icntlft,nzloc,nshift
-  REAL(KIND=dp) :: nullpivtol, regul
+  INTEGER, ALLOCATABLE :: Owner(:), NewOrder(:)
+  INTEGER :: i,j,n,ip,ierr,icntlft,nzloc,nshift, SamePattern, GlobalSame
+  REAL(KIND=dp) :: nullpivtol, regul, PhaseTime
   LOGICAL :: Factorize, FreeFactorize, stat, matsym, matspd, scaled, Refine
+  LOGICAL :: ReuseAnalysis, ReuseNow
   LOGICAL, ALLOCATABLE :: Unshifted(:)
 
   INTEGER, ALLOCATABLE :: memb(:)
@@ -1594,7 +1595,56 @@ CONTAINS
   IF ( .NOT. stat ) Refine = regul > 0.0_dp
   nshift = 0
 
-  IF ( Factorize .OR. .NOT.ASSOCIATED(A % MumpsID) ) THEN
+  ReuseAnalysis=ListGetLogical(Solver % Values,'Mumps Reuse Analysis',stat)
+  ReuseNow=.FALSE.
+  ! The collective pattern checks below need every rank, on every call.
+  IF(ReuseAnalysis .AND. A % Comm/=ELMER_COMM_WORLD) THEN
+    CALL Info('Mumps_SolveSystem', &
+        'Mumps Reuse Analysis is off: the solver does not run on all ranks',Level=5)
+    ReuseAnalysis=.FALSE.
+  END IF
+  IF(ReuseAnalysis) THEN
+    ! This path is deliberately limited to the unsymmetric real CHT systems.
+    ! Numerical factors must still be recomputed for every changed operator.
+    IF(regul>0.0_dp) CALL Fatal('Mumps_SolveSystem', &
+        'Mumps Reuse Analysis does not support Mumps Diagonal Regularization')
+    IF(ListGetLogical(Solver % Values,'Linear System Positive Definite',stat)) &
+        CALL Fatal('Mumps_SolveSystem','Mumps Reuse Analysis requires unsymmetric storage')
+    IF(.NOT.Factorize) CALL Fatal('Mumps_SolveSystem', &
+        'Mumps Reuse Analysis requires Linear System Refactorize = True')
+    IF(ASSOCIATED(A % MumpsID)) THEN
+      SamePattern=1
+      IF(A % MumpsID % sym/=0 .OR. A % MumpsID % Comm/=A % Comm) SamePattern=0
+      IF(SIZE(A % Gorder)/=A % NumberOfRows) SamePattern=0
+      IF(A % MumpsID % nz_loc/=A % Rows(A % NumberOfRows+1)-1) SamePattern=0
+      ! Recompute global numbering, including ownership, rather than assuming
+      ! an unchanged local nnz count implies an unchanged distributed graph.
+      IF(ASSOCIATED(A % ParallelInfo)) THEN
+        n=SIZE(A % ParallelInfo % GlobalDOFs)
+        ALLOCATE(NewOrder(n),Owner(n))
+        CALL ContinuousNumbering(A % ParallelInfo,A % Perm,NewOrder,Owner)
+        CALL MPI_ALLREDUCE(SUM(Owner),ip,1,MPI_INTEGER,MPI_SUM,A % Comm,ierr)
+        IF(ip/=A % MumpsID % n) SamePattern=0
+        IF(SIZE(NewOrder)/=SIZE(A % Gorder)) SamePattern=0
+        IF(SamePattern==1) THEN
+          IF(ANY(NewOrder/=A % Gorder)) SamePattern=0
+        END IF
+        DEALLOCATE(NewOrder,Owner)
+      END IF
+      IF(SamePattern==1) THEN
+        DO i=1,A % NumberOfRows
+          DO j=A % Rows(i),A % Rows(i+1)-1
+            IF(A % MumpsID % irn_loc(j)/=A % Gorder(i) .OR. &
+                A % MumpsID % jcn_loc(j)/=A % Gorder(A % Cols(j))) SamePattern=0
+          END DO
+        END DO
+      END IF
+      CALL MPI_ALLREDUCE(SamePattern,GlobalSame,1,MPI_INTEGER,MPI_MIN,A % Comm,ierr)
+      ReuseNow=GlobalSame==1
+    END IF
+  END IF
+
+  IF ( (Factorize .OR. .NOT.ASSOCIATED(A % MumpsID)) .AND. .NOT.ReuseNow ) THEN
     CALL FreeMumpsFactorizations(A)
     ALLOCATE(A % MumpsID)
 
@@ -1680,6 +1730,9 @@ CONTAINS
           END DO
         END DO
         DEALLOCATE( Unshifted )
+      ELSE IF(ReuseAnalysis) THEN
+        ALLOCATE(A % MumpsID % a_loc(A % MumpsID % nz_loc))
+        A % MumpsID % a_loc=A % Values(1:A % MumpsID % nz_loc)
       ELSE
         A % MumpsID % a_loc   => A % values
       END IF
@@ -1760,6 +1813,16 @@ CONTAINS
 
     CALL MumpsOrdering( Solver, A % MumpsID % icntl(7) )
     A % MumpsID % job = 4
+    IF(ReuseAnalysis) THEN
+      PhaseTime=CPUTime()
+      A % MumpsID % job = 1
+      CALL DMumps(A % MumpsID)
+      CALL CheckMumpsStatus('Mumps_SolveSystem','analysis','INFOG', &
+          A % MumpsID % infog(1),A % MumpsID % infog(2))
+      WRITE(Message,'(A,ES12.4)') 'Analysis time (s): ',CPUTime()-PhaseTime
+      CALL Info('Mumps_SolveSystem',Message,Level=5)
+      A % MumpsID % job = 2
+    END IF
     CALL DMumps(A % MumpsID)
     CALL Flush(6)
     CALL CheckMumpsStatus('Mumps_SolveSystem', 'analysis and factorization', 'INFOG', &
@@ -1775,6 +1838,22 @@ CONTAINS
     A % MumpsID % lsol_loc = A % mumpsid % info(23)
     ALLOCATE(A % MumpsID % sol_loc(A % MumpsId % lsol_loc))
     ALLOCATE(A % MumpsID % isol_loc(A % MumpsId % lsol_loc))
+  END IF
+
+  IF(ReuseNow) THEN
+    A % MumpsID % a_loc=A % Values(1:A % MumpsID % nz_loc)
+    PhaseTime=CPUTime()
+    A % MumpsID % job=2
+    CALL DMumps(A % MumpsID)
+    CALL CheckMumpsStatus('Mumps_SolveSystem','refactorization','INFOG', &
+        A % MumpsID % infog(1),A % MumpsID % infog(2))
+    WRITE(Message,'(A,ES12.4)') 'Reused analysis; factorization time (s): ',CPUTime()-PhaseTime
+    CALL Info('Mumps_SolveSystem',Message,Level=5)
+    ! Numerical pivoting can change the local solution distribution.
+    DEALLOCATE(A % MumpsID % sol_loc,A % MumpsID % isol_loc)
+    A % MumpsID % lsol_loc=A % MumpsID % info(23)
+    ALLOCATE(A % MumpsID % sol_loc(A % MumpsID % lsol_loc), &
+        A % MumpsID % isol_loc(A % MumpsID % lsol_loc))
   END IF
 
  ! sum the rhs from all procs. Could be done for neighbours only (i guess):
@@ -1821,7 +1900,7 @@ CONTAINS
   CALL MumpsCheckSolution(Solver, A, x, b, A % MumpsID % Comm)
 
   FreeFactorize = ListGetLogical( Solver % Values, 'Linear System Free Factorization', stat )
-  IF ( .NOT. stat ) FreeFactorize = .TRUE.
+  IF ( .NOT. stat ) FreeFactorize = .NOT. ReuseAnalysis
   IF ( Factorize .AND. FreeFactorize ) CALL FreeMumpsFactorizations(A)
 
 #else
