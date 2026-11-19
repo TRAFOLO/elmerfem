@@ -4,6 +4,8 @@ IF(HAVE_MUMPS)
 
   CONFIGURE_FILE(converged.sif converged.sif COPYONLY)
   CONFIGURE_FILE(limit.sif limit.sif COPYONLY)
+  CONFIGURE_FILE(limit_within_tolerance.sif limit_within_tolerance.sif COPYONLY)
+  CONFIGURE_FILE(limit_default_tolerance.sif limit_default_tolerance.sif COPYONLY)
   CONFIGURE_FILE(stagnated.sif stagnated.sif COPYONLY)
   file(COPY wire.grd DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
 
