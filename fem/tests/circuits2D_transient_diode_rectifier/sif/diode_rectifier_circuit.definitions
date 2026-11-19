@@ -1,0 +1,62 @@
+! Circuit definitions for circuits2D_transient_diode_rectifier.
+! Identical topology to circuits2D_transient_nonlinear_resistor: an ideal
+! voltage source in series with the FEM (stranded) coil component(1) and a
+! lumped resistor component(2). Here component(2) is the smoothed diode: its
+! Resistance depends on its OWN voltage -- see the sif.
+$ Circuits = 1
+
+! ------------------------ Circuit 1 ------------------------
+! Define variable count and initialize circuit matrices.
+$ C.1.perm = zeros(6)
+$ C.1.perm(0) = 0
+$ C.1.perm(1) = 1
+$ C.1.perm(2) = 2
+$ C.1.perm(3) = 3
+$ C.1.perm(4) = 4
+$ C.1.perm(5) = 5
+
+$ C.1.variables = 6
+$ C.1.A = zeros(6,6)
+$ C.1.B = zeros(6,6)
+$ C.1.Mre = zeros(6,6)
+$ C.1.Mim = zeros(6,6)
+
+! Define variables.
+! Export index mapping, verified at runtime with Max Output Level = 20
+! (CircuitUtils prints "Inserting variable <id>: <name>"):
+!   "crt i" collects the COMPONENT currents only  (i_component(1), i_component(2))
+!   "crt v" collects the COMPONENT voltages only  (v_component(1), v_component(2))
+! The bare source variables i_testsource / v_testsource are NOT exported --
+! Circuits_ToMeshVariable only picks CircuitVariables flagged isIvar / isVvar,
+! and those flags are set solely for names of the form i_component(N) /
+! v_component(N). Hence, in the order the components appear below,
+!   crt i 1 = coil current,  crt i 2 = diode current
+!   crt v 1 = coil voltage,  crt v 2 = diode voltage
+! (the numeric suffix disappears when a circuit has only one component, as in
+! circuits2D_transient_nonlinear_resistor_picard).
+$ C.1.name.1 = "i_testsource"
+$ C.1.name.2 = "v_testsource"
+$ C.1.name.3 = "i_component(1)"
+$ C.1.name.4 = "v_component(1)"
+! The diode (a lumped resistor with solution-dependent resistance). Elmer
+! writes the component equation R*I - V = 0 to the row of the voltage variable
+! (row 6), so it is not written here.
+$ C.1.name.5 = "i_component(2)" ! diode current
+$ C.1.name.6 = "v_component(2)" ! diode voltage
+
+! Define sources:
+!------------------
+$ C.1.B(0,1) = 1
+$ C.1.source.1 = "testsource"
+
+! Define network cycles:
+!-------------------------
+!Voltage relations.
+$ C.1.B(1,1) = -1
+$ C.1.B(1,3) = 1
+$ C.1.B(1,5) = 1
+!Current relations.
+$ C.1.B(2,0) = 1
+$ C.1.B(2,2) = -1
+$ C.1.B(4,0) = 1
+$ C.1.B(4,4) = -1
