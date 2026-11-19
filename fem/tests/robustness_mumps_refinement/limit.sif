@@ -1,5 +1,5 @@
 ! robustness_mumps_refinement, the case of mgdyn_harmonic_wire_mumps_regularization.
-! One correction allowed: the refinement stops at the iteration limit and warns.
+! One correction allowed: the refinement stops at the iteration limit above the tolerance and warns.
 
 Check Keywords "Warn"
 
@@ -63,6 +63,7 @@ Solver 1
   Use Tree Gauge = Logical False
   Mumps Diagonal Regularization = Real 1.0e-6
   Mumps Refinement Max Iterations = Integer 1
+  Mumps Refinement Tolerance = Real 1.0e-11
 End
 
 

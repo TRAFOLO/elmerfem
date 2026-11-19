@@ -2040,8 +2040,7 @@ CONTAINS
 
     maxit = ListGetInteger( Solver % Values, 'Mumps Refinement Max Iterations', stat )
     IF ( .NOT. stat ) maxit = 10
-    tol = ListGetConstReal( Solver % Values, 'Mumps Refinement Tolerance', stat )
-    IF ( .NOT. stat ) tol = 1.0e-11_dp
+    tol = MumpsRefinementTolerance( Solver )
 
     n = A % MumpsID % n
     nrows = A % NumberOfRows
@@ -2236,8 +2235,33 @@ CONTAINS
 
 
 !------------------------------------------------------------------------------
+!> 'Mumps Refinement Tolerance', by default 1e-11, or 10 times the 'Mumps
+!> Diagonal Regularization' when that is larger: the refinement of a shifted
+!> factorization of a singular system levels off near half the shift (5e-11
+!> for 1e-10), which is no inaccuracy of the solution (DEV-1678).
+!------------------------------------------------------------------------------
+  FUNCTION MumpsRefinementTolerance( Solver ) RESULT( tol )
+!------------------------------------------------------------------------------
+    TYPE(Solver_t) :: Solver
+    REAL(KIND=dp) :: tol
+    REAL(KIND=dp) :: regul
+    LOGICAL :: stat
+!------------------------------------------------------------------------------
+    tol = ListGetConstReal( Solver % Values, 'Mumps Refinement Tolerance', stat )
+    IF ( stat ) RETURN
+    regul = ListGetConstReal( Solver % Values, 'Mumps Diagonal Regularization', stat )
+    IF ( .NOT. stat ) regul = 0.0_dp
+    tol = MAX( 1.0e-11_dp, 10.0_dp * regul )
+!------------------------------------------------------------------------------
+  END FUNCTION MumpsRefinementTolerance
+!------------------------------------------------------------------------------
+
+
+!------------------------------------------------------------------------------
 !> Reports the iterative refinement of a MUMPS solution and warns when it did
-!> not reach 'Mumps Refinement Tolerance'.
+!> not reach 'Mumps Refinement Tolerance'. A kept solution within the tolerance
+!> has converged, also when the refinement stopped at the iteration limit or
+!> took back a diverging correction (DEV-1678).
 !------------------------------------------------------------------------------
   SUBROUTINE MumpsRefinementReport( Caller, it, omega0, omega, tol, Reason )
 !------------------------------------------------------------------------------
@@ -2245,6 +2269,7 @@ CONTAINS
     INTEGER :: it
     REAL(KIND=dp) :: omega0, omega, tol
 !------------------------------------------------------------------------------
+    IF ( omega <= tol ) Reason = 'converged'
     WRITE(Message, '(A,I0,A,ES10.3,A,ES10.3,3A)') 'MUMPS iterative refinement: ', it, &
         ' corrections, componentwise backward error ', omega0, ' -> ', omega, ' (', TRIM(Reason), ')'
     CALL Info(Caller, Message, Level=5)
@@ -2608,8 +2633,9 @@ CONTAINS
 !> of the first solution (MumpsRowScale, MumpsBackwardError); MumpsRefinementStop
 !> decides, at most 'Mumps Refinement Max Iterations' (default 10) corrections;
 !> MumpsRefinementReport warns when the error stays above 'Mumps Refinement
-!> Tolerance' (default 1e-11, well above the rounding level that a consistent
-!> system reaches; an inconsistent one levels off at its inconsistency). The size
+!> Tolerance' (MumpsRefinementTolerance: default 1e-11, well above the rounding
+!> level that a consistent system reaches, an inconsistent one levels off at its
+!> inconsistency; with a diagonal shift at least 10 times the shift). The size
 !> of the corrections is no measure: on a singular system their null-space part
 !> is rounding noise amplified by the inverse shift. Collective over the MUMPS
 !> communicator.
@@ -2639,8 +2665,7 @@ CONTAINS
 
     maxit = ListGetInteger( Solver % Values, 'Mumps Refinement Max Iterations', stat )
     IF ( .NOT. stat ) maxit = 10
-    tol = ListGetConstReal( Solver % Values, 'Mumps Refinement Tolerance', stat )
-    IF ( .NOT. stat ) tol = 1.0e-11_dp
+    tol = MumpsRefinementTolerance( Solver )
 
     n = A % ZMumpsID % n
     nrows = A % NumberOfRows
