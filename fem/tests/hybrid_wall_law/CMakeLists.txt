@@ -1,0 +1,6 @@
+INCLUDE(test_macros)
+INCLUDE_DIRECTORIES(${CMAKE_BINARY_DIR}/fem/src)
+ADD_ELMERTEST_MODULE(hybrid_wall_law WallLawCheck WallLawCheck.F90)
+CONFIGURE_FILE(wall_law.sif wall_law.sif COPYONLY)
+FILE(COPY block.grd DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+ADD_ELMER_TEST(hybrid_wall_law LABELS heat quick)
