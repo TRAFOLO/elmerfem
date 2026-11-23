@@ -26,8 +26,8 @@ PROD_DROP="$LOCAL_APPDATA/Trafolo_third_party"
 
 # ---- prune guard: refuse to package an unpruned install ----
 MODCOUNT=$(ls "$INSTALL/share/elmersolver/lib/"*.dll 2>/dev/null | wc -l)
-if [ "$MODCOUNT" -ne 18 ] || [ -f "$INSTALL/bin/ViewFactors.exe" ] || [ -d "$INSTALL/lib" ]; then
-  echo "ERROR: install is NOT pruned (modules=$MODCOUNT, want 18; ViewFactors/lib check failed)."
+if [ "$MODCOUNT" -ne 22 ] || [ -f "$INSTALL/bin/ViewFactors.exe" ] || [ -d "$INSTALL/lib" ]; then
+  echo "ERROR: install is NOT pruned (modules=$MODCOUNT, want 22; ViewFactors/lib check failed)."
   echo "Run prune_install.sh + license_audit.sh + run_gates.sh first."
   exit 1
 fi

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Phase 5 -- validation gates 1-9 against the (pruned) install.
+# Phase 5 -- validation gates 1-11 against the (pruned) install.
 #
 # Direct-solver (UMFPACK) gate design notes:
 #  * MUMPS is never shipped (CeCILL-C, GPL-incompatible); the bundled direct
@@ -369,6 +369,38 @@ for np in 1 4; do
     compare_scalars "$DI/1962/dat/1962.dat.names" "$dat" "$DM/1962/dat/$(basename "$dat")" "$L" || RESULT[$L]=FAIL
   done
   [ "$n" -gt 0 ] || { echo "  $L: no scalars written"; RESULT[$L]=FAIL; }
+  echo "[$L] ${RESULT[$L]}"
+done
+
+# Gate 11: TRAFOLO Thermal's conjugate heat transfer case, an EE30-like transformer on the floor in still
+# air with the HybridWallLaw wall formulas, serial and on 2 ranks. Hottest solid temperature against the
+# serial reference of the validated build.
+G11_REF_K=330.5966
+G11_TOL_K=0.05
+for np in 1 2; do
+  L="g11-thermal-np$np"; D="$GATES/g11_np$np"; mkdir -p "$D"
+  cp -r "$VAL/thermal_ee30/"* "$D/"
+  if [ "$np" = 1 ]; then
+    ( cd "$D" && ElmerSolver.exe case.sif > run.log 2>&1 ); rc=$?
+  else
+    ( cd "$D" && ElmerGrid.exe 2 2 mesh -partition 2 1 1 > grid2.log 2>&1 \
+      && "$MPIEXEC" -n 2 ElmerSolver_mpi.exe case.sif > run.log 2>&1 ); rc=$?
+  fi
+  RESULT[$L]=FAIL
+  # the parallel leg must really run on 2 tasks: a singleton gives the same scalar
+  tasks_ok=1
+  [ "$np" = 1 ] || grep -q "Running in parallel using $np tasks" "$D/run.log" 2>/dev/null || tasks_ok=0
+  if [ "$rc" -ne 0 ]; then
+    echo "  $L: the run exited with $rc"
+  elif [ "$tasks_ok" -ne 1 ]; then
+    echo "  $L: the solver did not report $np tasks"
+  elif grep -q "ALL DONE" "$D/run.log" 2>/dev/null && [ -s "$D/scalars.dat" ]; then
+    hot=$(tail -1 "$D/scalars.dat" | awk '{print $1}')
+    awk -v t="$hot" -v r="$G11_REF_K" -v d="$G11_TOL_K" 'BEGIN{exit !((t-r)^2 <= d^2)}' && RESULT[$L]=PASS
+    echo "  $L: hottest solid $hot K (reference $G11_REF_K K)"
+  else
+    echo "  $L: the run did not finish"
+  fi
   echo "[$L] ${RESULT[$L]}"
 done
 

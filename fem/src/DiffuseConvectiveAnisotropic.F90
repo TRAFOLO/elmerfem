@@ -162,7 +162,9 @@ MODULE DiffuseConvective
      LOGICAL :: Vms, Found, Transient, stat,Convection,ConvectAndStabilize,Bubbles, &
           FrictionHeat, PBubbles
      TYPE(ValueList_t), POINTER :: BodyForce, Material
-     LOGICAL :: GotCondModel
+     LOGICAL :: GotCondModel, TurbCond
+     REAL(KIND=dp) :: dCond
+     CHARACTER(:), ALLOCATABLE :: CondModel
      
 !------------------------------------------------------------------------------
 
@@ -174,6 +176,16 @@ MODULE DiffuseConvective
 
      Material => GetMaterial()
      GotCondModel = ListCheckPresent( Material,'Heat Conductivity Model')
+     ! The turbulent models add c_p*mu_t/Pr_t, which does not depend on the conductivity it is added to:
+     ! it is evaluated once per integration point instead of once per diagonal term.
+     TurbCond = .FALSE.
+     IF( GotCondModel ) THEN
+       CondModel = GetString( Material,'Heat Conductivity Model', Found )
+       SELECT CASE( CondModel )
+       CASE( 'ke','k-epsilon','turbulent' )
+         TurbCond = .TRUE.
+       END SELECT
+     END IF
 
 
      dim = CoordinateSystemDimension()
@@ -360,7 +372,13 @@ MODULE DiffuseConvective
          END DO
        END DO
 
-       IF( GotCondModel ) THEN       
+       IF( TurbCond ) THEN
+         dCond = EffectiveConductivity( 0.0_dp, rho, Element, &
+             NodalTemperature, UX,UY,UZ, Nodes, n, n, u, v, w )
+         DO i=1,dim
+           C2(i,i) = C2(i,i) + dCond
+         END DO
+       ELSE IF( GotCondModel ) THEN
          DO i=1,dim
            C2(i,i) = EffectiveConductivity( C2(i,i), rho, Element, &
                NodalTemperature, UX,UY,UZ, Nodes, n, n, u, v, w )

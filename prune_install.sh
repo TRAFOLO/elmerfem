@@ -1,5 +1,6 @@
 #!/bin/bash
-# Phase 3 -- prune the install tree to what TRAFOLO uses (18-module whitelist).
+# Phase 3 -- prune the install tree to what TRAFOLO uses (22-module whitelist: TRAFOLO Magnetics and
+# TRAFOLO Thermal share this one bundle).
 set -e
 INSTALL="${ELMER_INSTALL:-$(cd "$(dirname "$0")" && pwd)/../elmer-install-win}"
 LIB="$INSTALL/share/elmersolver/lib"
@@ -7,11 +8,11 @@ LIB="$INSTALL/share/elmersolver/lib"
 echo "=== size before prune ==="
 du -sh "$INSTALL"
 
-# --- solver module whitelist: the modules the TRAFOLO app's models use ---
+# --- solver module whitelist: the modules the TRAFOLO apps' models use ---
 KEEP="CircuitsAndDynamics CoilSolver CoordinateTransform DirectionSolver HeatSolve \
 LoadFields MagnetoDynamics MagnetoDynamics2D Poisson ProcessFields \
 ReloadData ResultOutputSolve SaveData StatCurrentSolve StatElecSolve StatElecSolveVec \
-WPotentialSolver htc_udf"
+WPotentialSolver htc_udf FlowSolve DistanceSolve ModelPDE HybridWallLaw"   # the last four: TRAFOLO Thermal's conjugate heat transfer
 
 cd "$LIB"
 mkdir -p /tmp/elmer_keep

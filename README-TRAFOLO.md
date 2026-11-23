@@ -656,7 +656,7 @@ distributed archive.
 
    Do not install `mingw-w64-ucrt-x86_64-mumps`: that is MUMPS 5.x, CeCILL-C, not GPL-compatible, and is
    never part of the distributed build (see `build_msys2.sh`).
-3. Put the MS-MPI 10.1.1 redistributable installer next to this checkout, at
+3. Put the MS-MPI 10.1.3 redistributable installer next to this checkout, at
    `../msmpi_redist/msmpisetup.exe`
    ([download](https://download.microsoft.com/download/7/2/7/72731ebb-b63c-4170-ade7-836966263a8f/msmpisetup.exe)).
    The build installs it into the bundle as `redist\msmpisetup.exe`, and packaging refuses to
@@ -685,7 +685,7 @@ gate in the summary is `PASS`.
 | `mumps` | `mumps410/build_mumps410.sh` | Builds the public-domain MUMPS 4.10.0 (METIS orderings, no PORD) into `MUMPS410_INSTALL` |
 | `build` | `build_msys2.sh` + `ninja` | Configures with the distributed flag set (UMFPACK on, MUMPS 4.10.0 linked statically, MS-MPI, OpenBLAS, Lua, OpenMP off), builds |
 | `deploy` | `deploy_msys2.sh` | `ninja install` + copies the UCRT64 runtime DLL closure into `bin\` |
-| `prune` | `prune_install.sh` | Keeps the 18 solver modules the TRAFOLO app uses, drops dev tools, headers and import libs |
+| `prune` | `prune_install.sh` | Keeps the 22 solver modules the TRAFOLO apps use (TRAFOLO Magnetics and TRAFOLO Thermal share the bundle), drops dev tools, headers and import libs |
 | `audit` | `license_audit.sh` | Fails on any GPL-incompatible or unlisted DLL in the import closure, and on an Elmer binary that imports `libgomp-1.dll`; writes `licenses\` and `SOURCE.txt` |
 | `gates` | `run_gates.sh` | Runs the validation cases against the pruned install (inputs in `trafolo_bundle/validation/`); all must pass |
 | `package` | `package_bundle.sh` | Refuses an unpruned or unaudited install, zips it |
@@ -711,6 +711,7 @@ Validation gates (`run_gates.sh`, against the pruned install):
 | 8 | StatElecSolveVec thin-layer BC responds to permittivity (Eps0 fix regression) |
 | 9 | Nonlinear lumped circuit elements: `circuits2D_transient_nonlinear_resistor` + `_picard` |
 | 10 | MUMPS 4.10.0 with the TRAFOLO A-V block on `circuits_harmonic_massive`, serial + 4-rank, against the iterative run |
+| 11 | TRAFOLO Thermal conjugate heat transfer (EE30-like part in still air, HybridWallLaw), serial + 2-rank: hottest solid within 0.05 K of 330.5966 K |
 
 The parallel direct solver is MUMPS 4.10.0 (public domain). MUMPS 5.x (CeCILL-C) and CPardiso
 cannot be shipped.

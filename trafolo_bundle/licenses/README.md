@@ -18,8 +18,9 @@ The GNU GPL version 3 and LGPL version 3, verbatim from https://www.gnu.org/lice
 https://www.gnu.org/licenses/lgpl-3.0.txt (7 652 bytes, sha256
 `e3a994d82e644b03a792a930f574002658412f62407f5fee083f2555c5f23118`), downloaded 2026-10-09.
 Shipped when MUMPS is linked: `libelmersolver.dll` then contains Apache-2.0 METIS, which is
-compatible with version 3 of the GNU licenses only, so the bundle distributes that library
-under LGPL-3.0-or-later and the GPL solver modules under GPL-3.0-or-later (decision 2026-10-09).
+compatible with version 3 of the GNU licenses only, and the library also compiles in
+GPL-2.0-or-later files (CircuitUtils, binio), so the bundle distributes that library as a whole and the GPL
+solver modules under GPL-3.0-or-later.
 
 ## LICENSE.ARPACK.txt
 
