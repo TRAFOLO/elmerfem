@@ -1403,6 +1403,8 @@ END FUNCTION MaskedNorm
       ELSE
         Report = .FALSE.
       END IF
+      ! A trial with a strategy left moves on to it, whatever the failure
+      IF( Fallback ) DoFatal = .FALSE.
       IF( Report ) THEN
         IF( DoFatal ) THEN
           CALL NumericalError('IterSolve',Message,.TRUE.)
