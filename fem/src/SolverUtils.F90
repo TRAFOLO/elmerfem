@@ -15550,6 +15550,8 @@ END FUNCTION SearchNodeL
         END IF
         Solver % Variable % Norm = 0.0_dp
         Solver % Variable % NonlinConverged = 1
+        ! x = 0 solves the system exactly: a linear system trial must not count it as failed
+        Solver % Variable % LinConverged = 1
      
         RETURN
       END IF
@@ -15675,6 +15677,7 @@ END FUNCTION SearchNodeL
       END IF
       Solver % Variable % Norm = 0.0_dp
       Solver % Variable % NonlinConverged = 1
+      Solver % Variable % LinConverged = 1
 
       RETURN
     END IF
