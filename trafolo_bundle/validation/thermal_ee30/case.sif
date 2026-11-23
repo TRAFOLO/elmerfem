@@ -1,0 +1,583 @@
+#function lawg(dt, e1) local r = 1; if e1 > 0 then local e = e1*dt; r = 1/math.sqrt(1+200.5/e^1.5) end; if e1 < 0 then r = 0 end; return r end
+#function hwall(ts, ta, tr, a, b) local dt = ts-tr; if dt < 0.02 then dt = 0.02 end; local da = ts-ta; if da < 0.02 then da = 0.02 end; local h = (a+b*dt^0.25)*dt/da; if h > 60.0 then h = 60.0 end; return h end
+#function hlaw(ts, tr, a, b) local dt = ts-tr; if dt < 0.02 then dt = 0.02 end; return a+b*dt^0.25 end
+#function qlaw(ts, tr, a, b) local dt = ts-tr; if dt < 0 then dt = 0 end; return (a+b*dt^0.25)*dt end
+#function offwall(x) local v = x[1]; if x[0] < 0.0005 then v = 0 end; return v end
+#function hlawg(ts, tr, a, b, e1) local dt = ts-tr; if dt < 0.02 then dt = 0.02 end; return (a+b*dt^0.25)*lawg(dt, e1) end
+#function qlawg(ts, tr, a, b, e1) local dt = ts-tr; if dt < 0.02 then dt = 0.02 end; return (a+b*dt^0.25)*lawg(dt, e1)*dt end
+#function hgap(ts, ta, a, b, hfd) local dt = math.abs(ts-ta); local h = a+b*dt^0.25; if h < hfd then h = hfd end; return h end
+#function hmix(ts, tr, a, b, e1, hf) local dt = ts-tr; if dt < 0.02 then dt = 0.02 end; local hn = (a+b*dt^0.25)*lawg(dt, e1); return (hn^3+hf^3)^(1/3) end
+#function qmix(ts, tr, a, b, e1, hf) local dt = ts-tr; if dt < 0 then dt = 0 end; return hmix(ts, tr, a, b, e1, hf)*dt end
+#function hmixc(ts, tr, a, b, e1, hf, h0) return hmix(ts, tr, a, b, e1, hf)+h0 end
+#function qmixc(ts, tr, a, b, e1, hf, h0) local dt = ts-tr; if dt < 0 then dt = 0 end; return hmixc(ts, tr, a, b, e1, hf, h0)*dt end
+#function hlawr(ts, tr, y, y0, a, bx) local dt = ts-tr; if dt < 0.02 then dt = 0.02 end; local x = y-y0; if x < 0.003 then x = 0.003 end; return a+bx*dt^0.25/x^0.25 end
+#function qlawr(ts, tr, y, y0, a, bx) local dt = ts-tr; if dt < 0 then dt = 0 end; local x = y-y0; if x < 0.003 then x = 0.003 end; return (a+bx*dt^0.25/x^0.25)*dt end
+#function refsrc(x) local w = (x[0]-0.009)/0.0027; if w < 0 then w = 0 end; if w > 1 then w = 1 end; return w*x[1] end
+$ function hwall(ts,ta,tr,a,b) { dt = ts-tr; if (dt < 0.02) dt = 0.02; da = ts-ta; if (da < 0.02) da = 0.02; h = (a+b*dt^0.25)*dt/da; if (h > 60.0) h = 60.0; _hwall = h; }
+$ function hlaw(ts,tr,a,b) { dt = ts-tr; if (dt < 0.02) dt = 0.02; _hlaw = a+b*dt^0.25; }
+$ function qlaw(ts,tr,a,b) { dt = ts-tr; if (dt < 0) dt = 0; _qlaw = (a+b*dt^0.25)*dt; }
+$ function offwall(tx) { _offwall = tx(1); if (tx(0) < 0.0005) _offwall = 0; }
+$ function hlawg(ts,tr,a,b,e1) { dt = ts-tr; if (dt < 0.02) dt = 0.02; r = 1; if (e1 > 0) { e = e1*dt; r = 1/sqrt(1+200.5/e^1.5); } if (e1 < 0) r = 0; _hlawg = (a+b*dt^0.25)*r; }
+$ function qlawg(ts,tr,a,b,e1) { dt = ts-tr; if (dt < 0.02) dt = 0.02; r = 1; if (e1 > 0) { e = e1*dt; r = 1/sqrt(1+200.5/e^1.5); } if (e1 < 0) r = 0; _qlawg = (a+b*dt^0.25)*r*dt; }
+$ function hgap(ts,ta,a,b,hfd) { dt = abs(ts-ta); h = a+b*dt^0.25; if (h < hfd) h = hfd; _hgap = h; }
+$ function hmix(ts,tr,a,b,e1,hf) { dt = ts-tr; if (dt < 0.02) dt = 0.02; r = 1; if (e1 > 0) { e = e1*dt; r = 1/sqrt(1+200.5/e^1.5); } if (e1 < 0) r = 0; hn = (a+b*dt^0.25)*r; _hmix = (hn^3+hf^3)^(1/3); }
+$ function hmixc(ts,tr,a,b,e1,hf,h0) { q = hmix(ts,tr,a,b,e1,hf); _hmixc = q+h0; }
+$ function qmixc(ts,tr,a,b,e1,hf,h0) { dt = ts-tr; if (dt < 0) dt = 0; q = hmixc(ts,tr,a,b,e1,hf,h0); _qmixc = q*dt; }
+$ function qmix(ts,tr,a,b,e1,hf) { dt = ts-tr; if (dt < 0) dt = 0; q = hmix(ts,tr,a,b,e1,hf); _qmix = q*dt; }
+$ function hlawr(ts,tr,y,y0,a,bx) { dt = ts-tr; if (dt < 0.02) dt = 0.02; x = y-y0; if (x < 0.003) x = 0.003; _hlawr = a+bx*dt^0.25/x^0.25; }
+$ function qlawr(ts,tr,y,y0,a,bx) { dt = ts-tr; if (dt < 0) dt = 0; x = y-y0; if (x < 0.003) x = 0.003; _qlawr = (a+bx*dt^0.25/x^0.25)*dt; }
+$ function refsrc(tx) { w = (tx(0)-0.009)/0.0027; if (w < 0) w = 0; if (w > 1) w = 1; _refsrc = w*tx(1); }
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "mesh"
+End
+
+Simulation
+  Coordinate System = Cartesian 3D
+  Max Output Level = 5
+  Simulation Type = Steady State
+  Output Intervals = 1
+  Steady State Max Iterations = 50
+  Steady State Anderson = Logical True
+  Steady State Anderson Depth = Integer 3
+  Steady State Anderson After = Integer 35
+  Steady State Anderson Relaxation = Real 0.8
+End
+
+Constants
+  Gravity(4) = 0 -1 0 9.81
+  Stefan Boltzmann = 5.670374419e-08
+End
+
+Initial Condition 1
+  Temperature = 300.0
+  Tsolid = Real 300.0
+  Tref = Real 300.0
+  Velocity 1 = 0.0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Pressure = 0
+End
+
+Equation 1
+  Active Solvers(4) = 1 2 3 5
+  Convection = Computed
+End
+
+Equation 2
+  Active Solvers(1) = 4
+  Convection = None
+End
+Solver 1
+  Equation = Distance
+  Exec Solver = Before Simulation
+  Procedure = "DistanceSolve" "DistanceSolver1"
+  Variable = "Wall Distance"
+  Nonlinear System Max Iterations = 200
+  Nonlinear System Convergence Tolerance = 1e-5
+  Distance Pseudo DT = Real 0.001
+  Steady State Convergence Tolerance = 1e-4
+  Linear System Solver = Direct
+  Linear System Direct Method = MUMPS
+End
+
+Solver 2
+  Equation = Navier-Stokes
+  Procedure = "FlowSolve" "FlowSolver"
+  Variable = Flow Solution[Velocity:3 Pressure:1]
+  Stabilization Method = Stabilized
+  Nonlinear System Max Iterations = 1
+  Nonlinear System Convergence Tolerance = 1e-5
+  Nonlinear System Newton After Iterations = 1000000
+  Nonlinear System Relaxation Factor = 1.0
+  Steady State Convergence Tolerance = 1e-4
+  Linear System Solver = Direct
+  Linear System Direct Method = MUMPS
+  Linear System Multiply = Logical True
+  Linear System Multiply Consistent = Logical True
+  Linear System Diagonal Factor 1 = Real 2.0
+  Linear System Diagonal Factor 2 = Real 2.0
+  Linear System Diagonal Factor 3 = Real 2.0
+  Nonlinear System Newton After Tolerance = 0.0
+  Nonlinear System Reset Newton = Logical True
+  Mumps Percentage Increase Working Space = Integer 80
+  Linear System Refactorize = Logical True
+  Linear System Free Factorization = Logical False
+  Mumps Reuse Analysis = Logical True
+  Steady State Convergence Measure = String "solution"
+End
+
+Solver 3
+  Equation = Reference Temperature
+  Procedure = "ModelPDE" "AdvDiffSolver"
+  Variable = Tref
+  Mumps Percentage Increase Working Space = Integer 300
+  Nonlinear System Max Iterations = 1
+  Steady State Convergence Tolerance = 1e-5
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Preconditioning = ILU0
+  Linear System Convergence Tolerance = 1e-10
+  Linear System Max Iterations = 1000
+  Steady State Convergence Measure = String "solution"
+End
+
+Solver 4
+  Equation = Solid Heat
+  Procedure = "HeatSolve" "HeatSolver"
+  Variable = Tsolid
+  Namespace = String "solid:"
+  Nonlinear System Max Iterations = 1
+  Nonlinear System Relaxation Factor = 1.0
+  Nonlinear System Convergence Tolerance = 1e-6
+  Steady State Convergence Tolerance = 1e-5
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Preconditioning = ILU0
+  Linear System Convergence Tolerance = 1e-10
+  Linear System Max Iterations = 1000
+  Steady State Convergence Measure = String "solution"
+End
+
+Solver 5
+  Equation = Heat Equation
+  Procedure = "HeatSolve" "HeatSolver"
+  Variable = Temperature
+  Namespace = String "air:"
+  Stabilize = True
+  Nonlinear System Max Iterations = 1
+  Nonlinear System Relaxation Factor = 0.7
+  Nonlinear System Convergence Tolerance = 1e-6
+  Steady State Convergence Tolerance = 1e-5
+  Linear System Solver = Iterative
+  Linear System Iterative Method = BiCGStab
+  Linear System Preconditioning = ILU0
+  Linear System Convergence Tolerance = 1e-10
+  Linear System Max Iterations = 1000
+  Algebraic Upwinding = Logical True
+  Mumps Percentage Increase Working Space = Integer 80
+  Linear System Refactorize = Logical True
+  Linear System Free Factorization = Logical False
+  Mumps Reuse Analysis = Logical True
+  Steady State Convergence Measure = String "solution"
+End
+
+Solver 6
+  Equation = ResultOutput
+  Procedure = "ResultOutputSolve" "ResultOutputSolver"
+  Exec Solver = After Simulation
+  Output File Name = result
+  Vtu Format = True
+  Save Geometry Ids = True
+End
+
+Solver 7
+  Equation = SaveScalars
+  Procedure = "SaveData" "SaveScalars"
+  Exec Solver = After Timestep
+  Filename = scalars.dat
+  Variable 1 = Tsolid
+  Operator 1 = max
+  Operator 2 = min
+  Variable 3 = Temperature
+  Operator 3 = max
+  Parallel Reduce = True
+End
+
+Body 1
+  Target Bodies(1) = 1
+  Name = "ee30_1"
+  Equation = 2
+  Material = 1
+  Body Force = 1
+  Initial Condition = 1
+End
+
+Material 1
+  Heat Conductivity = 4.0
+  Density = 1.0
+  Heat Capacity = 1000.0
+End
+
+Body Force 1
+  Volumetric Heat Source = Variable coupled iter
+    Real
+      1 3342.245989
+      10 33422.45989
+      100000 33422.45989
+    End
+End
+
+Body 2
+  Target Bodies(1) = 2
+  Name = "ee30_2"
+  Equation = 2
+  Material = 2
+  Body Force = 2
+  Initial Condition = 1
+End
+
+Material 2
+  Heat Conductivity = 40.0
+  Density = 1.0
+  Heat Capacity = 1000.0
+End
+
+Body Force 2
+  Volumetric Heat Source = Variable coupled iter
+    Real
+      1 15645.1676
+      10 156451.676
+      100000 156451.676
+    End
+End
+
+Body 3
+  Target Bodies(1) = 3
+  Name = "air"
+  Equation = 1
+  Material = 3
+  Body Force = 3
+  Initial Condition = 1
+End
+
+Material 3
+  Density = 1.17659
+  Viscosity = Variable coupled iter
+    Real
+      1 5.537749e-03
+      8 1.845916e-03
+      15 5.537749e-04
+      21 1.845916e-04
+      26 5.537749e-05
+      30 1.845916e-05
+      30000 1.845916e-05
+    End
+  Heat Conductivity = Variable Wall Distance
+    Real
+      0.0 7.86951
+      0.006 7.86951
+      0.0078 0.0262317
+      1000.0 0.0262317
+    End
+  Heat Capacity = 1006.43
+  Heat Expansion Coefficient = 0.0033333333
+  Reference Temperature = 300.0
+  Viscosity Model = mixing length
+  Mixing Length Max = Real 0.005
+  Ambient Eddy Viscosity = Real 0.0
+  Ambient Eddy Viscosity Damping Distance = Real 0.004596686826439313
+  Heat Conductivity Model = Turbulent
+  Reaction Coefficient = Variable Wall Distance
+    Real
+      0.0 0.0
+      0.009 0.0
+      0.0117 1.0
+      1000.0 1.0
+    End
+  Convection Coefficient = Variable Wall Distance
+    Real
+      0.0 1
+      0.009 1
+      0.0117 0.0
+      1000.0 0.0
+    End
+  Convection Velocity 1 = Equals Velocity 1
+  Convection Velocity 2 = Equals Velocity 2
+  Convection Velocity 3 = Equals Velocity 3
+  Diffusion Coefficient = Variable Wall Distance
+    Real
+      0.0 0.0064
+      0.009 0.0064
+      0.0117 3.6e-05
+      1000.0 3.6e-05
+    End
+  Turbulent Prandtl Number = 0.85
+End
+
+Body Force 3
+  Boussinesq = True
+  Field Source = Variable Wall Distance, Temperature
+    Real LUA "refsrc(tx)"
+End
+
+Body 4
+  Target Bodies(1) = 4
+  Name = "still air"
+  Equation = 2
+  Material = 4
+  Initial Condition = 1
+End
+
+Material 4
+  Heat Conductivity = 0.0262317
+  Density = 1.17659
+  Heat Capacity = 1006.43
+End
+
+Boundary Condition 1
+  Target Boundaries(1) = 100
+  Name = "vertical 30 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  Hybrid Wall Law = Integer 3
+  Hybrid Wall Law A = Real 2.24954
+  Hybrid Wall Law B = Real 0.996143
+  solid: Heat Transfer Coefficient = Variable Tsolid, Tref, Coordinate 2
+    Real Procedure "HybridWallLaw" "WallHeatTransferCoefficient"
+  solid: External Temperature = Equals Tref
+  air: Heat Flux = Variable Tsolid, Tref, Coordinate 2
+    Real Procedure "HybridWallLaw" "WallHeatFlux"
+End
+
+Boundary Condition 2
+  Target Boundaries(1) = 101
+  Name = "up 10 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  Hybrid Wall Law = Integer 1
+  Hybrid Wall Law A = Real 0.992971
+  Hybrid Wall Law B = Real 2.64702
+  solid: Heat Transfer Coefficient = Variable Tsolid, Tref, Coordinate 2
+    Real Procedure "HybridWallLaw" "WallHeatTransferCoefficient"
+  solid: External Temperature = Equals Tref
+  air: Heat Flux = Variable Tsolid, Tref, Coordinate 2
+    Real Procedure "HybridWallLaw" "WallHeatFlux"
+End
+
+Boundary Condition 3
+  Target Boundaries(1) = 102
+  Name = "up 10 mm, gap 19.7 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 2.66489
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 2.66489
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 4
+  Target Boundaries(1) = 103
+  Name = "vertical 30 mm, gap 0.8 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 62.0869
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 62.0869
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 5
+  Target Boundaries(1) = 104
+  Name = "up 10 mm, gap 0.8 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 62.0869
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 62.0869
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 6
+  Target Boundaries(1) = 105
+  Name = "vertical 30 mm, gap 1.9 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 28.2598
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 28.2598
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 7
+  Target Boundaries(1) = 106
+  Name = "down 10 mm, gap 0.8 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 62.0869
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 62.0869
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 8
+  Target Boundaries(1) = 107
+  Name = "down 10 mm, gap 19.7 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 2.66489
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 2.66489
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 9
+  Target Boundaries(1) = 108
+  Name = "down 10 mm, gap 5.3 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 9.89456
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 9.89456
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 10
+  Target Boundaries(1) = 109
+  Name = "vertical 20 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  Hybrid Wall Law = Integer 3
+  Hybrid Wall Law A = Real 2.54683
+  Hybrid Wall Law B = Real 0.996143
+  Hybrid Wall Law Run Start = Real 0.006
+  solid: Heat Transfer Coefficient = Variable Tsolid, Tref, Coordinate 2
+    Real Procedure "HybridWallLaw" "WallHeatTransferCoefficient"
+  solid: External Temperature = Equals Tref
+  air: Heat Flux = Variable Tsolid, Tref, Coordinate 2
+    Real Procedure "HybridWallLaw" "WallHeatFlux"
+End
+
+Boundary Condition 11
+  Target Boundaries(1) = 110
+  Name = "vertical 20 mm, gap 0.8 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 62.0869
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 62.0869
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 12
+  Target Boundaries(1) = 111
+  Name = "vertical 20 mm, gap 1.9 mm"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+  solid: Heat Transfer Coefficient = 28.2598
+  solid: External Temperature = Equals Temperature
+  air: Heat Transfer Coefficient = 28.2598
+  air: External Temperature = Equals Tsolid
+End
+
+Boundary Condition 13
+  Target Boundaries(2) = 12 13
+  Name = "still air: mouths of narrow gaps and walls behind them"
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+End
+
+Boundary Condition 14
+  Target Boundaries(1) = 21
+  Heat Transfer Coefficient = 20.0
+  External Temperature = 300.0
+End
+
+Boundary Condition 15
+  Target Boundaries(1) = 20
+  Velocity 1 = 0
+  Velocity 2 = 0
+  Velocity 3 = 0
+  Noslip Wall BC = Logical True
+End
+
+Boundary Condition 16
+  Target Boundaries(1) = 34
+  External Pressure = 0
+  Normal-Tangential Velocity = Logical False
+  External Temperature = 300.0
+  Heat Transfer Coefficient = Variable Velocity 3
+    Real LUA "592.078*(math.abs(tx[0])+tx[0])+0.01"
+  Slip Coefficient 1 = Variable Velocity 3
+    Real LUA "0.5883*(math.abs(tx[0])+tx[0])"
+  Slip Coefficient 2 = Variable Velocity 3
+    Real LUA "0.5883*(math.abs(tx[0])+tx[0])"
+  Slip Coefficient 3 = Variable Velocity 3
+    Real LUA "0.5883*(math.abs(tx[0])+tx[0])"
+End
+
+Boundary Condition 17
+  Target Boundaries(1) = 31
+  External Pressure = 0
+  Normal-Tangential Velocity = Logical False
+  External Temperature = 300.0
+  Heat Transfer Coefficient = Variable Velocity 1
+    Real LUA "592.078*(math.abs(tx[0])+tx[0])+0.01"
+  Slip Coefficient 1 = Variable Velocity 1
+    Real LUA "0.5883*(math.abs(tx[0])+tx[0])"
+  Slip Coefficient 2 = Variable Velocity 1
+    Real LUA "0.5883*(math.abs(tx[0])+tx[0])"
+  Slip Coefficient 3 = Variable Velocity 1
+    Real LUA "0.5883*(math.abs(tx[0])+tx[0])"
+End
+
+Boundary Condition 18
+  Target Boundaries(1) = 32
+  External Pressure = 0
+  Normal-Tangential Velocity = Logical False
+  External Temperature = 300.0
+  Heat Transfer Coefficient = Variable Velocity 1
+    Real LUA "592.078*(math.abs(tx[0])-tx[0])+0.01"
+  Slip Coefficient 1 = Variable Velocity 1
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+  Slip Coefficient 2 = Variable Velocity 1
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+  Slip Coefficient 3 = Variable Velocity 1
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+End
+
+Boundary Condition 19
+  Target Boundaries(1) = 35
+  External Pressure = 0
+  Normal-Tangential Velocity = Logical False
+  External Temperature = 300.0
+  Heat Transfer Coefficient = Variable Velocity 3
+    Real LUA "592.078*(math.abs(tx[0])-tx[0])+0.01"
+  Slip Coefficient 1 = Variable Velocity 3
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+  Slip Coefficient 2 = Variable Velocity 3
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+  Slip Coefficient 3 = Variable Velocity 3
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+End
+
+Boundary Condition 20
+  Target Boundaries(1) = 33
+  External Pressure = 0
+  Normal-Tangential Velocity = Logical False
+  External Temperature = 300.0
+  Heat Transfer Coefficient = Variable Velocity 2
+    Real LUA "592.078*(math.abs(tx[0])-tx[0])+0.01"
+  Slip Coefficient 1 = Variable Velocity 2
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+  Slip Coefficient 2 = Variable Velocity 2
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+  Slip Coefficient 3 = Variable Velocity 2
+    Real LUA "0.5883*(math.abs(tx[0])-tx[0])"
+End

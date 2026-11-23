@@ -45,8 +45,11 @@ echo "=== aggregated import closure ==="; echo "$ALL_IMPORTS"
 for bad in mumps parmetis scotch umfpack suitesparse cholmod fftw readline gsl mkl pardiso hypre zoltan; do
   if echo "$ALL_IMPORTS" | grep -qi "$bad"; then echo "FORBIDDEN IMPORT: $bad"; FAIL=1; fi
 done
-# msmpi may be imported (system prerequisite) but must not be SHIPPED
-if ls bin/msmpi.dll 2>/dev/null; then echo "FORBIDDEN FILE: bin/msmpi.dll must not be zipped"; FAIL=1; fi
+# msmpi may be imported (system prerequisite) but must not be SHIPPED; Microsoft's installer in redist/
+# installs it system-wide. A reused install prefix must not carry an older app-local MPI either.
+for f in msmpi.dll mpiexec.exe smpd.exe; do
+  if ls "bin/$f" 2>/dev/null; then echo "FORBIDDEN FILE: bin/$f must not be zipped"; FAIL=1; fi
+done
 
 # The DLLs built from this tree; all other DLLs in bin/ come from MSYS2.
 ELMER_BUILT='^(libelmersolver|libmatc|libfhuti|libmpi_stubs|libarpack|libparpack)\.dll$'
@@ -209,9 +212,12 @@ cat > "$NOTICES" <<'EOF'
 # Third-party notices
 
 The ElmerFEM solver bundle for TRAFOLO is a Windows build (MSYS2 UCRT64) of the TRAFOLO fork of
-Elmer FEM. The Elmer libraries libelmersolver, matc and fhutiter (`bin/libelmersolver.dll`,
-`bin/libmatc.dll`, `bin/libfhuti.dll`) are licensed under LGPL-2.1-or-later (`LGPL-2.1.txt`);
-ElmerGrid and the GPL solver modules are licensed under GPL-2.0-or-later (`GPL-2.txt`). See
+Elmer FEM. Most sources of the solver library `bin/libelmersolver.dll` and the libraries matc and
+fhutiter (`bin/libmatc.dll`, `bin/libfhuti.dll`) are licensed under LGPL-2.1-or-later (`LGPL-2.1.txt`);
+the solver library also compiles in GPL-2.0-or-later files (`fem/src/CircuitUtils.F90` and the
+`fem/src/binio` binary I/O), so `bin/libelmersolver.dll` as a whole is distributed under the GPL (see
+the license version section below). ElmerGrid and the GPL solver modules are licensed under
+GPL-2.0-or-later (`GPL-2.txt`). See
 `ElmerLicensePolicy.md`, `LICENSES` and `LICENSES_GPL.txt`. The source code is at
 https://github.com/TRAFOLO/elmerfem, at the commit recorded in `SOURCE.txt` in the bundle root.
 
@@ -258,11 +264,11 @@ if [ -n "$MUMPS_ROWS" ]; then
     printf '%s' "$MUMPS_ROWS"
     printf '\n## License version of this bundle\n\n'
     printf '%s\n' "\`bin/libelmersolver.dll\` contains METIS (Apache-2.0), which is compatible with version 3 of" \
-      "the GNU licenses only. TRAFOLO therefore distributes \`bin/libelmersolver.dll\` under" \
-      "LGPL-3.0-or-later (\`LGPL-3.0.txt\`, which adds permissions to \`GPL-3.0.txt\`) and the" \
-      "GPL-2.0-or-later Elmer solver modules that run with it under GPL-3.0-or-later (\`GPL-3.0.txt\`)," \
-      "as the \"or (at your option) any later version\" terms of their licenses permit. The source files" \
-      "keep their original license headers."
+      "the GNU licenses only, and GPL-2.0-or-later files (\`fem/src/CircuitUtils.F90\`, \`fem/src/binio\`)." \
+      "TRAFOLO therefore distributes \`bin/libelmersolver.dll\` as a whole, and the GPL-2.0-or-later Elmer" \
+      "solver modules that run with it, under GPL-3.0-or-later (\`GPL-3.0.txt\`), as the \"or (at your" \
+      "option) any later version\" terms of their licenses permit. The source files keep their original" \
+      "license headers; the LGPL files among them remain available under the LGPL on their own."
   } >> "$NOTICES"
 fi
 {
@@ -296,9 +302,9 @@ if [ -n "$MUMPS_ROWS" ]; then
   https://snapshot.debian.org/file/5971cd9ccd8c2d789a222140ca6a3b71d6f5229d),
   with METIS 5.1.0 (MSYS2 $METIS_PKG $metis_ver, Apache-2.0) for the
   orderings. MUMPS 5.x (CeCILL-C) is not used. Because Apache-2.0 METIS
-  is linked into bin/libelmersolver.dll, that library is distributed
-  under LGPL-3.0-or-later and the GPL solver modules under
-  GPL-3.0-or-later (licenses/LGPL-3.0.txt, licenses/GPL-3.0.txt)."
+  and GPL-2.0-or-later CircuitUtils and binio are linked into
+  bin/libelmersolver.dll, that library as a whole and the GPL solver
+  modules are distributed under GPL-3.0-or-later (licenses/GPL-3.0.txt)."
 else
   MUMPS_NOTE="No MUMPS in this bundle."
 fi
@@ -311,7 +317,7 @@ Elmer sources (GPL-2.0+/LGPL-2.1, see licenses/):
   TRAFOLO fork of ElmerFEM, branch 'trafolo'
   commit $FORK_COMMIT
   Repository: https://github.com/TRAFOLO/elmerfem
-  Includes TRAFOLO modules ProcessFields, LoadFields, htc_udf
+  Includes TRAFOLO modules ProcessFields, LoadFields, htc_udf, HybridWallLaw
   (fem/src/modules/, GPL-2.0+). Corresponding sources are available
   from the repository at the commit above, including build_all.sh and
   the scripts it runs to build this bundle.
@@ -324,8 +330,9 @@ UMFPACK 4.4 (direct solver; vendored in-tree at umfpack/ of the fork,
 $MUMPS_NOTE
 
 Dynamic third-party runtimes in bin/:
-  OpenBLAS (BSD-3), GCC runtimes libgcc/libgfortran/libquadmath
-  (GPL with runtime exception), libwinpthread (MIT/BSD), the MS-MPI
+  OpenBLAS (BSD-3), GCC runtimes libgcc/libgfortran/libstdc++/libgomp
+  (GPL with runtime exception), libquadmath (LGPL-2.1-or-later),
+  libwinpthread (MIT/BSD), the MS-MPI
   Fortran interface libmsmpifec (MIT, built by MSYS2 from Microsoft-MPI)
   when present, and any further DLLs enumerated by the audit above (see
   licenses/ for their texts).
