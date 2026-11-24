@@ -86,7 +86,7 @@ SUBROUTINE WallLawCheck(Model, Solver, dt, Transient)
     END DO
   END DO
   ! a node where Elmer found no reference air temperature passes no heat; a channel face with
-  ! A = 1 would give h = 1 and q = 0.02 W/m^2 without the guard
+  ! A = 1 would give h = 1 and a flux without bound without the guard
   CALL ListAddInteger(BC, 'Hybrid Wall Law', 5)
   CALL ListAddConstReal(BC, 'Hybrid Wall Law A', 1.0_dp)
   CALL ListAddConstReal(BC, 'Hybrid Wall Law B', 0.0_dp)
@@ -119,39 +119,34 @@ CONTAINS
     CALL Info('WallLawCheck', Message, Level=1)
   END SUBROUTINE Report
 
-  ! The MATC expressions of the case writer, spelled out.
+  ! The wall formulas, spelled out: the coefficient at dT >= 0.02 K, the flux as that
+  ! coefficient times dT with its sign.
   SUBROUTINE Reference(law, diff, y, p, hRef, qRef)
     INTEGER, INTENT(IN) :: law
     REAL(KIND=dp), INTENT(IN) :: diff, y, p(7)
     REAL(KIND=dp), INTENT(OUT) :: hRef, qRef
-    REAL(KIND=dp) :: dh, dq, x, r
+    REAL(KIND=dp) :: dh, x, r
 
     dh = MAX(diff, 0.02_dp)
-    dq = MAX(diff, 0.0_dp)
     x = MAX(y - p(6), 0.003_dp)
     SELECT CASE (law)
     CASE (1)
       hRef = p(1) + p(2) * dh**0.25_dp
-      qRef = (p(1) + p(2) * dq**0.25_dp) * dq
     CASE (2)
       hRef = p(1) + p(2) * Strip(dh) * dh**0.25_dp
-      qRef = (p(1) + p(2) * Strip(dq) * dq**0.25_dp) * dq
     CASE (3)
       hRef = p(1) + p(2) * dh**0.25_dp / x**0.25_dp
-      qRef = (p(1) + p(2) * dq**0.25_dp / x**0.25_dp) * dq
     CASE (4)
       hRef = p(1) + p(2) * Strip(dh) * dh**0.25_dp / x**0.25_dp
-      qRef = (p(1) + p(2) * Strip(dq) * dq**0.25_dp / x**0.25_dp) * dq
     CASE (5)
       r = Channel(dh, p(3))
       hRef = (p(1) + p(2) * dh**0.25_dp) * r
-      qRef = hRef * dh
     CASE (6, 7)
       r = Channel(dh, p(3))
       hRef = (((p(1) + p(2) * dh**0.25_dp) * r)**3 + p(4)**3)**(1.0_dp / 3.0_dp)
       IF (law == 7) hRef = hRef + p(5)
-      qRef = hRef * dq
     END SELECT
+    qRef = hRef * diff
   END SUBROUTINE Reference
 
   REAL(KIND=dp) FUNCTION Channel(diff, e1)

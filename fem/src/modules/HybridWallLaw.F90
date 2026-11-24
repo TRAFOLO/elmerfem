@@ -61,9 +61,9 @@
 !>    Strip dT, Strip Exponent
 !>                          the B term of a strip face is scaled by
 !>                          clip(dT / Strip dT, 0.5, 2)^Strip Exponent; Strip dT is 50 K if not given
-!> dT = Tsolid - Tref. The coefficient takes dT >= 0.02 K; the flux is zero
-!> where the wall is colder than the air, except on channel faces, which always
-!> pass the heat of dT = 0.02 K.
+!> dT = Tsolid - Tref. The coefficient takes dT >= 0.02 K on both sides; the
+!> flux is that coefficient times dT with its sign: where a wall is colder than
+!> the air, the air gives up the heat the wall takes.
 !> For HeatSolve. HeatSolveVec hands over values interpolated to integration points,
 !> where a node without Tref is no longer recognisable; do not use it with these laws.
 !> \ingroup UDFs
@@ -213,20 +213,15 @@ FUNCTION WallHeatFlux(Model, n, x) RESULT(q)
   INTEGER :: n
   REAL(KIND=dp) :: x(*), q
   TYPE(WallLawParameters_t) :: p
-  REAL(KIND=dp) :: dt, h
+  REAL(KIND=dp) :: h
   LOGICAL :: Ok
 
   q = 0.0_dp
   IF (MissingInput(x(1:3))) RETURN
   CALL HybridWallLawParameters(p)
-  IF (p % Kind == WALL_LAW_CHANNEL) THEN
-    dt = MAX(x(1) - x(2), 0.02_dp)
-  ELSE
-    dt = MAX(x(1) - x(2), 0.0_dp)
-  END IF
-  CALL WallCoefficient(p, dt, x(3), h, Ok)
+  CALL WallCoefficient(p, MAX(x(1) - x(2), 0.02_dp), x(3), h, Ok)
   IF (.NOT. Ok) CALL Fatal('HybridWallLaw', 'Unknown "Hybrid Wall Law" '//I2S(p % Kind)//'.')
-  q = h * dt
+  q = h * (x(1) - x(2))
 END FUNCTION WallHeatFlux
 
 
