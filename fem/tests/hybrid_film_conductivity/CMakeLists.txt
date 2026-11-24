@@ -1,0 +1,6 @@
+INCLUDE(test_macros)
+INCLUDE_DIRECTORIES(${CMAKE_BINARY_DIR}/fem/src)
+ADD_ELMERTEST_MODULE(hybrid_film_conductivity FilmCheck FilmCheck.F90)
+CONFIGURE_FILE(film.sif film.sif COPYONLY)
+FILE(COPY block.grd DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+ADD_ELMER_TEST(hybrid_film_conductivity LABELS heat quick)
