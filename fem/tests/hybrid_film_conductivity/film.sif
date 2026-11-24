@@ -1,0 +1,55 @@
+! DEV-1667: FilmCheck sets the wall distance and the air velocity at the nodes of one
+! element of each body and compares FilmConductivity of HybridWallLaw with the law
+! written out. Body 1 has the film of forced flow, body 2 the film that does not fade.
+
+Header
+  CHECK KEYWORDS Warn
+  Mesh DB "." "block"
+  Include Path ""
+  Results Directory ""
+End
+
+Simulation
+  Max Output Level = 5
+  Coordinate System = Cartesian
+  Simulation Type = Steady State
+  Steady State Max Iterations = 1
+End
+
+Body 1
+  Target Bodies(1) = 1
+  Equation = 1
+  Material = 1
+End
+
+Body 2
+  Target Bodies(1) = 2
+  Equation = 1
+  Material = 2
+End
+
+Equation 1
+  Active Solvers(1) = 1
+End
+
+Material 1
+  Hybrid Film Air Conductivity = Real 0.0262
+  Hybrid Film Conductivity = Real 7.86
+  Hybrid Film Thickness = Real 0.006
+  Hybrid Film Speed = Real 0.5
+  Hybrid Film Wall Coefficient = Real 64
+End
+
+Material 2
+  Hybrid Film Air Conductivity = Real 0.0262
+  Hybrid Film Conductivity = Real 7.86
+  Hybrid Film Thickness = Real 0.006
+End
+
+Solver 1
+  Equation = "FilmCheck"
+  Procedure = "FilmCheck" "FilmCheck"
+  Variable = -nooutput FilmCheckField
+  Exported Variable 1 = Wall Distance
+  Exported Variable 2 = -dofs 4 Flow Solution
+End
