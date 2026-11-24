@@ -1,0 +1,16 @@
+include(test_macros)
+configure_file(case.sif case.sif COPYONLY)
+file(COPY ELMERSOLVER_STARTINFO channel.grd DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/")
+# An input that differs from rank to rank takes the Lua interpreter: runtest.cmake looks for
+# this mark. One rank solves with UMFPACK, two ranks with MUMPS.
+file(REMOVE "${CMAKE_CURRENT_BINARY_DIR}/rank_dependent_input")
+if(WITH_LUA)
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/rank_dependent_input" "")
+endif()
+if(HAVE_MUMPS AND HAVE_UMFPACK)
+  ADD_ELMER_TEST(SteadyAndersonSkip NPROCS 1 2 LABELS cht quick)
+elseif(HAVE_UMFPACK)
+  ADD_ELMER_TEST(SteadyAndersonSkip LABELS cht quick)
+elseif(HAVE_MUMPS)
+  ADD_ELMER_TEST(SteadyAndersonSkip NPROCS 2 LABELS cht quick)
+endif()
