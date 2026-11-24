@@ -84,6 +84,7 @@ MODULE MainUtils
       TYPE(Solver_t), POINTER :: Solver => NULL()
       REAL(KIND=dp), ALLOCATABLE :: x(:), oldx(:), f(:), oldf(:), trial(:)
       REAL(KIND=dp), ALLOCATABLE :: dx(:,:), df(:,:), scale(:)
+      LOGICAL :: Skipped = .FALSE.
     END TYPE
     TYPE(SteadyAndersonField_t), ALLOCATABLE, PRIVATE, SAVE :: AA(:)
     INTEGER, PRIVATE, SAVE :: AADepth=0, AACount=0, AALast=0
@@ -167,7 +168,7 @@ CONTAINS
     TYPE(Solver_t), POINTER :: S
     TYPE(Variable_t), POINTER :: Iter
     LOGICAL :: Found
-    INTEGER :: k,j,n,m,after,it
+    INTEGER :: k,j,n,m,after,it,skip(2),agreed(2),ierr
 
     Enabled = ListGetLogical(Model % Simulation,'Steady State Anderson',Found)
     IF(.NOT.Enabled) RETURN
@@ -191,11 +192,34 @@ CONTAINS
     IF(.NOT.Enabled) RETURN
     IF(.NOT.ALLOCATED(AA)) ALLOCATE(AA(Model % NumberOfSolvers))
     IF(SIZE(AA)/=Model % NumberOfSolvers) CALL Fatal('SteadyAnderson','Solver set changed')
+    ! Every rank has to keep the same solvers out: the scalar products of the others are
+    ! taken over all ranks. The flags are compared for every solver, whatever else it is,
+    ! before a rank takes a path of its own below: the least and the largest must agree.
+    IF(ParEnv_Common % PEs>1) THEN
+      DO k=1,Model % NumberOfSolvers
+        skip = 0
+        IF(ListGetLogical(Model % Solvers(k) % Values,'Steady State Anderson Skip',Found)) skip = [1,-1]
+        CALL MPI_ALLREDUCE(skip,agreed,2,MPI_INTEGER,MPI_MIN,ELMER_COMM_WORLD,ierr)
+        IF(agreed(1)/=-agreed(2)) CALL Fatal('SteadyAnderson', &
+            'Steady State Anderson Skip of solver '//I2S(k)//' differs between the ranks')
+      END DO
+    END IF
     DO k=1,Model % NumberOfSolvers
       S => Model % Solvers(k)
       IF(S % SolverExecWhen/=SOLVER_EXEC_ALWAYS) CYCLE
       IF(.NOT.ASSOCIATED(S % Variable)) CYCLE
       IF(.NOT.ASSOCIATED(S % Variable % Values)) CYCLE
+      ! A solver can stay out: its field is then the one its own solve left, with the
+      ! bounds and balances that solve keeps and an extrapolation does not. The history
+      ! of the others is built without it, so it stays out for as long as that history lasts.
+      IF(ListGetLogical(S % Values,'Steady State Anderson Skip',Found)) THEN
+        IF(ALLOCATED(AA(k) % x)) CALL Fatal('SteadyAnderson', &
+            'Steady State Anderson Skip must not be switched on during a run')
+        AA(k) % Skipped=.TRUE.
+        CYCLE
+      END IF
+      IF(AA(k) % Skipped) CALL Fatal('SteadyAnderson', &
+          'Steady State Anderson Skip must not be switched off during a run')
       IF(.NOT.ASSOCIATED(S % Matrix)) &
           CALL Fatal('SteadyAnderson','Active variables must have a matrix')
       ! Prescribed values are restored in Cartesian components only.
@@ -228,7 +252,56 @@ CONTAINS
           CALL Fatal('SteadyAnderson','Requires a fixed mesh and variable layout')
       AA(k) % x=S % Variable % Values
     END DO
+    ! An accelerated solver on the same values would extrapolate the field that stays out:
+    ! all of it or, where one field is a component of the other, a part.
+    DO k=1,SIZE(AA)
+      IF(.NOT.AA(k) % Skipped) CYCLE
+      DO j=1,SIZE(AA)
+        IF(.NOT.ASSOCIATED(AA(j) % Solver)) CYCLE
+        IF(SteadyFieldsOverlap(Model % Solvers(k) % Variable % Values,AA(j) % Solver % Variable % Values)) &
+            CALL Fatal('SteadyAnderson','A solver kept out of the acceleration shares its variable with an accelerated one')
+      END DO
+    END DO
   END SUBROUTINE SteadyAndersonBegin
+
+  ! Whether two fields hold some of the same entries. A component of a vector field is a
+  ! strided view of it, which a comparison of the whole arrays does not see, and two
+  ! components of one field interleave without sharing an entry: the address of every
+  ! entry of the shorter view is looked up in the progression of the other.
+  FUNCTION SteadyFieldsOverlap(a,b) RESULT(Overlap)
+    USE, INTRINSIC :: ISO_C_BINDING, ONLY : C_LOC, C_INTPTR_T
+    REAL(KIND=dp), POINTER :: a(:), b(:)
+    LOGICAL :: Overlap
+    REAL(KIND=dp), POINTER :: s(:), l(:)
+    INTEGER(C_INTPTR_T) :: l1,ln,step,x
+    INTEGER :: i
+
+    Overlap = .FALSE.
+    IF(.NOT.ASSOCIATED(a) .OR. .NOT.ASSOCIATED(b)) RETURN
+    IF(SIZE(a)==0 .OR. SIZE(b)==0) RETURN
+    ! the views as given, whatever their lower bounds
+    IF(SIZE(a)<=SIZE(b)) THEN
+      s => a
+      l => b
+    ELSE
+      s => b
+      l => a
+    END IF
+    l1 = TRANSFER(C_LOC(l(LBOUND(l,1))),l1)
+    ln = TRANSFER(C_LOC(l(UBOUND(l,1))),ln)
+    step = 0
+    IF(SIZE(l)>1) step = (ln-l1)/(SIZE(l)-1)
+    DO i=LBOUND(s,1),UBOUND(s,1)
+      x = TRANSFER(C_LOC(s(i)),x)
+      IF(x<MIN(l1,ln) .OR. x>MAX(l1,ln)) CYCLE
+      IF(step==0) THEN
+        Overlap = x==l1
+      ELSE
+        Overlap = MOD(x-l1,step)==0
+      END IF
+      IF(Overlap) RETURN
+    END DO
+  END FUNCTION SteadyFieldsOverlap
 
   SUBROUTINE SteadyAndersonEnd(Model,Done)
     TYPE(Model_t) :: Model
